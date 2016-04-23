@@ -1,0 +1,398 @@
+diff --git a/src/backend/access/transam/varsup.c b/src/backend/access/transam/varsup.c
+new file mode 100644
+index 2f7e645..3d7e255
+*** a/src/backend/access/transam/varsup.c
+--- b/src/backend/access/transam/varsup.c
+***************
+*** 33,38 ****
+--- 33,41 ----
+  /* pointer to "variable cache" in shared memory (set up by shmem.c) */
+  VariableCache ShmemVariableCache = NULL;
+  
++ int JJ_xid=0;
++ extern int	JJ_vac;
++ 
+  
+  /*
+   * Allocate the next XID for a new transaction or subtransaction.
+*************** GetNewTransactionId(bool isSubXact)
+*** 168,173 ****
+--- 171,181 ----
+  	 *
+  	 * Extend pg_subtrans and pg_commit_ts too.
+  	 */
++ 	{
++ 	int		incr;
++ 	for (incr=0; incr <=JJ_xid; incr++)
++ 	{
++ 	xid = ShmemVariableCache->nextXid;
+  	ExtendCLOG(xid);
+  	ExtendCommitTs(xid);
+  	ExtendSUBTRANS(xid);
+*************** GetNewTransactionId(bool isSubXact)
+*** 179,184 ****
+--- 187,194 ----
+  	 * more XIDs until there is CLOG space for them.
+  	 */
+  	TransactionIdAdvance(ShmemVariableCache->nextXid);
++ 	}
++ 	}
+  
+  	/*
+  	 * We must store the new XID into the shared ProcArray before releasing
+*************** SetTransactionIdLimit(TransactionId olde
+*** 342,349 ****
+  	LWLockRelease(XidGenLock);
+  
+  	/* Log the info */
+! 	ereport(DEBUG1,
+! 			(errmsg("transaction ID wrap limit is %u, limited by database with OID %u",
+  					xidWrapLimit, oldest_datoid)));
+  
+  	/*
+--- 352,359 ----
+  	LWLockRelease(XidGenLock);
+  
+  	/* Log the info */
+! 	ereport(LOG,
+! 			(errmsg("JJ transaction ID wrap limit is %u, limited by database with OID %u",
+  					xidWrapLimit, oldest_datoid)));
+  
+  	/*
+*************** ForceTransactionIdLimitUpdate(void)
+*** 420,425 ****
+--- 430,446 ----
+  	oldestXidDB = ShmemVariableCache->oldestXidDB;
+  	LWLockRelease(XidGenLock);
+  
++ 	if (JJ_vac) {
++ 	elog(LOG,"JJ ForceTransactionIdLimitUpdate in %d: !normal %d, !valid %d, follows %d (%u, %u), !exists %d", MyDatabaseId,
++ 		!TransactionIdIsNormal(oldestXid),
++ 		!TransactionIdIsValid(xidVacLimit),
++ 		TransactionIdFollowsOrEquals(nextXid, xidVacLimit),
++ 		nextXid, xidVacLimit,
++  		!SearchSysCacheExists1(DATABASEOID, ObjectIdGetDatum(oldestXidDB))
++ 	);
++ 	};
++ 
++ 
+  	if (!TransactionIdIsNormal(oldestXid))
+  		return true;			/* shouldn't happen, but just in case */
+  	if (!TransactionIdIsValid(xidVacLimit))
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+new file mode 100644
+index f9644db..c14e2af
+*** a/src/backend/access/transam/xlog.c
+--- b/src/backend/access/transam/xlog.c
+*************** BootStrapXLOG(void)
+*** 4823,4828 ****
+--- 4823,4829 ----
+  	ShmemVariableCache->nextOid = checkPoint.nextOid;
+  	ShmemVariableCache->oidCount = 0;
+  	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
++ 	//elog(LOG,"JJ SetTransactionIDLimit %d", checkPoint.oldestXid);
+  	SetTransactionIdLimit(checkPoint.oldestXid, checkPoint.oldestXidDB);
+  	SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
+  	SetCommitTsLimit(InvalidTransactionId, InvalidTransactionId);
+*************** StartupXLOG(void)
+*** 6341,6346 ****
+--- 6342,6348 ----
+  	ShmemVariableCache->nextOid = checkPoint.nextOid;
+  	ShmemVariableCache->oidCount = 0;
+  	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
++ 	//elog(LOG,"JJ SetTransactionIDLimit %d", checkPoint.oldestXid);
+  	SetTransactionIdLimit(checkPoint.oldestXid, checkPoint.oldestXidDB);
+  	SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
+  	SetCommitTsLimit(checkPoint.oldestCommitTsXid,
+*************** xlog_redo(XLogReaderState *record)
+*** 9249,9254 ****
+--- 9251,9257 ----
+  
+  		MultiXactAdvanceOldest(checkPoint.oldestMulti,
+  							   checkPoint.oldestMultiDB);
++ 		//elog(LOG,"JJ SetTransactionIDLimit %d", checkPoint.oldestXid);
+  		SetTransactionIdLimit(checkPoint.oldestXid, checkPoint.oldestXidDB);
+  
+  		/*
+*************** xlog_redo(XLogReaderState *record)
+*** 9346,9351 ****
+--- 9349,9355 ----
+  		 */
+  		MultiXactAdvanceOldest(checkPoint.oldestMulti,
+  							   checkPoint.oldestMultiDB);
++ 		//elog(LOG,"JJ maybe SetTransactionIDLimit %d", checkPoint.oldestXid);
+  		if (TransactionIdPrecedes(ShmemVariableCache->oldestXid,
+  								  checkPoint.oldestXid))
+  			SetTransactionIdLimit(checkPoint.oldestXid,
+diff --git a/src/backend/commands/vacuum.c b/src/backend/commands/vacuum.c
+new file mode 100644
+index 93361a0..eabedae
+*** a/src/backend/commands/vacuum.c
+--- b/src/backend/commands/vacuum.c
+*************** int			vacuum_freeze_min_age;
+*** 58,63 ****
+--- 58,65 ----
+  int			vacuum_freeze_table_age;
+  int			vacuum_multixact_freeze_min_age;
+  int			vacuum_multixact_freeze_table_age;
++ int			JJ_vac=0;
++ 
+  
+  
+  /* A few variables that don't seem worth passing around as parameters */
+*************** vacuum_set_xid_limits(Relation rel,
+*** 531,536 ****
+--- 533,539 ----
+  	}
+  
+  	*freezeLimit = limit;
++ 	if (JJ_vac) elog(LOG,"JJ freezeLimit %d", *freezeLimit);
+  
+  	/*
+  	 * Compute the multixact age for which freezing is urgent.  This is
+*************** vacuum_set_xid_limits(Relation rel,
+*** 585,590 ****
+--- 588,595 ----
+  		 * VACUUM schedule, the nightly VACUUM gets a chance to freeze tuples
+  		 * before anti-wraparound autovacuum is launched.
+  		 */
++ 		if (JJ_vac) elog(LOG,"JJ freeze_min_age %d vacuum_freeze_table_age %d freeze_table_age %d ReadNew %d", freeze_min_age, 
++                            vacuum_freeze_table_age, freeze_table_age,ReadNewTransactionId());
+  		freezetable = freeze_table_age;
+  		if (freezetable < 0)
+  			freezetable = vacuum_freeze_table_age;
+*************** vac_update_datfrozenxid(void)
+*** 1022,1027 ****
+--- 1027,1033 ----
+  	 * truncate pg_clog and/or pg_multixact.  Also do it if the shared
+  	 * XID-wrap-limit info is stale, since this action will update that too.
+  	 */
++ 	if (JJ_vac && dirty) elog(LOG,"JJ updating in %d without call to ForceTransactionIdLimitUpdate", MyDatabaseId);
+  	if (dirty || ForceTransactionIdLimitUpdate())
+  		vac_truncate_clog(newFrozenXid, newMinMulti,
+  						  lastSaneFrozenXid, lastSaneMinMulti);
+diff --git a/src/backend/commands/vacuumlazy.c b/src/backend/commands/vacuumlazy.c
+new file mode 100644
+index 426e756..a20af02
+*** a/src/backend/commands/vacuumlazy.c
+--- b/src/backend/commands/vacuumlazy.c
+***************
+*** 64,69 ****
+--- 64,70 ----
+  #include "utils/tqual.h"
+  
+  
++ extern int JJ_vac;
+  /*
+   * Space/time tradeoff parameters: do these need to be user-tunable?
+   *
+*************** lazy_vacuum_rel(Relation onerel, int opt
+*** 233,238 ****
+--- 234,241 ----
+  	aggressive |= MultiXactIdPrecedesOrEquals(onerel->rd_rel->relminmxid,
+  											  mxactFullScanLimit);
+  
++ 	if (JJ_vac) elog(LOG,"JJ aggresive %d, relfrozenid %d", aggressive, onerel->rd_rel->relfrozenxid);
++ 
+  	vacrelstats = (LVRelStats *) palloc0(sizeof(LVRelStats));
+  
+  	vacrelstats->old_rel_pages = onerel->rd_rel->relpages;
+diff --git a/src/backend/postmaster/autovacuum.c b/src/backend/postmaster/autovacuum.c
+new file mode 100644
+index e2859df..db79486
+*** a/src/backend/postmaster/autovacuum.c
+--- b/src/backend/postmaster/autovacuum.c
+*************** int			autovacuum_vac_cost_delay;
+*** 122,127 ****
+--- 122,128 ----
+  int			autovacuum_vac_cost_limit;
+  
+  int			Log_autovacuum_min_duration = -1;
++ extern int  JJ_vac;
+  
+  /* how long to keep pgstat data in the launcher, in milliseconds */
+  #define STATS_READ_DELAY 1000
+*************** AutoVacWorkerMain(int argc, char *argv[]
+*** 1635,1642 ****
+  		InitPostgres(NULL, dbid, NULL, InvalidOid, dbname);
+  		SetProcessingMode(NormalProcessing);
+  		set_ps_display(dbname, false);
+- 		ereport(DEBUG1,
+- 				(errmsg("autovacuum: processing database \"%s\"", dbname)));
+  
+  		if (PostAuthDelay)
+  			pg_usleep(PostAuthDelay * 1000000L);
+--- 1636,1641 ----
+*************** AutoVacWorkerMain(int argc, char *argv[]
+*** 1644,1650 ****
+--- 1643,1653 ----
+  		/* And do an appropriate amount of work */
+  		recentXid = ReadNewTransactionId();
+  		recentMulti = ReadNextMultiXactId();
++ 		if (JJ_vac) ereport(LOG,
++ 				(errmsg("autovacuum: processing database \"%s\" at recent Xid of %u recent mxid of %u", dbname,recentXid,recentMulti)));
+  		do_autovacuum();
++ 		if (JJ_vac) ereport(LOG,
++ 				(errmsg("autovacuum: done processing database \"%s\" at recent Xid of %u recent mxid of %u", dbname,ReadNewTransactionId(),ReadNextMultiXactId())));
+  	}
+  
+  	/*
+*************** relation_needs_vacanalyze(Oid relid,
+*** 2761,2773 ****
+  		 * reset, because if that happens, the last vacuum and analyze counts
+  		 * will be reset too.
+  		 */
+- 		elog(DEBUG3, "%s: vac: %.0f (threshold %.0f), anl: %.0f (threshold %.0f)",
+- 			 NameStr(classForm->relname),
+- 			 vactuples, vacthresh, anltuples, anlthresh);
+  
+  		/* Determine if this table needs vacuum or analyze. */
+  		*dovacuum = force_vacuum || (vactuples > vacthresh);
+  		*doanalyze = (anltuples > anlthresh);
+  	}
+  	else
+  	{
+--- 2764,2777 ----
+  		 * reset, because if that happens, the last vacuum and analyze counts
+  		 * will be reset too.
+  		 */
+  
+  		/* Determine if this table needs vacuum or analyze. */
+  		*dovacuum = force_vacuum || (vactuples > vacthresh);
+  		*doanalyze = (anltuples > anlthresh);
++ 
++ 		if (JJ_vac) elog(LOG, "%s: vac: %.0f (threshold %.0f), anl: %.0f (threshold %.0f) wraparound %d dovaccum %d doanalyze %d",
++ 			 NameStr(classForm->relname),
++ 			 vactuples, vacthresh, anltuples, anlthresh, *wraparound, *dovacuum, *doanalyze);
+  	}
+  	else
+  	{
+diff --git a/src/backend/storage/smgr/md.c b/src/backend/storage/smgr/md.c
+new file mode 100644
+index 578276d..612606c
+*** a/src/backend/storage/smgr/md.c
+--- b/src/backend/storage/smgr/md.c
+***************
+*** 67,72 ****
+--- 67,74 ----
+  #define FILE_POSSIBLY_DELETED(err)	((err) == ENOENT || (err) == EACCES)
+  #endif
+  
++ int JJ_torn_page=0;
++ 
+  /*
+   *	The magnetic disk storage manager keeps track of open file
+   *	descriptors in its own descriptor pool.  This is done to make it
+*************** mdwrite(SMgrRelation reln, ForkNumber fo
+*** 794,799 ****
+--- 796,802 ----
+  	off_t		seekpos;
+  	int			nbytes;
+  	MdfdVec    *v;
++         static int counter=0;
+  
+  	/* This assert is too expensive to have on normally ... */
+  #ifdef CHECK_WRITE_VS_EXTEND
+*************** mdwrite(SMgrRelation reln, ForkNumber fo
+*** 818,824 ****
+  				 errmsg("could not seek to block %u in file \"%s\": %m",
+  						blocknum, FilePathName(v->mdfd_vfd))));
+  
+! 	nbytes = FileWrite(v->mdfd_vfd, buffer, BLCKSZ);
+  
+  	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
+  										reln->smgr_rnode.node.spcNode,
+--- 821,838 ----
+  				 errmsg("could not seek to block %u in file \"%s\": %m",
+  						blocknum, FilePathName(v->mdfd_vfd))));
+  
+!         if (JJ_torn_page > 0 && counter++ > JJ_torn_page && !RecoveryInProgress()) {
+! 	  nbytes = FileWrite(v->mdfd_vfd, buffer, BLCKSZ/3);
+! 		ereport(FATAL,
+! 				(errcode(ERRCODE_DISK_FULL),
+! 				 errmsg("could not write block %u of relation %s: wrote only %d of %d bytes",
+! 						blocknum,
+! 						relpath(reln->smgr_rnode, forknum),
+! 						nbytes, BLCKSZ),
+! 				 errhint("JJ is screwing with the database.")));
+!         } else {
+! 	  nbytes = FileWrite(v->mdfd_vfd, buffer, BLCKSZ);
+! 	}
+  
+  	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
+  										reln->smgr_rnode.node.spcNode,
+diff --git a/src/backend/utils/misc/guc.c b/src/backend/utils/misc/guc.c
+new file mode 100644
+index fb091bc..887245d
+*** a/src/backend/utils/misc/guc.c
+--- b/src/backend/utils/misc/guc.c
+***************
+*** 106,111 ****
+--- 106,114 ----
+  /* XXX these should appear in other modules' header files */
+  extern bool Log_disconnections;
+  extern int	CommitDelay;
++ int	JJ_torn_page;
++ extern int	JJ_xid;
++ extern int	JJ_vac;
+  extern int	CommitSiblings;
+  extern char *default_tablespace;
+  extern char *temp_tablespaces;
+*************** static struct config_int ConfigureNamesI
+*** 2352,2357 ****
+--- 2355,2387 ----
+  	},
+  
+  	{
++ 		{"JJ_torn_page", PGC_USERSET, WAL_SETTINGS,
++ 			gettext_noop("Simulate a torn-page crash after this number of page writes (0 to turn off)"),
++ 			NULL
++ 		},
++ 		&JJ_torn_page,
++ 		0, 0, 100000, NULL, NULL
++ 	},
++ 
++ 	{
++ 		{"JJ_xid", PGC_USERSET, WAL_SETTINGS,
++ 			gettext_noop("Skip this many xid every time we acquire one"),
++ 			NULL
++ 		},
++ 		&JJ_xid,
++ 		0, 0, 1000000, NULL, NULL
++ 	},
++ 
++ 	{
++ 		{"JJ_vac", PGC_USERSET, WAL_SETTINGS,
++ 			gettext_noop("turn on verbose logging"),
++ 			NULL
++ 		},
++ 		&JJ_vac,
++ 		0, 0, 1000000, NULL, NULL
++ 	},
++ 
++ 	{
+  		{"commit_siblings", PGC_USERSET, WAL_SETTINGS,
+  			gettext_noop("Sets the minimum concurrent open transactions before performing "
+  						 "commit_delay."),
+diff --git a/src/include/pg_config_manual.h b/src/include/pg_config_manual.h
+new file mode 100644
+index 8d5a378..cb4610b
+*** a/src/include/pg_config_manual.h
+--- b/src/include/pg_config_manual.h
+***************
+*** 276,282 ****
+  /*
+   * Enable debugging print statements for lock-related operations.
+   */
+! /* #define LOCK_DEBUG */
+  
+  /*
+   * Enable debugging print statements for WAL-related operations; see
+--- 276,282 ----
+  /*
+   * Enable debugging print statements for lock-related operations.
+   */
+! #define LOCK_DEBUG 1
+  
+  /*
+   * Enable debugging print statements for WAL-related operations; see
