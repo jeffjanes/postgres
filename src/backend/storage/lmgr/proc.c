@@ -60,6 +60,7 @@ int			StatementTimeout = 0;
 int			LockTimeout = 0;
 int			IdleInTransactionSessionTimeout = 0;
 bool		log_lock_waits = false;
+bool		notice_lock_waits = false;
 
 /* Pointer to this process's PGPROC and PGXACT structs, if any */
 PGPROC	   *MyProc = NULL;
@@ -1307,7 +1308,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 		 * If awoken after the deadlock check interrupt has run, and
 		 * log_lock_waits is on, then report about the wait.
 		 */
-		if (log_lock_waits && deadlock_state != DS_NOT_YET_CHECKED)
+		if ((log_lock_waits || notice_lock_waits) && deadlock_state != DS_NOT_YET_CHECKED)
 		{
 			StringInfoData buf,
 						lock_waiters_sbuf,
@@ -1388,6 +1389,16 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			}
 
 			LWLockRelease(partitionLock);
+
+			if (notice_lock_waits && myWaitStatus == STATUS_WAITING)
+				ereport(NOTICE,
+						(errmsg("process %d still waiting for %s on %s after %ld.%03d ms",
+								MyProcPid, modename, buf.data, msecs, usecs),
+						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+						   "Processes holding the lock: %s. Wait queue: %s.",
+											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+
+			if (!log_lock_waits) continue;
 
 			if (deadlock_state == DS_SOFT_DEADLOCK)
 				ereport(LOG,

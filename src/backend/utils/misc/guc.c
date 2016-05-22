@@ -1298,6 +1298,16 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"notice_lock_waits", PGC_SUSET, LOGGING_WHAT,
+			gettext_noop("Issues NOTICES for long lock waits."),
+			NULL
+		},
+		&notice_lock_waits,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"log_hostname", PGC_SIGHUP, LOGGING_WHAT,
 			gettext_noop("Logs the host name in the connection logs."),
 			gettext_noop("By default, connection logs only show the IP address "
