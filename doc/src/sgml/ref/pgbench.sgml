@@ -935,14 +935,15 @@ pgbench <optional> <replaceable>options</> </optional> <replaceable>dbname</>
       <row>
        <entry><literal><function>abs(<replaceable>a</>)</></></>
        <entry>same as <replaceable>a</></>
-       <entry>integer or double absolute value</>
+       <entry>absolute value</>
        <entry><literal>abs(-17)</></>
        <entry><literal>17</></>
       </row>
       <row>
        <entry><literal><function>debug(<replaceable>a</>)</></></>
        <entry>same as <replaceable>a</> </>
-       <entry>print to <systemitem>stderr</systemitem> the given argument</>
+       <entry>print <replaceable>a</> to <systemitem>stderr</systemitem>,
+        and return <replaceable>a</></>
        <entry><literal>debug(5432.1)</></>
        <entry><literal>5432.1</></>
       </row>
@@ -954,6 +955,13 @@ pgbench <optional> <replaceable>options</> </optional> <replaceable>dbname</>
        <entry><literal>5432.0</></>
       </row>
       <row>
+       <entry><literal><function>greatest(<replaceable>a</> [, <replaceable>...</> ] )</></></>
+       <entry>double if any <replaceable>a</> is double, else integer</>
+       <entry>largest value among arguments</>
+       <entry><literal>greatest(5, 4, 3, 2)</></>
+       <entry><literal>5</></>
+      </row>
+      <row>
        <entry><literal><function>int(<replaceable>x</>)</></></>
        <entry>integer</>
        <entry>cast to int</>
@@ -961,23 +969,16 @@ pgbench <optional> <replaceable>options</> </optional> <replaceable>dbname</>
        <entry><literal>9</></>
       </row>
       <row>
-       <entry><literal><function>max(<replaceable>i</> [, <replaceable>...</> ] )</></></>
-       <entry>integer</>
-       <entry>maximum value</>
-       <entry><literal>max(5, 4, 3, 2)</></>
-       <entry><literal>5</></>
-      </row>
-      <row>
-       <entry><literal><function>min(<replaceable>i</> [, <replaceable>...</> ] )</></></>
-       <entry>integer</>
-       <entry>minimum value</>
-       <entry><literal>min(5, 4, 3, 2)</></>
-       <entry><literal>2</></>
+       <entry><literal><function>least(<replaceable>a</> [, <replaceable>...</> ] )</></></>
+       <entry>double if any <replaceable>a</> is double, else integer</>
+       <entry>smallest value among arguments</>
+       <entry><literal>least(5, 4, 3, 2.1)</></>
+       <entry><literal>2.1</></>
       </row>
       <row>
        <entry><literal><function>pi()</></></>
        <entry>double</>
-       <entry>value of the PI constant</>
+       <entry>value of the constant PI</>
        <entry><literal>pi()</></>
        <entry><literal>3.14159265358979323846</></>
       </row>
@@ -1174,7 +1175,7 @@ END;
  0 84 4142 0 1412881037 918023 2333
  0 85 2465 0 1412881037 919759 740
 </screen>
-   In this example, transaction 82 was late, because it's latency (6.173 ms) was
+   In this example, transaction 82 was late, because its latency (6.173 ms) was
    over the 5 ms limit. The next two transactions were skipped, because they
    were already late before they were even started.
   </para>
@@ -1215,7 +1216,7 @@ END;
   </para>
 
   <para>
-   Here is example outputs:
+   Here is example output:
 <screen>
 1345828501 5601 1542744 483552416 61 2573
 1345828503 7884 1979812 565806736 60 1479
@@ -1225,8 +1226,8 @@ END;
 </screen></para>
 
   <para>
-   Notice that while the plain (unaggregated) log file contains index
-   of the custom script files, the aggregated log does not. Therefore if
+   Notice that while the plain (unaggregated) log file contains a reference
+   to the custom script files, the aggregated log does not. Therefore if
    you need per script data, you need to aggregate the data on your own.
   </para>
 

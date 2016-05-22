@@ -1664,6 +1664,8 @@ setup_depend(FILE *cmdfd)
 		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
 		" FROM pg_opfamily;\n\n",
 		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
+		" FROM pg_am;\n\n",
+		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
 		" FROM pg_amop;\n\n",
 		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
 		" FROM pg_amproc;\n\n",
@@ -3561,6 +3563,12 @@ main(int argc, char *argv[])
 	effective_user = get_id();
 	if (strlen(username) == 0)
 		username = effective_user;
+
+	if (strncmp(username, "pg_", 3) == 0)
+	{
+		fprintf(stderr, _("%s: superuser name \"%s\" is disallowed; role names cannot begin with \"pg_\"\n"), progname, username);
+		exit(1);
+	}
 
 	printf(_("The files belonging to this database system will be owned "
 			 "by user \"%s\".\n"
