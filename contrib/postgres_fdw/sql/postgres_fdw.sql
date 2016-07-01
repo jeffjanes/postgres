@@ -527,9 +527,26 @@ EXECUTE join_stmt;
 EXPLAIN (COSTS false, VERBOSE)
 SELECT t1.c1, t2.c1 FROM (ft5 t1 JOIN v_ft5 t2 ON (t1.c1 = t2.c1)) left join (ft5 t3 JOIN v_ft5 t4 ON (t3.c1 = t4.c1)) ON (t1.c1 = t3.c1);
 
+-- non-Var items in targelist of the nullable rel of a join preventing
+-- push-down in some cases
+-- unable to push {ft1, ft2}
+EXPLAIN (COSTS false, VERBOSE)
+SELECT q.a, ft2.c1 FROM (SELECT 13 FROM ft1 WHERE c1 = 13) q(a) RIGHT JOIN ft2 ON (q.a = ft2.c1) WHERE ft2.c1 BETWEEN 10 AND 15;
+SELECT q.a, ft2.c1 FROM (SELECT 13 FROM ft1 WHERE c1 = 13) q(a) RIGHT JOIN ft2 ON (q.a = ft2.c1) WHERE ft2.c1 BETWEEN 10 AND 15;
+
+-- ok to push {ft1, ft2} but not {ft1, ft2, ft4}
+EXPLAIN (COSTS false, VERBOSE)
+SELECT ft4.c1, q.* FROM ft4 LEFT JOIN (SELECT 13, ft1.c1, ft2.c1 FROM ft1 RIGHT JOIN ft2 ON (ft1.c1 = ft2.c1) WHERE ft1.c1 = 12) q(a, b, c) ON (ft4.c1 = q.b) WHERE ft4.c1 BETWEEN 10 AND 15;
+SELECT ft4.c1, q.* FROM ft4 LEFT JOIN (SELECT 13, ft1.c1, ft2.c1 FROM ft1 RIGHT JOIN ft2 ON (ft1.c1 = ft2.c1) WHERE ft1.c1 = 12) q(a, b, c) ON (ft4.c1 = q.b) WHERE ft4.c1 BETWEEN 10 AND 15;
+
 -- recreate the dropped user mapping for further tests
 CREATE USER MAPPING FOR CURRENT_USER SERVER loopback;
 DROP USER MAPPING FOR PUBLIC SERVER loopback;
+
+-- join with nullable side with some columns with null values
+UPDATE ft5 SET c3 = null where c1 % 9 = 0;
+EXPLAIN VERBOSE SELECT ft5, ft5.c1, ft5.c2, ft5.c3, ft4.c1, ft4.c2 FROM ft5 left join ft4 on ft5.c1 = ft4.c1 WHERE ft4.c1 BETWEEN 10 and 30 ORDER BY ft5.c1, ft4.c1;
+SELECT ft5, ft5.c1, ft5.c2, ft5.c3, ft4.c1, ft4.c2 FROM ft5 left join ft4 on ft5.c1 = ft4.c1 WHERE ft4.c1 BETWEEN 10 and 30 ORDER BY ft5.c1, ft4.c1;
 
 -- ===================================================================
 -- parameterized queries
@@ -610,6 +627,7 @@ DROP FUNCTION f_test(int);
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE int;
 SELECT * FROM ft1 WHERE c1 = 1;  -- ERROR
 SELECT  ft1.c1,  ft2.c2, ft1.c8 FROM ft1, ft2 WHERE ft1.c1 = ft2.c1 AND ft1.c1 = 1; -- ERROR
+SELECT  ft1.c1,  ft2.c2, ft1 FROM ft1, ft2 WHERE ft1.c1 = ft2.c1 AND ft1.c1 = 1; -- ERROR
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE user_enum;
 
 -- ===================================================================

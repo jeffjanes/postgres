@@ -27,6 +27,7 @@
 #include "nodes/plannodes.h"
 #include "nodes/relation.h"
 #include "utils/datum.h"
+#include "utils/rel.h"
 
 
 /*
@@ -869,9 +870,7 @@ _copyAgg(const Agg *from)
 	CopyPlanFields((const Plan *) from, (Plan *) newnode);
 
 	COPY_SCALAR_FIELD(aggstrategy);
-	COPY_SCALAR_FIELD(combineStates);
-	COPY_SCALAR_FIELD(finalizeAggs);
-	COPY_SCALAR_FIELD(serialStates);
+	COPY_SCALAR_FIELD(aggsplit);
 	COPY_SCALAR_FIELD(numCols);
 	if (from->numCols > 0)
 	{
@@ -1234,9 +1233,10 @@ _copyAggref(const Aggref *from)
 
 	COPY_SCALAR_FIELD(aggfnoid);
 	COPY_SCALAR_FIELD(aggtype);
-	COPY_SCALAR_FIELD(aggoutputtype);
 	COPY_SCALAR_FIELD(aggcollid);
 	COPY_SCALAR_FIELD(inputcollid);
+	COPY_SCALAR_FIELD(aggtranstype);
+	COPY_NODE_FIELD(aggargtypes);
 	COPY_NODE_FIELD(aggdirectargs);
 	COPY_NODE_FIELD(args);
 	COPY_NODE_FIELD(aggorder);
@@ -1244,10 +1244,9 @@ _copyAggref(const Aggref *from)
 	COPY_NODE_FIELD(aggfilter);
 	COPY_SCALAR_FIELD(aggstar);
 	COPY_SCALAR_FIELD(aggvariadic);
-	COPY_SCALAR_FIELD(aggpartial);
-	COPY_SCALAR_FIELD(aggcombine);
 	COPY_SCALAR_FIELD(aggkind);
 	COPY_SCALAR_FIELD(agglevelsup);
+	COPY_SCALAR_FIELD(aggsplit);
 	COPY_LOCATION_FIELD(location);
 
 	return newnode;
@@ -4252,6 +4251,24 @@ _copyValue(const Value *from)
 	return newnode;
 }
 
+
+static ForeignKeyCacheInfo *
+_copyForeignKeyCacheInfo(const ForeignKeyCacheInfo *from)
+{
+	ForeignKeyCacheInfo *newnode = makeNode(ForeignKeyCacheInfo);
+
+	COPY_SCALAR_FIELD(conrelid);
+	COPY_SCALAR_FIELD(confrelid);
+	COPY_SCALAR_FIELD(nkeys);
+	/* COPY_SCALAR_FIELD might work for these, but let's not assume that */
+	memcpy(newnode->conkey, from->conkey, sizeof(newnode->conkey));
+	memcpy(newnode->confkey, from->confkey, sizeof(newnode->confkey));
+	memcpy(newnode->conpfeqop, from->conpfeqop, sizeof(newnode->conpfeqop));
+
+	return newnode;
+}
+
+
 /*
  * copyObject
  *
@@ -5048,6 +5065,13 @@ copyObject(const void *from)
 			break;
 		case T_RoleSpec:
 			retval = _copyRoleSpec(from);
+			break;
+
+			/*
+			 * MISCELLANEOUS NODES
+			 */
+		case T_ForeignKeyCacheInfo:
+			retval = _copyForeignKeyCacheInfo(from);
 			break;
 
 		default:

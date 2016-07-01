@@ -289,7 +289,7 @@ InitProcGlobal(void)
 void
 InitProcess(void)
 {
-	PGPROC * volatile * procgloballist;
+	PGPROC	   *volatile * procgloballist;
 
 	/*
 	 * ProcGlobal should be set up already (if we are a backend, we inherit
@@ -343,8 +343,8 @@ InitProcess(void)
 	MyPgXact = &ProcGlobal->allPgXact[MyProc->pgprocno];
 
 	/*
-	 * Cross-check that the PGPROC is of the type we expect; if this were
-	 * not the case, it would get returned to the wrong list.
+	 * Cross-check that the PGPROC is of the type we expect; if this were not
+	 * the case, it would get returned to the wrong list.
 	 */
 	Assert(MyProc->procgloballist == procgloballist);
 
@@ -782,7 +782,7 @@ static void
 ProcKill(int code, Datum arg)
 {
 	PGPROC	   *proc;
-	PGPROC * volatile * procgloballist;
+	PGPROC	   *volatile * procgloballist;
 
 	Assert(MyProc != NULL);
 

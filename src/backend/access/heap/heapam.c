@@ -1131,13 +1131,7 @@ relation_open(Oid relationId, LOCKMODE lockmode)
 
 	/* Make note that we've accessed a temporary relation */
 	if (RelationUsesLocalBuffers(r))
-	{
-		if (IsParallelWorker())
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-					 errmsg("cannot access temporary tables during a parallel operation")));
 		MyXactAccessedTempRel = true;
-	}
 
 	pgstat_initstats(r);
 
@@ -1183,13 +1177,7 @@ try_relation_open(Oid relationId, LOCKMODE lockmode)
 
 	/* Make note that we've accessed a temporary relation */
 	if (RelationUsesLocalBuffers(r))
-	{
-		if (IsParallelWorker())
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-					 errmsg("cannot access temporary tables during a parallel operation")));
 		MyXactAccessedTempRel = true;
-	}
 
 	pgstat_initstats(r);
 
@@ -1687,7 +1675,7 @@ heap_parallelscan_nextpage(HeapScanDesc scan)
 {
 	BlockNumber page = InvalidBlockNumber;
 	BlockNumber sync_startpage = InvalidBlockNumber;
-	BlockNumber	report_page = InvalidBlockNumber;
+	BlockNumber report_page = InvalidBlockNumber;
 	ParallelHeapScanDesc parallel_scan;
 
 	Assert(scan->rs_parallel);
@@ -3019,7 +3007,7 @@ heap_delete(Relation relation, ItemPointer tid,
 	Assert(ItemPointerIsValid(tid));
 
 	/*
-	 * Forbid this during a parallel operation, lets it allocate a combocid.
+	 * Forbid this during a parallel operation, lest it allocate a combocid.
 	 * Other workers might need that combocid for visibility checks, and we
 	 * have no provision for broadcasting it to them.
 	 */
@@ -3492,7 +3480,7 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	Assert(ItemPointerIsValid(otid));
 
 	/*
-	 * Forbid this during a parallel operation, lets it allocate a combocid.
+	 * Forbid this during a parallel operation, lest it allocate a combocid.
 	 * Other workers might need that combocid for visibility checks, and we
 	 * have no provision for broadcasting it to them.
 	 */
@@ -3856,6 +3844,7 @@ l2:
 	 * HEAP_XMAX_INVALID bit set; that's fine.)
 	 */
 	if ((oldtup.t_data->t_infomask & HEAP_XMAX_INVALID) ||
+		HEAP_LOCKED_UPGRADED(oldtup.t_data->t_infomask) ||
 		(checked_lockers && !locker_remains))
 		xmax_new_tuple = InvalidTransactionId;
 	else
@@ -5237,8 +5226,7 @@ l5:
 		 * pg_upgrade; both MultiXactIdIsRunning and MultiXactIdExpand assume
 		 * that such multis are never passed.
 		 */
-		if (!(old_infomask & HEAP_LOCK_MASK) &&
-			HEAP_XMAX_IS_LOCKED_ONLY(old_infomask))
+		if (HEAP_LOCKED_UPGRADED(old_infomask))
 		{
 			old_infomask &= ~HEAP_XMAX_IS_MULTI;
 			old_infomask |= HEAP_XMAX_INVALID;
@@ -5597,6 +5585,17 @@ l4:
 				int			nmembers;
 				int			i;
 				MultiXactMember *members;
+
+				/*
+				 * We don't need a test for pg_upgrade'd tuples: this is only
+				 * applied to tuples after the first in an update chain.  Said
+				 * first tuple in the chain may well be locked-in-9.2-and-
+				 * pg_upgraded, but that one was already locked by our caller,
+				 * not us; and any subsequent ones cannot be because our
+				 * caller must necessarily have obtained a snapshot later than
+				 * the pg_upgrade itself.
+				 */
+				Assert(!HEAP_LOCKED_UPGRADED(mytup.t_data->t_infomask));
 
 				nmembers = GetMultiXactIdMembers(rawxmax, &members, false,
 									 HEAP_XMAX_IS_LOCKED_ONLY(old_infomask));
@@ -6156,14 +6155,14 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 	bool		has_lockers;
 	TransactionId update_xid;
 	bool		update_committed;
-	bool		allow_old;
 
 	*flags = 0;
 
 	/* We should only be called in Multis */
 	Assert(t_infomask & HEAP_XMAX_IS_MULTI);
 
-	if (!MultiXactIdIsValid(multi))
+	if (!MultiXactIdIsValid(multi) ||
+		HEAP_LOCKED_UPGRADED(t_infomask))
 	{
 		/* Ensure infomask bits are appropriately set/reset */
 		*flags |= FRM_INVALIDATE_XMAX;
@@ -6176,14 +6175,8 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 		 * was a locker only, it can be removed without any further
 		 * consideration; but if it contained an update, we might need to
 		 * preserve it.
-		 *
-		 * Don't assert MultiXactIdIsRunning if the multi came from a
-		 * pg_upgrade'd share-locked tuple, though, as doing that causes an
-		 * error to be raised unnecessarily.
 		 */
-		Assert((!(t_infomask & HEAP_LOCK_MASK) &&
-				HEAP_XMAX_IS_LOCKED_ONLY(t_infomask)) ||
-			   !MultiXactIdIsRunning(multi,
+		Assert(!MultiXactIdIsRunning(multi,
 									 HEAP_XMAX_IS_LOCKED_ONLY(t_infomask)));
 		if (HEAP_XMAX_IS_LOCKED_ONLY(t_infomask))
 		{
@@ -6225,10 +6218,8 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 	 * anything.
 	 */
 
-	allow_old = !(t_infomask & HEAP_LOCK_MASK) &&
-		HEAP_XMAX_IS_LOCKED_ONLY(t_infomask);
 	nmembers =
-		GetMultiXactIdMembers(multi, &members, allow_old,
+		GetMultiXactIdMembers(multi, &members, false,
 							  HEAP_XMAX_IS_LOCKED_ONLY(t_infomask));
 	if (nmembers <= 0)
 	{
@@ -6389,7 +6380,9 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
  * are older than the specified cutoff XID and cutoff MultiXactId.  If so,
  * setup enough state (in the *frz output argument) to later execute and
  * WAL-log what we would need to do, and return TRUE.  Return FALSE if nothing
- * is to be changed.
+ * is to be changed.  In addition, set *totally_frozen_p to true if the tuple
+ * will be totally frozen after these operations are performed and false if
+ * more freezing will eventually be required.
  *
  * Caller is responsible for setting the offset field, if appropriate.
  *
@@ -6414,12 +6407,12 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 						  TransactionId cutoff_multi,
-						  xl_heap_freeze_tuple *frz)
-
+						  xl_heap_freeze_tuple *frz, bool *totally_frozen_p)
 {
 	bool		changed = false;
 	bool		freeze_xmax = false;
 	TransactionId xid;
+	bool		totally_frozen = true;
 
 	frz->frzflags = 0;
 	frz->t_infomask2 = tuple->t_infomask2;
@@ -6428,11 +6421,15 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 
 	/* Process xmin */
 	xid = HeapTupleHeaderGetXmin(tuple);
-	if (TransactionIdIsNormal(xid) &&
-		TransactionIdPrecedes(xid, cutoff_xid))
+	if (TransactionIdIsNormal(xid))
 	{
-		frz->t_infomask |= HEAP_XMIN_FROZEN;
-		changed = true;
+		if (TransactionIdPrecedes(xid, cutoff_xid))
+		{
+			frz->t_infomask |= HEAP_XMIN_FROZEN;
+			changed = true;
+		}
+		else
+			totally_frozen = false;
 	}
 
 	/*
@@ -6470,6 +6467,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 			if (flags & FRM_MARK_COMMITTED)
 				frz->t_infomask &= HEAP_XMAX_COMMITTED;
 			changed = true;
+			totally_frozen = false;
 		}
 		else if (flags & FRM_RETURN_IS_MULTI)
 		{
@@ -6491,16 +6489,19 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 			frz->xmax = newxmax;
 
 			changed = true;
+			totally_frozen = false;
 		}
 		else
 		{
 			Assert(flags & FRM_NOOP);
 		}
 	}
-	else if (TransactionIdIsNormal(xid) &&
-			 TransactionIdPrecedes(xid, cutoff_xid))
+	else if (TransactionIdIsNormal(xid))
 	{
-		freeze_xmax = true;
+		if (TransactionIdPrecedes(xid, cutoff_xid))
+			freeze_xmax = true;
+		else
+			totally_frozen = false;
 	}
 
 	if (freeze_xmax)
@@ -6526,8 +6527,15 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 	if (tuple->t_infomask & HEAP_MOVED)
 	{
 		xid = HeapTupleHeaderGetXvac(tuple);
-		if (TransactionIdIsNormal(xid) &&
-			TransactionIdPrecedes(xid, cutoff_xid))
+		/*
+		 * For Xvac, we ignore the cutoff_xid and just always perform the
+		 * freeze operation.  The oldest release in which such a value can
+		 * actually be set is PostgreSQL 8.4, because old-style VACUUM FULL
+		 * was removed in PostgreSQL 9.0.  Note that if we were to respect
+		 * cutoff_xid here, we'd need to make surely to clear totally_frozen
+		 * when we skipped freezing on that basis.
+		 */
+		if (TransactionIdIsNormal(xid))
 		{
 			/*
 			 * If a MOVED_OFF tuple is not dead, the xvac transaction must
@@ -6549,6 +6557,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 		}
 	}
 
+	*totally_frozen_p = totally_frozen;
 	return changed;
 }
 
@@ -6599,9 +6608,10 @@ heap_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 {
 	xl_heap_freeze_tuple frz;
 	bool		do_freeze;
+	bool		tuple_totally_frozen;
 
 	do_freeze = heap_prepare_freeze_tuple(tuple, cutoff_xid, cutoff_multi,
-										  &frz);
+										  &frz, &tuple_totally_frozen);
 
 	/*
 	 * Note that because this is not a WAL-logged operation, we don't need to
@@ -6770,14 +6780,15 @@ static bool
 DoesMultiXactIdConflict(MultiXactId multi, uint16 infomask,
 						LockTupleMode lockmode)
 {
-	bool		allow_old;
 	int			nmembers;
 	MultiXactMember *members;
 	bool		result = false;
 	LOCKMODE	wanted = tupleLockExtraInfo[lockmode].hwlock;
 
-	allow_old = !(infomask & HEAP_LOCK_MASK) && HEAP_XMAX_IS_LOCKED_ONLY(infomask);
-	nmembers = GetMultiXactIdMembers(multi, &members, allow_old,
+	if (HEAP_LOCKED_UPGRADED(infomask))
+		return false;
+
+	nmembers = GetMultiXactIdMembers(multi, &members, false,
 									 HEAP_XMAX_IS_LOCKED_ONLY(infomask));
 	if (nmembers >= 0)
 	{
@@ -6860,15 +6871,15 @@ Do_MultiXactIdWait(MultiXactId multi, MultiXactStatus status,
 				   Relation rel, ItemPointer ctid, XLTW_Oper oper,
 				   int *remaining)
 {
-	bool		allow_old;
 	bool		result = true;
 	MultiXactMember *members;
 	int			nmembers;
 	int			remain = 0;
 
-	allow_old = !(infomask & HEAP_LOCK_MASK) && HEAP_XMAX_IS_LOCKED_ONLY(infomask);
-	nmembers = GetMultiXactIdMembers(multi, &members, allow_old,
-									 HEAP_XMAX_IS_LOCKED_ONLY(infomask));
+	/* for pre-pg_upgrade tuples, no need to sleep at all */
+	nmembers = HEAP_LOCKED_UPGRADED(infomask) ? -1 :
+		GetMultiXactIdMembers(multi, &members, false,
+							  HEAP_XMAX_IS_LOCKED_ONLY(infomask));
 
 	if (nmembers >= 0)
 	{
@@ -7049,6 +7060,8 @@ heap_tuple_needs_freeze(HeapTupleHeader tuple, TransactionId cutoff_xid,
 			/* no xmax set, ignore */
 			;
 		}
+		else if (HEAP_LOCKED_UPGRADED(tuple->t_infomask))
+			return true;
 		else if (MultiXactIdPrecedes(multi, cutoff_multi))
 			return true;
 		else
@@ -7056,13 +7069,10 @@ heap_tuple_needs_freeze(HeapTupleHeader tuple, TransactionId cutoff_xid,
 			MultiXactMember *members;
 			int			nmembers;
 			int			i;
-			bool		allow_old;
 
 			/* need to check whether any member of the mxact is too old */
 
-			allow_old = !(tuple->t_infomask & HEAP_LOCK_MASK) &&
-				HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask);
-			nmembers = GetMultiXactIdMembers(multi, &members, allow_old,
+			nmembers = GetMultiXactIdMembers(multi, &members, false,
 								HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask));
 
 			for (i = 0; i < nmembers; i++)
