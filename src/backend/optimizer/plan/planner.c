@@ -114,6 +114,7 @@ static Size estimate_hashagg_tablesize(Path *path,
 static RelOptInfo *create_grouping_paths(PlannerInfo *root,
 					  RelOptInfo *input_rel,
 					  PathTarget *target,
+					  const AggClauseCosts *agg_costs,
 					  List *rollup_lists,
 					  List *rollup_groupclauses);
 static RelOptInfo *create_window_paths(PlannerInfo *root,
@@ -305,15 +306,33 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	if (cursorOptions & CURSOR_OPT_SCROLL)
 	{
 		if (!ExecSupportsBackwardScan(top_plan))
-			top_plan = materialize_finished_plan(top_plan);
+		{
+			Plan	   *sub_plan = top_plan;
+
+			top_plan = materialize_finished_plan(sub_plan);
+
+			/*
+			 * XXX horrid kluge: if there are any initPlans attached to the
+			 * formerly-top plan node, move them up to the Material node. This
+			 * prevents failure in SS_finalize_plan, which see for comments.
+			 * We don't bother adjusting the sub_plan's cost estimate for
+			 * this.
+			 */
+			top_plan->initPlan = sub_plan->initPlan;
+			sub_plan->initPlan = NIL;
+		}
 	}
 
 	/*
 	 * Optionally add a Gather node for testing purposes, provided this is
-	 * actually a safe thing to do.
+	 * actually a safe thing to do.  (Note: we assume adding a Material node
+	 * above did not change the parallel safety of the plan, so we can still
+	 * rely on best_path->parallel_safe.  However, that flag doesn't account
+	 * for initPlans, which render the plan parallel-unsafe.)
 	 */
-	if (best_path->parallel_safe &&
-		force_parallel_mode != FORCE_PARALLEL_OFF)
+	if (force_parallel_mode != FORCE_PARALLEL_OFF &&
+		best_path->parallel_safe &&
+		top_plan->initPlan == NIL)
 	{
 		Gather	   *gather = makeNode(Gather);
 
@@ -324,7 +343,22 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		gather->num_workers = 1;
 		gather->single_copy = true;
 		gather->invisible = (force_parallel_mode == FORCE_PARALLEL_REGRESS);
+
+		/*
+		 * Ideally we'd use cost_gather here, but setting up dummy path data
+		 * to satisfy it doesn't seem much cleaner than knowing what it does.
+		 */
+		gather->plan.startup_cost = top_plan->startup_cost +
+			parallel_setup_cost;
+		gather->plan.total_cost = top_plan->total_cost +
+			parallel_setup_cost + parallel_tuple_cost * top_plan->plan_rows;
+		gather->plan.plan_rows = top_plan->plan_rows;
+		gather->plan.plan_width = top_plan->plan_width;
+		gather->plan.parallel_aware = false;
+
+		/* use parallel mode for parallel plans. */
 		root->glob->parallelModeNeeded = true;
+
 		top_plan = &gather->plan;
 	}
 
@@ -1481,6 +1515,7 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		PathTarget *grouping_target;
 		PathTarget *scanjoin_target;
 		bool		have_grouping;
+		AggClauseCosts agg_costs;
 		WindowFuncLists *wflists = NULL;
 		List	   *activeWindows = NIL;
 		List	   *rollup_lists = NIL;
@@ -1604,6 +1639,28 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		 * tlist of the finished Plan.
 		 */
 		root->processed_tlist = tlist;
+
+		/*
+		 * Collect statistics about aggregates for estimating costs, and mark
+		 * all the aggregates with resolved aggtranstypes.  We must do this
+		 * before slicing and dicing the tlist into various pathtargets, else
+		 * some copies of the Aggref nodes might escape being marked with the
+		 * correct transtypes.
+		 *
+		 * Note: currently, we do not detect duplicate aggregates here.  This
+		 * may result in somewhat-overestimated cost, which is fine for our
+		 * purposes since all Paths will get charged the same.  But at some
+		 * point we might wish to do that detection in the planner, rather
+		 * than during executor startup.
+		 */
+		MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
+		if (parse->hasAggs)
+		{
+			get_agg_clause_costs(root, (Node *) tlist, AGGSPLIT_SIMPLE,
+								 &agg_costs);
+			get_agg_clause_costs(root, parse->havingQual, AGGSPLIT_SIMPLE,
+								 &agg_costs);
+		}
 
 		/*
 		 * Locate any window functions in the tlist.  (We don't need to look
@@ -1804,6 +1861,7 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 			current_rel = create_grouping_paths(root,
 												current_rel,
 												grouping_target,
+												&agg_costs,
 												rollup_lists,
 												rollup_groupclauses);
 		}
@@ -3226,6 +3284,7 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
  *
  * input_rel: contains the source-data Paths
  * target: the pathtarget for the result Paths to compute
+ * agg_costs: cost info about all aggregates in query (in AGGSPLIT_SIMPLE mode)
  * rollup_lists: list of grouping sets, or NIL if not doing grouping sets
  * rollup_groupclauses: list of grouping clauses for grouping sets,
  *		or NIL if not doing grouping sets
@@ -3242,6 +3301,7 @@ static RelOptInfo *
 create_grouping_paths(PlannerInfo *root,
 					  RelOptInfo *input_rel,
 					  PathTarget *target,
+					  const AggClauseCosts *agg_costs,
 					  List *rollup_lists,
 					  List *rollup_groupclauses)
 {
@@ -3249,7 +3309,6 @@ create_grouping_paths(PlannerInfo *root,
 	Path	   *cheapest_path = input_rel->cheapest_total_path;
 	RelOptInfo *grouped_rel;
 	PathTarget *partial_grouping_target = NULL;
-	AggClauseCosts agg_costs;
 	AggClauseCosts agg_partial_costs;	/* parallel only */
 	AggClauseCosts agg_final_costs;		/* parallel only */
 	Size		hashaggtablesize;
@@ -3347,20 +3406,6 @@ create_grouping_paths(PlannerInfo *root,
 	}
 
 	/*
-	 * Collect statistics about aggregates for estimating costs.  Note: we do
-	 * not detect duplicate aggregates here; a somewhat-overestimated cost is
-	 * okay for our purposes.
-	 */
-	MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
-	if (parse->hasAggs)
-	{
-		get_agg_clause_costs(root, (Node *) target->exprs, AGGSPLIT_SIMPLE,
-							 &agg_costs);
-		get_agg_clause_costs(root, parse->havingQual, AGGSPLIT_SIMPLE,
-							 &agg_costs);
-	}
-
-	/*
 	 * Estimate number of groups.
 	 */
 	dNumGroups = get_number_of_groups(root,
@@ -3396,7 +3441,7 @@ create_grouping_paths(PlannerInfo *root,
 	 */
 	can_hash = (parse->groupClause != NIL &&
 				parse->groupingSets == NIL &&
-				agg_costs.numOrderedAggs == 0 &&
+				agg_costs->numOrderedAggs == 0 &&
 				grouping_is_hashable(parse->groupClause));
 
 	/*
@@ -3428,7 +3473,7 @@ create_grouping_paths(PlannerInfo *root,
 		/* We don't know how to do grouping sets in parallel. */
 		try_parallel_aggregation = false;
 	}
-	else if (agg_costs.hasNonPartial || agg_costs.hasNonSerial)
+	else if (agg_costs->hasNonPartial || agg_costs->hasNonSerial)
 	{
 		/* Insufficient support for partial mode. */
 		try_parallel_aggregation = false;
@@ -3609,7 +3654,7 @@ create_grouping_paths(PlannerInfo *root,
 												  (List *) parse->havingQual,
 													  rollup_lists,
 													  rollup_groupclauses,
-													  &agg_costs,
+													  agg_costs,
 													  dNumGroups));
 				}
 				else if (parse->hasAggs)
@@ -3627,7 +3672,7 @@ create_grouping_paths(PlannerInfo *root,
 											 AGGSPLIT_SIMPLE,
 											 parse->groupClause,
 											 (List *) parse->havingQual,
-											 &agg_costs,
+											 agg_costs,
 											 dNumGroups));
 				}
 				else if (parse->groupClause)
@@ -3709,7 +3754,7 @@ create_grouping_paths(PlannerInfo *root,
 	if (can_hash)
 	{
 		hashaggtablesize = estimate_hashagg_tablesize(cheapest_path,
-													  &agg_costs,
+													  agg_costs,
 													  dNumGroups);
 
 		/*
@@ -3733,7 +3778,7 @@ create_grouping_paths(PlannerInfo *root,
 									 AGGSPLIT_SIMPLE,
 									 parse->groupClause,
 									 (List *) parse->havingQual,
-									 &agg_costs,
+									 agg_costs,
 									 dNumGroups));
 		}
 
