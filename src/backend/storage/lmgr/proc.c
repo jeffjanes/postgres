@@ -1398,6 +1398,11 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 						   "Processes holding the lock: %s. Wait queue: %s.",
 											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
 
+			if (notice_lock_waits && myWaitStatus == STATUS_OK)
+				ereport(NOTICE,
+					(errmsg("process %d acquired %s on %s after %ld.%03d ms",
+							MyProcPid, modename, buf.data, msecs, usecs)));
+
 			if (!log_lock_waits) continue;
 
 			if (deadlock_state == DS_SOFT_DEADLOCK)
