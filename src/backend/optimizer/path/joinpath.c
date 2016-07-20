@@ -213,8 +213,8 @@ add_paths_to_joinrel(PlannerInfo *root,
 
 	/*
 	 * 5. If inner and outer relations are foreign tables (or joins) belonging
-	 * to the same server and using the same user mapping, give the FDW a
-	 * chance to push down joins.
+	 * to the same server and assigned to the same user to check access
+	 * permissions as, give the FDW a chance to push down joins.
 	 */
 	if (joinrel->fdwroutine &&
 		joinrel->fdwroutine->GetForeignJoinPaths)
@@ -223,12 +223,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 												 jointype, &extra);
 
 	/*
-	 * 6. Consider gathering partial paths.
-	 */
-	generate_gather_paths(root, joinrel);
-
-	/*
-	 * 7. Finally, give extensions a chance to manipulate the path list.
+	 * 6. Finally, give extensions a chance to manipulate the path list.
 	 */
 	if (set_join_pathlist_hook)
 		set_join_pathlist_hook(root, joinrel, outerrel, innerrel,

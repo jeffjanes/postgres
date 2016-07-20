@@ -546,9 +546,10 @@ _readAggref(void)
 
 	READ_OID_FIELD(aggfnoid);
 	READ_OID_FIELD(aggtype);
-	READ_OID_FIELD(aggoutputtype);
 	READ_OID_FIELD(aggcollid);
 	READ_OID_FIELD(inputcollid);
+	READ_OID_FIELD(aggtranstype);
+	READ_NODE_FIELD(aggargtypes);
 	READ_NODE_FIELD(aggdirectargs);
 	READ_NODE_FIELD(args);
 	READ_NODE_FIELD(aggorder);
@@ -558,6 +559,7 @@ _readAggref(void)
 	READ_BOOL_FIELD(aggvariadic);
 	READ_CHAR_FIELD(aggkind);
 	READ_UINT_FIELD(agglevelsup);
+	READ_ENUM_FIELD(aggsplit, AggSplit);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -1388,6 +1390,8 @@ _readPlannedStmt(void)
 	READ_BOOL_FIELD(hasModifyingCTE);
 	READ_BOOL_FIELD(canSetTag);
 	READ_BOOL_FIELD(transientPlan);
+	READ_BOOL_FIELD(dependsOnRole);
+	READ_BOOL_FIELD(parallelModeNeeded);
 	READ_NODE_FIELD(planTree);
 	READ_NODE_FIELD(rtable);
 	READ_NODE_FIELD(resultRelations);
@@ -1398,9 +1402,6 @@ _readPlannedStmt(void)
 	READ_NODE_FIELD(relationOids);
 	READ_NODE_FIELD(invalItems);
 	READ_INT_FIELD(nParamExec);
-	READ_BOOL_FIELD(hasRowSecurity);
-	READ_BOOL_FIELD(parallelModeNeeded);
-	READ_BOOL_FIELD(hasForeignJoin);
 
 	READ_DONE();
 }
@@ -1834,8 +1835,8 @@ _readCustomScan(void)
 	READ_BITMAPSET_FIELD(custom_relids);
 
 	/* Lookup CustomScanMethods by CustomName */
-	token = pg_strtok(&length);		/* skip methods: */
-	token = pg_strtok(&length);		/* CustomName */
+	token = pg_strtok(&length); /* skip methods: */
+	token = pg_strtok(&length); /* CustomName */
 	custom_name = nullable_string(token, length);
 	methods = GetCustomScanMethods(custom_name, false);
 	local_node->methods = methods;
@@ -1985,9 +1986,7 @@ _readAgg(void)
 	ReadCommonPlan(&local_node->plan);
 
 	READ_ENUM_FIELD(aggstrategy, AggStrategy);
-	READ_BOOL_FIELD(combineStates);
-	READ_BOOL_FIELD(finalizeAggs);
-	READ_BOOL_FIELD(serialStates);
+	READ_ENUM_FIELD(aggsplit, AggSplit);
 	READ_INT_FIELD(numCols);
 	READ_ATTRNUMBER_ARRAY(grpColIdx, local_node->numCols);
 	READ_OID_ARRAY(grpOperators, local_node->numCols);
@@ -2225,11 +2224,12 @@ _readExtensibleNode(void)
 {
 	const ExtensibleNodeMethods *methods;
 	ExtensibleNode *local_node;
-	const char	   *extnodename;
+	const char *extnodename;
+
 	READ_TEMP_LOCALS();
 
-	token = pg_strtok(&length);		/* skip: extnodename */
-	token = pg_strtok(&length);		/* get extnodename */
+	token = pg_strtok(&length); /* skip :extnodename */
+	token = pg_strtok(&length); /* get extnodename */
 
 	extnodename = nullable_string(token, length);
 	if (!extnodename)

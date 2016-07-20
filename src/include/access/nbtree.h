@@ -454,6 +454,7 @@ typedef struct xl_btree_newroot
 
 #define BTORDER_PROC		1
 #define BTSORTSUPPORT_PROC	2
+#define BTNProcs			2
 
 /*
  *	We need to be able to tell the difference between read and write
@@ -521,7 +522,7 @@ typedef struct BTScanPosData
 	Buffer		buf;			/* if valid, the buffer is pinned */
 
 	XLogRecPtr	lsn;			/* pos in the WAL stream when page was read */
-	BlockNumber currPage;		/* page we've referencd by items array */
+	BlockNumber currPage;		/* page referenced by items array */
 	BlockNumber nextPage;		/* page's right link when we scanned it */
 
 	/*
@@ -721,7 +722,7 @@ extern int32 _bt_compare(Relation rel, int keysz, ScanKey scankey,
 extern bool _bt_first(IndexScanDesc scan, ScanDirection dir);
 extern bool _bt_next(IndexScanDesc scan, ScanDirection dir);
 extern Buffer _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
-							   Snapshot snapshot);
+				 Snapshot snapshot);
 
 /*
  * prototypes for functions in nbtutils.c

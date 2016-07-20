@@ -57,7 +57,7 @@ gisthandler(PG_FUNCTION_ARGS)
 	IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
 	amroutine->amstrategies = 0;
-	amroutine->amsupport = 9;
+	amroutine->amsupport = GISTNProcs;
 	amroutine->amcanorder = false;
 	amroutine->amcanorderbyop = true;
 	amroutine->amcanbackward = false;
@@ -467,7 +467,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 
 		/* Write the WAL record */
 		if (RelationNeedsWAL(rel))
-			recptr = gistXLogSplit(rel->rd_node, blkno, is_leaf,
+			recptr = gistXLogSplit(is_leaf,
 								   dist, oldrlink, oldnsn, leftchildbuf,
 								   markfollowright);
 		else
@@ -523,7 +523,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 				ndeloffs = 1;
 			}
 
-			recptr = gistXLogUpdate(rel->rd_node, buffer,
+			recptr = gistXLogUpdate(buffer,
 									deloffs, ndeloffs, itup, ntup,
 									leftchildbuf);
 
@@ -1498,8 +1498,9 @@ static void
 gistvacuumpage(Relation rel, Page page, Buffer buffer)
 {
 	OffsetNumber deletable[MaxIndexTuplesPerPage];
-	int			 ndeletable = 0;
-	OffsetNumber offnum, maxoff;
+	int			ndeletable = 0;
+	OffsetNumber offnum,
+				maxoff;
 
 	Assert(GistPageIsLeaf(page));
 
@@ -1540,7 +1541,7 @@ gistvacuumpage(Relation rel, Page page, Buffer buffer)
 		{
 			XLogRecPtr	recptr;
 
-			recptr = gistXLogUpdate(rel->rd_node, buffer,
+			recptr = gistXLogUpdate(buffer,
 									deletable, ndeletable,
 									NULL, 0, InvalidBuffer);
 

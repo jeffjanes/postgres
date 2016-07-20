@@ -466,8 +466,8 @@ ReorderBufferGetTupleBuf(ReorderBuffer *rb, Size tuple_len)
 	/*
 	 * Most tuples are below MaxHeapTupleSize, so we use a slab allocator for
 	 * those. Thus always allocate at least MaxHeapTupleSize. Note that tuples
-	 * tuples generated for oldtuples can be bigger, as they don't have
-	 * out-of-line toast columns.
+	 * generated for oldtuples can be bigger, as they don't have out-of-line
+	 * toast columns.
 	 */
 	if (alloc_len < MaxHeapTupleSize)
 		alloc_len = MaxHeapTupleSize;
@@ -563,7 +563,7 @@ ReorderBufferTXNByXid(ReorderBuffer *rb, TransactionId xid, bool create,
 		}
 
 		/*
-		 * cached as non-existant, and asked not to create? Then nothing else
+		 * cached as non-existent, and asked not to create? Then nothing else
 		 * to do.
 		 */
 		if (!create)
@@ -666,8 +666,8 @@ ReorderBufferQueueMessage(ReorderBuffer *rb, TransactionId xid,
 	}
 	else
 	{
-		ReorderBufferTXN   *txn = NULL;
-		volatile Snapshot	snapshot_now = snapshot;
+		ReorderBufferTXN *txn = NULL;
+		volatile Snapshot snapshot_now = snapshot;
 
 		if (xid != InvalidTransactionId)
 			txn = ReorderBufferTXNByXid(rb, xid, true, NULL, lsn, true);
@@ -960,7 +960,7 @@ ReorderBufferIterTXNInit(ReorderBuffer *rb, ReorderBufferTXN *txn)
 		{
 			ReorderBufferChange *cur_change;
 
-			if (txn->nentries != txn->nentries_mem)
+			if (cur_txn->nentries != cur_txn->nentries_mem)
 				ReorderBufferRestoreChanges(rb, cur_txn,
 											&state->entries[off].fd,
 											&state->entries[off].segno);
@@ -1810,26 +1810,8 @@ ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn)
 	 * catalog and we need to update the caches according to that.
 	 */
 	if (txn->base_snapshot != NULL && txn->ninvalidations > 0)
-	{
-		bool		use_subtxn = IsTransactionOrTransactionBlock();
-
-		if (use_subtxn)
-			BeginInternalSubTransaction("replay");
-
-		/*
-		 * Force invalidations to happen outside of a valid transaction - that
-		 * way entries will just be marked as invalid without accessing the
-		 * catalog. That's advantageous because we don't need to setup the
-		 * full state necessary for catalog access.
-		 */
-		if (use_subtxn)
-			AbortCurrentTransaction();
-
-		ReorderBufferExecuteInvalidations(rb, txn);
-
-		if (use_subtxn)
-			RollbackAndReleaseCurrentSubTransaction();
-	}
+		ReorderBufferImmediateInvalidation(rb, txn->ninvalidations,
+										   txn->invalidations);
 	else
 		Assert(txn->ninvalidations == 0);
 
@@ -1837,6 +1819,37 @@ ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn)
 	ReorderBufferCleanupTXN(rb, txn);
 }
 
+/*
+ * Execute invalidations happening outside the context of a decoded
+ * transaction. That currently happens either for xid-less commits
+ * (c.f. RecordTransactionCommit()) or for invalidations in uninteresting
+ * transactions (via ReorderBufferForget()).
+ */
+void
+ReorderBufferImmediateInvalidation(ReorderBuffer *rb, uint32 ninvalidations,
+								   SharedInvalidationMessage *invalidations)
+{
+	bool		use_subtxn = IsTransactionOrTransactionBlock();
+	int			i;
+
+	if (use_subtxn)
+		BeginInternalSubTransaction("replay");
+
+	/*
+	 * Force invalidations to happen outside of a valid transaction - that way
+	 * entries will just be marked as invalid without accessing the catalog.
+	 * That's advantageous because we don't need to setup the full state
+	 * necessary for catalog access.
+	 */
+	if (use_subtxn)
+		AbortCurrentTransaction();
+
+	for (i = 0; i < ninvalidations; i++)
+		LocalExecuteInvalidationMessage(&invalidations[i]);
+
+	if (use_subtxn)
+		RollbackAndReleaseCurrentSubTransaction();
+}
 
 /*
  * Tell reorderbuffer about an xid seen in the WAL stream. Has to be called at
@@ -2530,14 +2543,14 @@ ReorderBufferRestoreChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				change->data.msg.prefix = MemoryContextAlloc(rb->context,
 															 prefix_size);
 				memcpy(change->data.msg.prefix, data, prefix_size);
-				Assert(change->data.msg.prefix[prefix_size-1] == '\0');
+				Assert(change->data.msg.prefix[prefix_size - 1] == '\0');
 				data += prefix_size;
 
 				/* read the messsage */
 				memcpy(&change->data.msg.message_size, data, sizeof(Size));
 				data += sizeof(Size);
 				change->data.msg.message = MemoryContextAlloc(rb->context,
-												change->data.msg.message_size);
+											  change->data.msg.message_size);
 				memcpy(change->data.msg.message, data,
 					   change->data.msg.message_size);
 				data += change->data.msg.message_size;

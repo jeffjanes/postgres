@@ -402,6 +402,9 @@ exec_command(const char *cmd,
 					/* standard listing of interesting things */
 					success = listTables("tvmsE", NULL, show_verbose, show_system);
 				break;
+			case 'A':
+				success = describeAccessMethods(pattern, show_verbose);
+				break;
 			case 'a':
 				success = describeAggregates(pattern, show_verbose, show_system);
 				break;
@@ -854,7 +857,7 @@ exec_command(const char *cmd,
 				puts(_("out of memory"));
 		}
 		else
-			puts(_("There was no previous error."));
+			puts(_("There is no previous error."));
 	}
 
 	/* \f -- change field separator */
@@ -3063,6 +3066,7 @@ do_watch(PQExpBuffer query_buf, double sleep)
 {
 	long		sleep_ms = (long) (sleep * 1000);
 	printQueryOpt myopt = pset.popt;
+	const char *strftime_fmt;
 	const char *user_title;
 	char	   *title;
 	int			title_len;
@@ -3075,6 +3079,13 @@ do_watch(PQExpBuffer query_buf, double sleep)
 	}
 
 	/*
+	 * Choose format for timestamps.  We might eventually make this a \pset
+	 * option.  In the meantime, using a variable for the format suppresses
+	 * overly-anal-retentive gcc warnings about %c being Y2K sensitive.
+	 */
+	strftime_fmt = "%c";
+
+	/*
 	 * Set up rendering options, in particular, disable the pager, because
 	 * nobody wants to be prompted while watching the output of 'watch'.
 	 */
@@ -3082,16 +3093,17 @@ do_watch(PQExpBuffer query_buf, double sleep)
 
 	/*
 	 * If there's a title in the user configuration, make sure we have room
-	 * for it in the title buffer.
+	 * for it in the title buffer.  Allow 128 bytes for the timestamp plus 128
+	 * bytes for the rest.
 	 */
 	user_title = myopt.title;
-	title_len = (user_title ? strlen(user_title) : 0) + 100;
+	title_len = (user_title ? strlen(user_title) : 0) + 256;
 	title = pg_malloc(title_len);
 
 	for (;;)
 	{
 		time_t		timer;
-		char		asctimebuf[64];
+		char		timebuf[128];
 		long		i;
 
 		/*
@@ -3100,18 +3112,14 @@ do_watch(PQExpBuffer query_buf, double sleep)
 		 * makes for reasonably nicely formatted output in simple cases.
 		 */
 		timer = time(NULL);
-		strlcpy(asctimebuf, asctime(localtime(&timer)), sizeof(asctimebuf));
-		/* strip trailing newline from asctime's output */
-		i = strlen(asctimebuf);
-		while (i > 0 && asctimebuf[--i] == '\n')
-			asctimebuf[i] = '\0';
+		strftime(timebuf, sizeof(timebuf), strftime_fmt, localtime(&timer));
 
 		if (user_title)
 			snprintf(title, title_len, _("%s\t%s (every %gs)\n"),
-					 user_title, asctimebuf, sleep);
+					 user_title, timebuf, sleep);
 		else
 			snprintf(title, title_len, _("%s (every %gs)\n"),
-					 asctimebuf, sleep);
+					 timebuf, sleep);
 		myopt.title = title;
 
 		/* Run the query and print out the results */
@@ -3274,12 +3282,51 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 			 * CREATE for ourselves.  We must fully qualify the view name to
 			 * ensure the right view gets replaced.  Also, check relation kind
 			 * to be sure it's a view.
+			 *
+			 * Starting with 9.2, views may have reloptions (security_barrier)
+			 * and from 9.4 onwards they may also have WITH [LOCAL|CASCADED]
+			 * CHECK OPTION.  These are not part of the view definition
+			 * returned by pg_get_viewdef() and so need to be retrieved
+			 * separately.  Materialized views (introduced in 9.3) may have
+			 * arbitrary storage parameter reloptions.
 			 */
-			printfPQExpBuffer(query,
-							  "SELECT nspname, relname, relkind, pg_catalog.pg_get_viewdef(c.oid, true) FROM "
-				 "pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n "
-							  "ON c.relnamespace = n.oid WHERE c.oid = %u",
-							  oid);
+			if (pset.sversion >= 90400)
+			{
+				printfPQExpBuffer(query,
+								  "SELECT nspname, relname, relkind, "
+								  "pg_catalog.pg_get_viewdef(c.oid, true), "
+								  "array_remove(array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') AS reloptions, "
+								  "CASE WHEN 'check_option=local' = ANY (c.reloptions) THEN 'LOCAL'::text "
+								  "WHEN 'check_option=cascaded' = ANY (c.reloptions) THEN 'CASCADED'::text ELSE NULL END AS checkoption "
+								  "FROM pg_catalog.pg_class c "
+								  "LEFT JOIN pg_catalog.pg_namespace n "
+								"ON c.relnamespace = n.oid WHERE c.oid = %u",
+								  oid);
+			}
+			else if (pset.sversion >= 90200)
+			{
+				printfPQExpBuffer(query,
+								  "SELECT nspname, relname, relkind, "
+								  "pg_catalog.pg_get_viewdef(c.oid, true), "
+								  "c.reloptions AS reloptions, "
+								  "NULL AS checkoption "
+								  "FROM pg_catalog.pg_class c "
+								  "LEFT JOIN pg_catalog.pg_namespace n "
+								"ON c.relnamespace = n.oid WHERE c.oid = %u",
+								  oid);
+			}
+			else
+			{
+				printfPQExpBuffer(query,
+								  "SELECT nspname, relname, relkind, "
+								  "pg_catalog.pg_get_viewdef(c.oid, true), "
+								  "NULL AS reloptions, "
+								  "NULL AS checkoption "
+								  "FROM pg_catalog.pg_class c "
+								  "LEFT JOIN pg_catalog.pg_namespace n "
+								"ON c.relnamespace = n.oid WHERE c.oid = %u",
+								  oid);
+			}
 			break;
 	}
 
@@ -3304,6 +3351,8 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 					char	   *relname = PQgetvalue(res, 0, 1);
 					char	   *relkind = PQgetvalue(res, 0, 2);
 					char	   *viewdef = PQgetvalue(res, 0, 3);
+					char	   *reloptions = PQgetvalue(res, 0, 4);
+					char	   *checkoption = PQgetvalue(res, 0, 5);
 
 					/*
 					 * If the backend ever supports CREATE OR REPLACE
@@ -3322,17 +3371,39 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 							appendPQExpBufferStr(buf, "CREATE OR REPLACE VIEW ");
 							break;
 						default:
-							psql_error("%s.%s is not a view\n",
+							psql_error("\"%s.%s\" is not a view\n",
 									   nspname, relname);
 							result = false;
 							break;
 					}
 					appendPQExpBuffer(buf, "%s.", fmtId(nspname));
-					appendPQExpBuffer(buf, "%s AS\n", fmtId(relname));
-					appendPQExpBufferStr(buf, viewdef);
+					appendPQExpBufferStr(buf, fmtId(relname));
+
+					/* reloptions, if not an empty array "{}" */
+					if (reloptions != NULL && strlen(reloptions) > 2)
+					{
+						appendPQExpBufferStr(buf, "\n WITH (");
+						if (!appendReloptionsArray(buf, reloptions, "",
+												   pset.encoding,
+												   standard_strings()))
+						{
+							psql_error("could not parse reloptions array\n");
+							result = false;
+						}
+						appendPQExpBufferStr(buf, ")");
+					}
+
+					/* View definition from pg_get_viewdef (a SELECT query) */
+					appendPQExpBuffer(buf, " AS\n%s", viewdef);
+
 					/* Get rid of the semicolon that pg_get_viewdef appends */
 					if (buf->len > 0 && buf->data[buf->len - 1] == ';')
 						buf->data[--(buf->len)] = '\0';
+
+					/* WITH [LOCAL|CASCADED] CHECK OPTION */
+					if (checkoption && checkoption[0] != '\0')
+						appendPQExpBuffer(buf, "\n WITH %s CHECK OPTION",
+										  checkoption);
 				}
 				break;
 		}

@@ -4515,14 +4515,6 @@ ExecInitExpr(Expr *node, PlanState *parent)
 				if (parent && IsA(parent, AggState))
 				{
 					AggState   *aggstate = (AggState *) parent;
-					Aggref	   *aggref = (Aggref *) node;
-
-					if (aggstate->finalizeAggs &&
-						aggref->aggoutputtype != aggref->aggtype)
-					{
-						/* planner messed up */
-						elog(ERROR, "Aggref aggoutputtype must match aggtype");
-					}
 
 					aggstate->aggs = lcons(astate, aggstate->aggs);
 					aggstate->numaggs++;
@@ -5343,15 +5335,24 @@ ExecCleanTargetListLength(List *targetlist)
  * of *isDone = ExprMultipleResult signifies a set element, and a return
  * of *isDone = ExprEndResult signifies end of the set of tuple.
  * We assume that *isDone has been initialized to ExprSingleResult by caller.
+ *
+ * Since fields of the result tuple might be multiply referenced in higher
+ * plan nodes, we have to force any read/write expanded values to read-only
+ * status.  It's a bit annoying to have to do that for every projected
+ * expression; in the future, consider teaching the planner to detect
+ * actually-multiply-referenced Vars and insert an expression node that
+ * would do that only where really required.
  */
 static bool
 ExecTargetList(List *targetlist,
+			   TupleDesc tupdesc,
 			   ExprContext *econtext,
 			   Datum *values,
 			   bool *isnull,
 			   ExprDoneCond *itemIsDone,
 			   ExprDoneCond *isDone)
 {
+	Form_pg_attribute *att = tupdesc->attrs;
 	MemoryContext oldContext;
 	ListCell   *tl;
 	bool		haveDoneSets;
@@ -5376,6 +5377,10 @@ ExecTargetList(List *targetlist,
 									  econtext,
 									  &isnull[resind],
 									  &itemIsDone[resind]);
+
+		values[resind] = MakeExpandedObjectReadOnly(values[resind],
+													isnull[resind],
+													att[resind]->attlen);
 
 		if (itemIsDone[resind] != ExprSingleResult)
 		{
@@ -5430,6 +5435,10 @@ ExecTargetList(List *targetlist,
 												  &isnull[resind],
 												  &itemIsDone[resind]);
 
+					values[resind] = MakeExpandedObjectReadOnly(values[resind],
+															  isnull[resind],
+														att[resind]->attlen);
+
 					if (itemIsDone[resind] == ExprEndResult)
 					{
 						/*
@@ -5463,6 +5472,7 @@ ExecTargetList(List *targetlist,
 													  econtext,
 													  &isnull[resind],
 													  &itemIsDone[resind]);
+						/* no need for MakeExpandedObjectReadOnly */
 					}
 				}
 
@@ -5588,6 +5598,7 @@ ExecProject(ProjectionInfo *projInfo, ExprDoneCond *isDone)
 	if (projInfo->pi_targetlist)
 	{
 		if (!ExecTargetList(projInfo->pi_targetlist,
+							slot->tts_tupleDescriptor,
 							econtext,
 							slot->tts_values,
 							slot->tts_isnull,

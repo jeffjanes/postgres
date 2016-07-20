@@ -78,7 +78,7 @@ char	   *SyncRepStandbyNames;
 
 static bool announce_next_takeover = true;
 
-SyncRepConfigData *SyncRepConfig;
+static SyncRepConfigData *SyncRepConfig = NULL;
 static int	SyncRepWaitMode = SYNC_REP_NO_WAIT;
 
 static void SyncRepQueueInsert(int mode);
@@ -86,9 +86,9 @@ static void SyncRepCancelWait(void);
 static int	SyncRepWakeQueue(bool all, int mode);
 
 static bool SyncRepGetOldestSyncRecPtr(XLogRecPtr *writePtr,
-									   XLogRecPtr *flushPtr,
-									   XLogRecPtr *applyPtr,
-									   bool *am_sync);
+						   XLogRecPtr *flushPtr,
+						   XLogRecPtr *applyPtr,
+						   bool *am_sync);
 static int	SyncRepGetStandbyPriority(void);
 
 #ifdef USE_ASSERT_CHECKING
@@ -212,8 +212,8 @@ SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 		/*
 		 * If a wait for synchronous replication is pending, we can neither
 		 * acknowledge the commit nor raise ERROR or FATAL.  The latter would
-		 * lead the client to believe that the transaction aborted, which
-		 * is not true: it's already committed locally. The former is no good
+		 * lead the client to believe that the transaction aborted, which is
+		 * not true: it's already committed locally. The former is no good
 		 * either: the client has requested synchronous replication, and is
 		 * entitled to assume that an acknowledged commit is also replicated,
 		 * which might not be true. So in this case we issue a WARNING (which
@@ -361,11 +361,6 @@ SyncRepInitConfig(void)
 {
 	int			priority;
 
-	/* Update the config data of synchronous replication */
-	SyncRepFreeConfig(SyncRepConfig);
-	SyncRepConfig = NULL;
-	SyncRepUpdateConfig();
-
 	/*
 	 * Determine if we are a potential sync standby and remember the result
 	 * for handling replies from standby.
@@ -405,8 +400,8 @@ SyncRepReleaseWaiters(void)
 	/*
 	 * If this WALSender is serving a standby that is not on the list of
 	 * potential sync standbys then we have nothing to do. If we are still
-	 * starting up, still running base backup or the current flush position
-	 * is still invalid, then leave quickly also.
+	 * starting up, still running base backup or the current flush position is
+	 * still invalid, then leave quickly also.
 	 */
 	if (MyWalSnd->sync_standby_priority == 0 ||
 		MyWalSnd->state < WALSNDSTATE_STREAMING ||
@@ -417,21 +412,21 @@ SyncRepReleaseWaiters(void)
 	}
 
 	/*
-	 * We're a potential sync standby. Release waiters if there are
-	 * enough sync standbys and we are considered as sync.
+	 * We're a potential sync standby. Release waiters if there are enough
+	 * sync standbys and we are considered as sync.
 	 */
 	LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
 
 	/*
-	 * Check whether we are a sync standby or not, and calculate
-	 * the oldest positions among all sync standbys.
+	 * Check whether we are a sync standby or not, and calculate the oldest
+	 * positions among all sync standbys.
 	 */
 	got_oldest = SyncRepGetOldestSyncRecPtr(&writePtr, &flushPtr,
 											&applyPtr, &am_sync);
 
 	/*
-	 * If we are managing a sync standby, though we weren't
-	 * prior to this, then announce we are now a sync standby.
+	 * If we are managing a sync standby, though we weren't prior to this,
+	 * then announce we are now a sync standby.
 	 */
 	if (announce_next_takeover && am_sync)
 	{
@@ -494,8 +489,8 @@ static bool
 SyncRepGetOldestSyncRecPtr(XLogRecPtr *writePtr, XLogRecPtr *flushPtr,
 						   XLogRecPtr *applyPtr, bool *am_sync)
 {
-	List		*sync_standbys;
-	ListCell	*cell;
+	List	   *sync_standbys;
+	ListCell   *cell;
 
 	*writePtr = InvalidXLogRecPtr;
 	*flushPtr = InvalidXLogRecPtr;
@@ -509,19 +504,21 @@ SyncRepGetOldestSyncRecPtr(XLogRecPtr *writePtr, XLogRecPtr *flushPtr,
 	 * Quick exit if we are not managing a sync standby or there are not
 	 * enough synchronous standbys.
 	 */
-	if (!(*am_sync) || list_length(sync_standbys) < SyncRepConfig->num_sync)
+	if (!(*am_sync) ||
+		SyncRepConfig == NULL ||
+		list_length(sync_standbys) < SyncRepConfig->num_sync)
 	{
 		list_free(sync_standbys);
 		return false;
 	}
 
 	/*
-	 * Scan through all sync standbys and calculate the oldest
-	 * Write, Flush and Apply positions.
+	 * Scan through all sync standbys and calculate the oldest Write, Flush
+	 * and Apply positions.
 	 */
-	foreach (cell, sync_standbys)
+	foreach(cell, sync_standbys)
 	{
-		WalSnd *walsnd = &WalSndCtl->walsnds[lfirst_int(cell)];
+		WalSnd	   *walsnd = &WalSndCtl->walsnds[lfirst_int(cell)];
 		XLogRecPtr	write;
 		XLogRecPtr	flush;
 		XLogRecPtr	apply;
@@ -557,31 +554,32 @@ SyncRepGetOldestSyncRecPtr(XLogRecPtr *writePtr, XLogRecPtr *flushPtr,
 List *
 SyncRepGetSyncStandbys(bool *am_sync)
 {
-	List	*result = NIL;
-	List	*pending = NIL;
-	int	lowest_priority;
-	int	next_highest_priority;
-	int	this_priority;
-	int	priority;
-	int	i;
-	bool	am_in_pending = false;
-	volatile WalSnd	*walsnd;		/* Use volatile pointer to prevent
-									 * code rearrangement */
+	List	   *result = NIL;
+	List	   *pending = NIL;
+	int			lowest_priority;
+	int			next_highest_priority;
+	int			this_priority;
+	int			priority;
+	int			i;
+	bool		am_in_pending = false;
+	volatile WalSnd *walsnd;	/* Use volatile pointer to prevent code
+								 * rearrangement */
+
+	/* Set default result */
+	if (am_sync != NULL)
+		*am_sync = false;
 
 	/* Quick exit if sync replication is not requested */
 	if (SyncRepConfig == NULL)
 		return NIL;
 
-	if (am_sync != NULL)
-		*am_sync = false;
-
-	lowest_priority = list_length(SyncRepConfig->members);
+	lowest_priority = SyncRepConfig->nmembers;
 	next_highest_priority = lowest_priority + 1;
 
 	/*
-	 * Find the sync standbys which have the highest priority (i.e, 1).
-	 * Also store all the other potential sync standbys into the pending list,
-	 * in order to scan it later and find other sync standbys from it quickly.
+	 * Find the sync standbys which have the highest priority (i.e, 1). Also
+	 * store all the other potential sync standbys into the pending list, in
+	 * order to scan it later and find other sync standbys from it quickly.
 	 */
 	for (i = 0; i < max_wal_senders; i++)
 	{
@@ -605,9 +603,9 @@ SyncRepGetSyncStandbys(bool *am_sync)
 			continue;
 
 		/*
-		 * If the priority is equal to 1, consider this standby as sync
-		 * and append it to the result. Otherwise append this standby
-		 * to the pending list to check if it's actually sync or not later.
+		 * If the priority is equal to 1, consider this standby as sync and
+		 * append it to the result. Otherwise append this standby to the
+		 * pending list to check if it's actually sync or not later.
 		 */
 		if (this_priority == 1)
 		{
@@ -617,7 +615,7 @@ SyncRepGetSyncStandbys(bool *am_sync)
 			if (list_length(result) == SyncRepConfig->num_sync)
 			{
 				list_free(pending);
-				return result;		/* Exit if got enough sync standbys */
+				return result;	/* Exit if got enough sync standbys */
 			}
 		}
 		else
@@ -628,10 +626,10 @@ SyncRepGetSyncStandbys(bool *am_sync)
 
 			/*
 			 * Track the highest priority among the standbys in the pending
-			 * list, in order to use it as the starting priority for later scan
-			 * of the list. This is useful to find quickly the sync standbys
-			 * from the pending list later because we can skip unnecessary
-			 * scans for the unused priorities.
+			 * list, in order to use it as the starting priority for later
+			 * scan of the list. This is useful to find quickly the sync
+			 * standbys from the pending list later because we can skip
+			 * unnecessary scans for the unused priorities.
 			 */
 			if (this_priority < next_highest_priority)
 				next_highest_priority = this_priority;
@@ -665,9 +663,9 @@ SyncRepGetSyncStandbys(bool *am_sync)
 	priority = next_highest_priority;
 	while (priority <= lowest_priority)
 	{
-		ListCell	*cell;
-		ListCell	*prev = NULL;
-		ListCell	*next;
+		ListCell   *cell;
+		ListCell   *prev = NULL;
+		ListCell   *next;
 
 		next_highest_priority = lowest_priority + 1;
 
@@ -687,8 +685,8 @@ SyncRepGetSyncStandbys(bool *am_sync)
 
 				/*
 				 * We should always exit here after the scan of pending list
-				 * starts because we know that the list has enough elements
-				 * to reach SyncRepConfig->num_sync.
+				 * starts because we know that the list has enough elements to
+				 * reach SyncRepConfig->num_sync.
 				 */
 				if (list_length(result) == SyncRepConfig->num_sync)
 				{
@@ -697,8 +695,8 @@ SyncRepGetSyncStandbys(bool *am_sync)
 				}
 
 				/*
-				 * Remove the entry for this sync standby from the list
-				 * to prevent us from looking at the same entry again.
+				 * Remove the entry for this sync standby from the list to
+				 * prevent us from looking at the same entry again.
 				 */
 				pending = list_delete_cell(pending, cell, prev);
 
@@ -730,9 +728,8 @@ SyncRepGetSyncStandbys(bool *am_sync)
 static int
 SyncRepGetStandbyPriority(void)
 {
-	List	   *members;
-	ListCell   *l;
-	int			priority = 0;
+	const char *standby_name;
+	int			priority;
 	bool		found = false;
 
 	/*
@@ -742,22 +739,19 @@ SyncRepGetStandbyPriority(void)
 	if (am_cascading_walsender)
 		return 0;
 
-	if (!SyncStandbysDefined())
+	if (!SyncStandbysDefined() || SyncRepConfig == NULL)
 		return 0;
 
-	members = SyncRepConfig->members;
-	foreach(l, members)
+	standby_name = SyncRepConfig->member_names;
+	for (priority = 1; priority <= SyncRepConfig->nmembers; priority++)
 	{
-		char	   *standby_name = (char *) lfirst(l);
-
-		priority++;
-
 		if (pg_strcasecmp(standby_name, application_name) == 0 ||
-			pg_strcasecmp(standby_name, "*") == 0)
+			strcmp(standby_name, "*") == 0)
 		{
 			found = true;
 			break;
 		}
+		standby_name += strlen(standby_name) + 1;
 	}
 
 	return (found ? priority : 0);
@@ -867,50 +861,6 @@ SyncRepUpdateSyncStandbysDefined(void)
 	}
 }
 
-/*
- * Parse synchronous_standby_names and update the config data
- * of synchronous standbys.
- */
-void
-SyncRepUpdateConfig(void)
-{
-	int	parse_rc;
-
-	if (!SyncStandbysDefined())
-		return;
-
-	/*
-	 * check_synchronous_standby_names() verifies the setting value of
-	 * synchronous_standby_names before this function is called. So
-	 * syncrep_yyparse() must not cause an error here.
-	 */
-	syncrep_scanner_init(SyncRepStandbyNames);
-	parse_rc = syncrep_yyparse();
-	syncrep_scanner_finish();
-
-	if (parse_rc != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg_internal("synchronous_standby_names parser returned %d",
-								 parse_rc)));
-
-	SyncRepConfig = syncrep_parse_result;
-	syncrep_parse_result = NULL;
-}
-
-/*
- * Free a previously-allocated config data of synchronous replication.
- */
-void
-SyncRepFreeConfig(SyncRepConfigData *config)
-{
-	if (!config)
-		return;
-
-	list_free_deep(config->members);
-	pfree(config);
-}
-
 #ifdef USE_ASSERT_CHECKING
 static bool
 SyncRepQueueIsOrderedByLSN(int mode)
@@ -955,76 +905,57 @@ SyncRepQueueIsOrderedByLSN(int mode)
 bool
 check_synchronous_standby_names(char **newval, void **extra, GucSource source)
 {
-	int	parse_rc;
-
 	if (*newval != NULL && (*newval)[0] != '\0')
 	{
+		int			parse_rc;
+		SyncRepConfigData *pconf;
+
+		/* Reset communication variables to ensure a fresh start */
+		syncrep_parse_result = NULL;
+		syncrep_parse_error_msg = NULL;
+
+		/* Parse the synchronous_standby_names string */
 		syncrep_scanner_init(*newval);
 		parse_rc = syncrep_yyparse();
 		syncrep_scanner_finish();
 
-		if (parse_rc != 0)
+		if (parse_rc != 0 || syncrep_parse_result == NULL)
 		{
 			GUC_check_errcode(ERRCODE_SYNTAX_ERROR);
-			GUC_check_errdetail("synchronous_standby_names parser returned %d",
-								parse_rc);
+			if (syncrep_parse_error_msg)
+				GUC_check_errdetail("%s", syncrep_parse_error_msg);
+			else
+				GUC_check_errdetail("synchronous_standby_names parser failed");
 			return false;
 		}
 
-		/*
-		 * Warn if num_sync exceeds the number of names of potential sync
-		 * standbys. This setting doesn't make sense in most cases because
-		 * it implies that enough number of sync standbys will not appear,
-		 * which makes transaction commits wait for sync replication
-		 * infinitely.
-		 *
-		 * If there are more than one standbys having the same name and
-		 * priority, we can see enough sync standbys to complete transaction
-		 * commits. However it's not recommended to run multiple standbys
-		 * with the same priority because we cannot gain full control of
-		 * the selection of sync standbys from them.
-		 *
-		 * OTOH, that setting is OK if we understand the above problem
-		 * regarding the selection of sync standbys and intentionally
-		 * specify * to match all the standbys.
-		 */
-		if (syncrep_parse_result->num_sync >
-			list_length(syncrep_parse_result->members))
-		{
-			ListCell	*l;
-			bool			has_asterisk = false;
+		/* GUC extra value must be malloc'd, not palloc'd */
+		pconf = (SyncRepConfigData *)
+			malloc(syncrep_parse_result->config_size);
+		if (pconf == NULL)
+			return false;
+		memcpy(pconf, syncrep_parse_result, syncrep_parse_result->config_size);
 
-			foreach(l, syncrep_parse_result->members)
-			{
-				char		*standby_name = (char *) lfirst(l);
-
-				if (pg_strcasecmp(standby_name, "*") == 0)
-				{
-					has_asterisk = true;
-					break;
-				}
-			}
-
-			/*
-			 * Only the postmaster warns this inappropriate setting
-			 * to avoid cluttering the log.
-			 */
-			if (!has_asterisk && !IsUnderPostmaster)
-				ereport(WARNING,
-						(errmsg("The configured number of synchronous standbys (%d) exceeds the number of names of potential synchronous ones (%d)",
-								syncrep_parse_result->num_sync, list_length(syncrep_parse_result->members)),
-						 errhint("Specify more names of potential synchronous standbys in synchronous_standby_names.")));
-		}
+		*extra = (void *) pconf;
 
 		/*
-		 * syncrep_yyparse sets the global syncrep_parse_result as side effect.
-		 * But this function is required to just check, so frees it
-		 * after parsing the parameter.
+		 * We need not explicitly clean up syncrep_parse_result.  It, and any
+		 * other cruft generated during parsing, will be freed when the
+		 * current memory context is deleted.  (This code is generally run in
+		 * a short-lived context used for config file processing, so that will
+		 * not be very long.)
 		 */
-		SyncRepFreeConfig(syncrep_parse_result);
 	}
+	else
+		*extra = NULL;
 
 	return true;
+}
+
+void
+assign_synchronous_standby_names(const char *newval, void *extra)
+{
+	SyncRepConfig = (SyncRepConfigData *) extra;
 }
 
 void

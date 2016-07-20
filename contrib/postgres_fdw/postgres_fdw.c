@@ -67,8 +67,6 @@ enum FdwScanPrivateIndex
 	FdwScanPrivateRetrievedAttrs,
 	/* Integer representing the desired fetch_size */
 	FdwScanPrivateFetchSize,
-	/* Oid of user mapping to be used while connecting to the foreign server */
-	FdwScanPrivateUserMappingOid,
 
 	/*
 	 * String describing join i.e. names of relations being joined and types
@@ -669,6 +667,15 @@ postgresGetForeignRelSize(PlannerInfo *root,
  * we have and want to test whether any of them are useful.  For a foreign
  * table, we don't know what indexes are present on the remote side but
  * want to speculate about which ones we'd like to use if they existed.
+ *
+ * This function returns a list of potentially-useful equivalence classes,
+ * but it does not guarantee that an EquivalenceMember exists which contains
+ * Vars only from the given relation.  For example, given ft1 JOIN t1 ON
+ * ft1.x + t1.x = 0, this function will say that the equivalence class
+ * containing ft1.x + t1.x is potentially useful.  Supposing ft1 is remote and
+ * t1 is local (or on a different server), it will turn out that no useful
+ * ORDER BY clause can be generated.  It's not our job to figure that out
+ * here; we're only interested in identifying relevant ECs.
  */
 static List *
 get_useful_ecs_for_relation(PlannerInfo *root, RelOptInfo *rel)
@@ -721,13 +728,32 @@ get_useful_ecs_for_relation(PlannerInfo *root, RelOptInfo *rel)
 		/*
 		 * restrictinfo->mergeopfamilies != NIL is sufficient to guarantee
 		 * that left_ec and right_ec will be initialized, per comments in
-		 * distribute_qual_to_rels, and rel->joininfo should only contain ECs
-		 * where this relation appears on one side or the other.
+		 * distribute_qual_to_rels.
+		 *
+		 * We want to identify which side of this merge-joinable clause
+		 * contains columns from the relation produced by this RelOptInfo. We
+		 * test for overlap, not containment, because there could be extra
+		 * relations on either side.  For example, suppose we've got something
+		 * like ((A JOIN B ON A.x = B.x) JOIN C ON A.y = C.y) LEFT JOIN D ON
+		 * A.y = D.y.  The input rel might be the joinrel between A and B, and
+		 * we'll consider the join clause A.y = D.y. relids contains a
+		 * relation not involved in the join class (B) and the equivalence
+		 * class for the left-hand side of the clause contains a relation not
+		 * involved in the input rel (C).  Despite the fact that we have only
+		 * overlap and not containment in either direction, A.y is potentially
+		 * useful as a sort column.
+		 *
+		 * Note that it's even possible that relids overlaps neither side of
+		 * the join clause.  For example, consider A LEFT JOIN B ON A.x = B.x
+		 * AND A.x = 1.  The clause A.x = 1 will appear in B's joininfo list,
+		 * but overlaps neither side of B.  In that case, we just skip this
+		 * join clause, since it doesn't suggest a useful sort order for this
+		 * relation.
 		 */
-		if (bms_is_subset(relids, restrictinfo->right_ec->ec_relids))
+		if (bms_overlap(relids, restrictinfo->right_ec->ec_relids))
 			useful_eclass_list = list_append_unique_ptr(useful_eclass_list,
 													 restrictinfo->right_ec);
-		else if (bms_is_subset(relids, restrictinfo->left_ec->ec_relids))
+		else if (bms_overlap(relids, restrictinfo->left_ec->ec_relids))
 			useful_eclass_list = list_append_unique_ptr(useful_eclass_list,
 													  restrictinfo->left_ec);
 	}
@@ -1198,11 +1224,10 @@ postgresGetForeignPlan(PlannerInfo *root,
 	 * Build the fdw_private list that will be available to the executor.
 	 * Items in the list must match order in enum FdwScanPrivateIndex.
 	 */
-	fdw_private = list_make5(makeString(sql.data),
+	fdw_private = list_make4(makeString(sql.data),
 							 remote_conds,
 							 retrieved_attrs,
-							 makeInteger(fpinfo->fetch_size),
-							 makeInteger(foreignrel->umid));
+							 makeInteger(fpinfo->fetch_size));
 	if (foreignrel->reloptkind == RELOPT_JOINREL)
 		fdw_private = lappend(fdw_private,
 							  makeString(fpinfo->relation_name->data));
@@ -1234,7 +1259,11 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	ForeignScan *fsplan = (ForeignScan *) node->ss.ps.plan;
 	EState	   *estate = node->ss.ps.state;
 	PgFdwScanState *fsstate;
+	RangeTblEntry *rte;
+	Oid			userid;
+	ForeignTable *table;
 	UserMapping *user;
+	int			rtindex;
 	int			numParams;
 
 	/*
@@ -1250,36 +1279,20 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	node->fdw_state = (void *) fsstate;
 
 	/*
-	 * Obtain the foreign server where to connect and user mapping to use for
-	 * connection. For base relations we obtain this information from
-	 * catalogs. For join relations, this information is frozen at the time of
-	 * planning to ensure that the join is safe to pushdown. In case the
-	 * information goes stale between planning and execution, plan will be
-	 * invalidated and replanned.
+	 * Identify which user to do the remote access as.  This should match what
+	 * ExecCheckRTEPerms() does.  In case of a join, use the lowest-numbered
+	 * member RTE as a representative; we would get the same result from any.
 	 */
 	if (fsplan->scan.scanrelid > 0)
-	{
-		ForeignTable *table;
-
-		/*
-		 * Identify which user to do the remote access as.  This should match
-		 * what ExecCheckRTEPerms() does.
-		 */
-		RangeTblEntry *rte = rt_fetch(fsplan->scan.scanrelid, estate->es_range_table);
-		Oid			userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
-
-		fsstate->rel = node->ss.ss_currentRelation;
-		table = GetForeignTable(RelationGetRelid(fsstate->rel));
-
-		user = GetUserMapping(userid, table->serverid);
-	}
+		rtindex = fsplan->scan.scanrelid;
 	else
-	{
-		Oid			umid = intVal(list_nth(fsplan->fdw_private, FdwScanPrivateUserMappingOid));
+		rtindex = bms_next_member(fsplan->fs_relids, -1);
+	rte = rt_fetch(rtindex, estate->es_range_table);
+	userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
 
-		user = GetUserMappingById(umid);
-		Assert(fsplan->fs_server == user->serverid);
-	}
+	/* Get info about foreign table. */
+	table = GetForeignTable(rte->relid);
+	user = GetUserMapping(userid, table->serverid);
 
 	/*
 	 * Get connection to the foreign server.  Connection manager will
@@ -1316,9 +1329,15 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	 * into local representation and error reporting during that process.
 	 */
 	if (fsplan->scan.scanrelid > 0)
+	{
+		fsstate->rel = node->ss.ss_currentRelation;
 		fsstate->tupdesc = RelationGetDescr(fsstate->rel);
+	}
 	else
+	{
+		fsstate->rel = NULL;
 		fsstate->tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+	}
 
 	fsstate->attinmeta = TupleDescGetAttInMetadata(fsstate->tupdesc);
 
@@ -3924,14 +3943,6 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
  * Assess whether the join between inner and outer relations can be pushed down
  * to the foreign server. As a side effect, save information we obtain in this
  * function to PgFdwRelationInfo passed in.
- *
- * Joins that satisfy conditions below are safe to push down.
- *
- * 1) Join type is INNER or OUTER (one of LEFT/RIGHT/FULL)
- * 2) Both outer and inner portions are safe to push-down
- * 3) All join conditions are safe to push down
- * 4) No relation has local filter (this can be relaxed for INNER JOIN, if we
- *	  can move unpushable clauses upwards in the join tree).
  */
 static bool
 foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
@@ -3944,16 +3955,6 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	ListCell   *lc;
 	List	   *joinclauses;
 	List	   *otherclauses;
-
-	/*
-	 * Core code may call GetForeignJoinPaths hook even when the join relation
-	 * doesn't have a valid user mapping associated with it. See
-	 * build_join_rel() for details. We can't push down such join, since there
-	 * doesn't exist a user mapping which can be used to connect to the
-	 * foreign server.
-	 */
-	if (!OidIsValid(joinrel->umid))
-		return false;
 
 	/*
 	 * We support pushing down INNER, LEFT, RIGHT and FULL OUTER joins.
@@ -4008,6 +4009,26 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			return false;
 	}
 
+	/*
+	 * deparseExplicitTargetList() isn't smart enough to handle anything other
+	 * than a Var.  In particular, if there's some PlaceHolderVar that would
+	 * need to be evaluated within this join tree (because there's an upper
+	 * reference to a quantity that may go to NULL as a result of an outer
+	 * join), then we can't try to push the join down because we'll fail when
+	 * we get to deparseExplicitTargetList().  However, a PlaceHolderVar that
+	 * needs to be evaluated *at the top* of this join tree is OK, because we
+	 * can do that locally after fetching the results from the remote side.
+	 */
+	foreach(lc, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = lfirst(lc);
+		Relids		relids = joinrel->relids;
+
+		if (bms_is_subset(phinfo->ph_eval_at, relids) &&
+			bms_nonempty_difference(relids, phinfo->ph_eval_at))
+			return false;
+	}
+
 	/* Save the join clauses, for later use. */
 	fpinfo->joinclauses = joinclauses;
 
@@ -4035,19 +4056,20 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 
 	/*
 	 * Pull the other remote conditions from the joining relations into join
-	 * clauses or other remote clauses (remote_conds) of this relation wherever
-	 * possible. This avoids building subqueries at every join step, which is
-	 * not currently supported by the deparser logic.
+	 * clauses or other remote clauses (remote_conds) of this relation
+	 * wherever possible. This avoids building subqueries at every join step,
+	 * which is not currently supported by the deparser logic.
 	 *
 	 * For an inner join, clauses from both the relations are added to the
-	 * other remote clauses. For LEFT and RIGHT OUTER join, the clauses from the
-	 * outer side are added to remote_conds since those can be evaluated after
-	 * the join is evaluated. The clauses from inner side are added to the
-	 * joinclauses, since they need to evaluated while constructing the join.
+	 * other remote clauses. For LEFT and RIGHT OUTER join, the clauses from
+	 * the outer side are added to remote_conds since those can be evaluated
+	 * after the join is evaluated. The clauses from inner side are added to
+	 * the joinclauses, since they need to evaluated while constructing the
+	 * join.
 	 *
-	 * For a FULL OUTER JOIN, the other clauses from either relation can not be
-	 * added to the joinclauses or remote_conds, since each relation acts as an
-	 * outer relation for the other. Consider such full outer join as
+	 * For a FULL OUTER JOIN, the other clauses from either relation can not
+	 * be added to the joinclauses or remote_conds, since each relation acts
+	 * as an outer relation for the other. Consider such full outer join as
 	 * unshippable because of the reasons mentioned above in this comment.
 	 *
 	 * The joining sides can not have local conditions, thus no need to test
@@ -4087,9 +4109,9 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	}
 
 	/*
-	 * For an inner join, as explained above all restrictions can be treated
-	 * alike. Treating the pushed down conditions as join conditions allows a
-	 * top level full outer join to be deparsed without requiring subqueries.
+	 * For an inner join, all restrictions can be treated alike. Treating the
+	 * pushed down conditions as join conditions allows a top level full outer
+	 * join to be deparsed without requiring subqueries.
 	 */
 	if (jointype == JOIN_INNER)
 	{
@@ -4109,6 +4131,20 @@ foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	 */
 	fpinfo->use_remote_estimate = fpinfo_o->use_remote_estimate ||
 		fpinfo_i->use_remote_estimate;
+
+	/* Get user mapping */
+	if (fpinfo->use_remote_estimate)
+	{
+		if (fpinfo_o->use_remote_estimate)
+			fpinfo->user = fpinfo_o->user;
+		else
+			fpinfo->user = fpinfo_i->user;
+	}
+	else
+		fpinfo->user = NULL;
+
+	/* Get foreign server */
+	fpinfo->server = fpinfo_o->server;
 
 	/*
 	 * Since both the joining relations come from the same server, the server
@@ -4223,16 +4259,15 @@ postgresGetForeignJoinPaths(PlannerInfo *root,
 	fpinfo->attrs_used = NULL;
 
 	/*
-	 * In case there is a possibility that EvalPlanQual will be executed, we
-	 * should be able to reconstruct the row, from base relations applying all
-	 * the conditions. We create a local plan from a suitable local path
-	 * available in the path list. In case such a path doesn't exist, we can
-	 * not push the join to the foreign server since we won't be able to
+	 * If there is a possibility that EvalPlanQual will be executed, we need
+	 * to be able to reconstruct the row using scans of the base relations.
+	 * GetExistingLocalJoinPath will find a suitable path for this purpose in
+	 * the path list of the joinrel, if one exists.  We must be careful to
+	 * call it before adding any ForeignPath, since the ForeignPath might
+	 * dominate the only suitable local path available.  We also do it before
 	 * reconstruct the row for EvalPlanQual(). Find an alternative local path
-	 * before we add ForeignPath, lest the new path would kick possibly the
-	 * only local path. Do this before calling foreign_join_ok(), since that
-	 * function updates fpinfo and marks it as pushable if the join is found
-	 * to be pushable.
+	 * calling foreign_join_ok(), since that function updates fpinfo and marks
+	 * it as pushable if the join is found to be pushable.
 	 */
 	if (root->parse->commandType == CMD_DELETE ||
 		root->parse->commandType == CMD_UPDATE ||
@@ -4272,25 +4307,13 @@ postgresGetForeignJoinPaths(PlannerInfo *root,
 	cost_qual_eval(&fpinfo->local_conds_cost, fpinfo->local_conds, root);
 
 	/*
-	 * If we are going to estimate the costs using EXPLAIN, we will need
-	 * connection information. Fill it here.
+	 * If we are going to estimate costs locally, estimate the join clause
+	 * selectivity here while we have special join info.
 	 */
-	if (fpinfo->use_remote_estimate)
-		fpinfo->user = GetUserMappingById(joinrel->umid);
-	else
-	{
-		fpinfo->user = NULL;
-
-		/*
-		 * If we are going to estimate costs locally, estimate the join clause
-		 * selectivity here while we have special join info.
-		 */
+	if (!fpinfo->use_remote_estimate)
 		fpinfo->joinclause_sel = clauselist_selectivity(root, fpinfo->joinclauses,
 														0, fpinfo->jointype,
 														extra->sjinfo);
-
-	}
-	fpinfo->server = GetForeignServer(joinrel->serverid);
 
 	/* Estimate costs for bare join relation */
 	estimate_path_cost_size(root, joinrel, NIL, NIL, &rows,
@@ -4488,6 +4511,7 @@ conversion_error_callback(void *arg)
 {
 	const char *attname = NULL;
 	const char *relname = NULL;
+	bool		is_wholerow = false;
 	ConversionLocation *errpos = (ConversionLocation *) arg;
 
 	if (errpos->rel)
@@ -4520,12 +4544,22 @@ conversion_error_callback(void *arg)
 		Assert(IsA(var, Var));
 
 		rte = rt_fetch(var->varno, estate->es_range_table);
+
+		if (var->varattno == 0)
+			is_wholerow = true;
+		else
+			attname = get_relid_attribute_name(rte->relid, var->varattno);
+
 		relname = get_rel_name(rte->relid);
-		attname = get_relid_attribute_name(rte->relid, var->varattno);
 	}
 
-	if (attname && relname)
-		errcontext("column \"%s\" of foreign table \"%s\"", attname, relname);
+	if (relname)
+	{
+		if (is_wholerow)
+			errcontext("whole-row reference to foreign table \"%s\"", relname);
+		else if (attname)
+			errcontext("column \"%s\" of foreign table \"%s\"", attname, relname);
+	}
 }
 
 /*

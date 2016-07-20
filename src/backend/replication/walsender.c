@@ -464,7 +464,7 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	pq_beginmessage(&buf, 'D');
 	pq_sendint(&buf, 2, 2);		/* # of columns */
 	len = strlen(histfname);
-	pq_sendint(&buf, len, 4);		/* col1 len */
+	pq_sendint(&buf, len, 4);	/* col1 len */
 	pq_sendbytes(&buf, histfname, len);
 
 	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY, 0666);
@@ -657,7 +657,7 @@ StartReplication(StartReplicationCmd *cmd)
 
 		/* Initialize shared memory status, too */
 		{
-			WalSnd *walsnd = MyWalSnd;
+			WalSnd	   *walsnd = MyWalSnd;
 
 			SpinLockAcquire(&walsnd->mutex);
 			walsnd->sentPtr = sentPtr;
@@ -728,7 +728,7 @@ StartReplication(StartReplicationCmd *cmd)
 		pq_sendint(&buf, 2, 2); /* number of columns */
 
 		len = strlen(tli_str);
-		pq_sendint(&buf, len, 4);	/* length */
+		pq_sendint(&buf, len, 4);		/* length */
 		pq_sendbytes(&buf, tli_str, len);
 
 		len = strlen(startpos_str);
@@ -747,7 +747,7 @@ StartReplication(StartReplicationCmd *cmd)
  *
  * Inside the walsender we can do better than logical_read_local_xlog_page,
  * which has to do a plain sleep/busy loop, because the walsender's latch gets
- * set everytime WAL is flushed.
+ * set every time WAL is flushed.
  */
 static int
 logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
@@ -901,7 +901,7 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 
 	/* slot_name */
 	len = strlen(NameStr(MyReplicationSlot->data.name));
-	pq_sendint(&buf, len, 4);		/* col1 len */
+	pq_sendint(&buf, len, 4);	/* col1 len */
 	pq_sendbytes(&buf, NameStr(MyReplicationSlot->data.name), len);
 
 	/* consistent wal location */
@@ -1008,7 +1008,7 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 
 	/* Also update the sent position status in shared memory */
 	{
-		WalSnd *walsnd = MyWalSnd;
+		WalSnd	   *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = MyReplicationSlot->data.restart_lsn;
@@ -1569,7 +1569,7 @@ ProcessStandbyReplyMessage(void)
 	 * standby.
 	 */
 	{
-		WalSnd *walsnd = MyWalSnd;
+		WalSnd	   *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->write = writePtr;
@@ -1948,7 +1948,7 @@ InitWalSenderSlot(void)
 	 */
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd	   *walsnd = &WalSndCtl->walsnds[i];
 
 		SpinLockAcquire(&walsnd->mutex);
 
@@ -2161,7 +2161,7 @@ retry:
 	 */
 	if (am_cascading_walsender)
 	{
-		WalSnd *walsnd = MyWalSnd;
+		WalSnd	   *walsnd = MyWalSnd;
 		bool		reload;
 
 		SpinLockAcquire(&walsnd->mutex);
@@ -2399,7 +2399,7 @@ XLogSendPhysical(void)
 
 	/* Update shared memory status */
 	{
-		WalSnd *walsnd = MyWalSnd;
+		WalSnd	   *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = sentPtr;
@@ -2461,7 +2461,7 @@ XLogSendLogical(void)
 
 	/* Update shared memory status */
 	{
-		WalSnd *walsnd = MyWalSnd;
+		WalSnd	   *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = sentPtr;
@@ -2487,13 +2487,14 @@ WalSndDone(WalSndSendDataCallback send_data)
 	send_data();
 
 	/*
-	 * Check a write location to see whether all the WAL have successfully
-	 * been replicated if this walsender is connecting to a standby such as
-	 * pg_receivexlog which always returns an invalid flush location.
-	 * Otherwise, check a flush location.
+	 * To figure out whether all WAL has successfully been replicated, check
+	 * flush location if valid, write otherwise. Tools like pg_receivexlog
+	 * will usually (unless in synchronous mode) return an invalid flush
+	 * location.
 	 */
 	replicatedPtr = XLogRecPtrIsInvalid(MyWalSnd->flush) ?
 		MyWalSnd->write : MyWalSnd->flush;
+
 	if (WalSndCaughtUp && sentPtr == replicatedPtr &&
 		!pq_is_send_pending())
 	{
@@ -2504,7 +2505,10 @@ WalSndDone(WalSndSendDataCallback send_data)
 		proc_exit(0);
 	}
 	if (!waiting_for_ping_response)
+	{
 		WalSndKeepalive(true);
+		waiting_for_ping_response = true;
+	}
 }
 
 /*
@@ -2552,7 +2556,7 @@ WalSndRqstFileReload(void)
 
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd	   *walsnd = &WalSndCtl->walsnds[i];
 
 		if (walsnd->pid == 0)
 			continue;
@@ -2704,7 +2708,7 @@ WalSndWakeup(void)
 void
 WalSndSetState(WalSndState state)
 {
-	WalSnd *walsnd = MyWalSnd;
+	WalSnd	   *walsnd = MyWalSnd;
 
 	Assert(am_walsender);
 
@@ -2780,26 +2784,15 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 	MemoryContextSwitchTo(oldcontext);
 
 	/*
-	 * Allocate and update the config data of synchronous replication,
-	 * and then get the currently active synchronous standbys.
+	 * Get the currently active synchronous standbys.
 	 */
-	SyncRepUpdateConfig();
 	LWLockAcquire(SyncRepLock, LW_SHARED);
 	sync_standbys = SyncRepGetSyncStandbys(NULL);
 	LWLockRelease(SyncRepLock);
 
-	/*
-	 * Free the previously-allocated config data because a backend
-	 * no longer needs it. The next call of this function needs to
-	 * allocate and update the config data newly because the setting
-	 * of sync replication might be changed between the calls.
-	 */
-	SyncRepFreeConfig(SyncRepConfig);
-	SyncRepConfig = NULL;
-
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd	   *walsnd = &WalSndCtl->walsnds[i];
 		XLogRecPtr	sentPtr;
 		XLogRecPtr	write;
 		XLogRecPtr	flush;

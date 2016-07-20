@@ -184,8 +184,8 @@ checkcondition_gin_internal(GinChkVal *gcv, QueryOperand *val, ExecPhraseData *d
 	int			j;
 
 	/*
-	 * if any val requiring a weight is used or caller
-	 * needs position information then set recheck flag
+	 * if any val requiring a weight is used or caller needs position
+	 * information then set recheck flag
 	 */
 	if (val->weight != 0 || data != NULL)
 		*gcv->need_recheck = true;
@@ -222,9 +222,10 @@ TS_execute_ternary(GinChkVal *gcv, QueryItem *curitem)
 	check_stack_depth();
 
 	if (curitem->type == QI_VAL)
-		return checkcondition_gin_internal(gcv,
-										   (QueryOperand *) curitem,
-										   NULL /* don't have any position info */);
+		return
+			checkcondition_gin_internal(gcv,
+										(QueryOperand *) curitem,
+										NULL /* don't have position info */ );
 
 	switch (curitem->qoperator.oper)
 	{
@@ -235,9 +236,10 @@ TS_execute_ternary(GinChkVal *gcv, QueryItem *curitem)
 			return !result;
 
 		case OP_PHRASE:
+
 			/*
-			 * GIN doesn't contain any information about positions,
-			 * treat OP_PHRASE as OP_AND with recheck requirement
+			 * GIN doesn't contain any information about positions, treat
+			 * OP_PHRASE as OP_AND with recheck requirement
 			 */
 			*gcv->need_recheck = true;
 			/* FALL THRU */
@@ -306,7 +308,7 @@ gin_tsquery_consistent(PG_FUNCTION_ARGS)
 
 		res = TS_execute(GETQUERY(query),
 						 &gcv,
-						 true,
+						 TS_EXEC_CALC_NOT | TS_EXEC_PHRASE_AS_AND,
 						 checkcondition_gin);
 	}
 

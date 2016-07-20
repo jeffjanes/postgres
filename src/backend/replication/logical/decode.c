@@ -327,6 +327,15 @@ DecodeStandbyOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			break;
 		case XLOG_STANDBY_LOCK:
 			break;
+		case XLOG_INVALIDATIONS:
+			{
+				xl_invalidations *invalidations =
+				(xl_invalidations *) XLogRecGetData(r);
+
+				ReorderBufferImmediateInvalidation(
+					ctx->reorder, invalidations->nmsgs, invalidations->msgs);
+			}
+			break;
 		default:
 			elog(ERROR, "unexpected RM_STANDBY_ID record type: %u", info);
 	}
@@ -479,12 +488,12 @@ FilterByOrigin(LogicalDecodingContext *ctx, RepOriginId origin_id)
 static void
 DecodeLogicalMsgOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 {
-	SnapBuild	   *builder = ctx->snapshot_builder;
+	SnapBuild  *builder = ctx->snapshot_builder;
 	XLogReaderState *r = buf->record;
-	TransactionId	xid = XLogRecGetXid(r);
-	uint8			info = XLogRecGetInfo(r) & ~XLR_INFO_MASK;
-	RepOriginId		origin_id = XLogRecGetOrigin(r);
-	Snapshot		snapshot;
+	TransactionId xid = XLogRecGetXid(r);
+	uint8		info = XLogRecGetInfo(r) & ~XLR_INFO_MASK;
+	RepOriginId origin_id = XLogRecGetOrigin(r);
+	Snapshot	snapshot;
 	xl_logical_message *message;
 
 	if (info != XLOG_LOGICAL_MESSAGE)
@@ -513,7 +522,8 @@ DecodeLogicalMsgOp(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	snapshot = SnapBuildGetOrBuildSnapshot(builder, xid);
 	ReorderBufferQueueMessage(ctx->reorder, xid, snapshot, buf->endptr,
 							  message->transactional,
-							  message->message, /* first part of message is prefix */
+							  message->message, /* first part of message is
+												 * prefix */
 							  message->message_size,
 							  message->message + message->prefix_size);
 }
@@ -527,8 +537,8 @@ DecodeCommit(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 			 xl_xact_parsed_commit *parsed, TransactionId xid)
 {
 	XLogRecPtr	origin_lsn = InvalidXLogRecPtr;
-	TimestampTz	commit_time = parsed->xact_time;
-	RepOriginId	origin_id = XLogRecGetOrigin(buf->record);
+	TimestampTz commit_time = parsed->xact_time;
+	RepOriginId origin_id = XLogRecGetOrigin(buf->record);
 	int			i;
 
 	if (parsed->xinfo & XACT_XINFO_HAS_ORIGIN)

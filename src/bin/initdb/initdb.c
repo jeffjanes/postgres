@@ -1664,6 +1664,8 @@ setup_depend(FILE *cmdfd)
 		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
 		" FROM pg_opfamily;\n\n",
 		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
+		" FROM pg_am;\n\n",
+		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
 		" FROM pg_amop;\n\n",
 		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
 		" FROM pg_amproc;\n\n",
@@ -2000,6 +2002,9 @@ setup_dictionary(FILE *cmdfd)
  * time.  This is used by pg_dump to allow users to change privileges
  * on catalog objects and to have those privilege changes preserved
  * across dump/reload and pg_upgrade.
+ *
+ * Note that pg_init_privs is only for per-database objects and therefore
+ * we don't include databases or tablespaces.
  */
 static void
 setup_privileges(FILE *cmdfd)
@@ -2105,30 +2110,6 @@ setup_privileges(FILE *cmdfd)
 		"        pg_namespace"
 		"    WHERE"
 		"        nspacl IS NOT NULL;",
-		"INSERT INTO pg_init_privs "
-		"  (objoid, classoid, objsubid, initprivs, privtype)"
-		"    SELECT"
-		"        oid,"
-		"        (SELECT oid FROM pg_class WHERE relname = 'pg_database'),"
-		"        0,"
-		"        datacl,"
-		"        'i'"
-		"    FROM"
-		"        pg_database"
-		"    WHERE"
-		"        datacl IS NOT NULL;",
-		"INSERT INTO pg_init_privs "
-		"  (objoid, classoid, objsubid, initprivs, privtype)"
-		"    SELECT"
-		"        oid,"
-		"        (SELECT oid FROM pg_class WHERE relname = 'pg_tablespace'),"
-		"        0,"
-		"        spcacl,"
-		"        'i'"
-		"    FROM"
-		"        pg_tablespace"
-		"    WHERE"
-		"        spcacl IS NOT NULL;",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -3561,6 +3542,12 @@ main(int argc, char *argv[])
 	effective_user = get_id();
 	if (strlen(username) == 0)
 		username = effective_user;
+
+	if (strncmp(username, "pg_", 3) == 0)
+	{
+		fprintf(stderr, _("%s: superuser name \"%s\" is disallowed; role names cannot begin with \"pg_\"\n"), progname, username);
+		exit(1);
+	}
 
 	printf(_("The files belonging to this database system will be owned "
 			 "by user \"%s\".\n"

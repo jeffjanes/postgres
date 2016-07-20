@@ -118,11 +118,6 @@ XLogReaderAllocate(XLogPageReadCB pagereadfunc, void *private_data)
 		return NULL;
 	}
 
-#ifndef FRONTEND
-	/* Will be loaded on first read */
-	state->timelineHistory = NIL;
-#endif
-
 	return state;
 }
 
@@ -142,10 +137,6 @@ XLogReaderFree(XLogReaderState *state)
 	pfree(state->errormsg_buf);
 	if (state->readRecordBuf)
 		pfree(state->readRecordBuf);
-#ifndef FRONTEND
-	if (state->timelineHistory)
-		list_free_deep(state->timelineHistory);
-#endif
 	pfree(state->readBuf);
 	pfree(state);
 }
@@ -331,7 +322,7 @@ XLogReadRecord(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
 		if (total_len < SizeOfXLogRecord)
 		{
 			report_invalid_record(state,
-						"invalid record length at %X/%X: wanted %u, got %u",
+						 "invalid record length at %X/%X: wanted %u, got %u",
 								  (uint32) (RecPtr >> 32), (uint32) RecPtr,
 								  (uint32) SizeOfXLogRecord, total_len);
 			goto err;
@@ -630,7 +621,7 @@ ValidXLogRecordHeader(XLogReaderState *state, XLogRecPtr RecPtr,
 	if (record->xl_tot_len < SizeOfXLogRecord)
 	{
 		report_invalid_record(state,
-						"invalid record length at %X/%X: wanted %u, got %u",
+						 "invalid record length at %X/%X: wanted %u, got %u",
 							  (uint32) (RecPtr >> 32), (uint32) RecPtr,
 							  (uint32) SizeOfXLogRecord, record->xl_tot_len);
 		return false;

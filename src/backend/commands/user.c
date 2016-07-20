@@ -302,7 +302,7 @@ CreateRole(CreateRoleStmt *stmt)
 		if (!superuser())
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				errmsg("must be superuser to change bypassrls attribute")));
+				 errmsg("must be superuser to change bypassrls attribute")));
 	}
 	else
 	{
@@ -320,8 +320,8 @@ CreateRole(CreateRoleStmt *stmt)
 		ereport(ERROR,
 				(errcode(ERRCODE_RESERVED_NAME),
 				 errmsg("role name \"%s\" is reserved",
-					 stmt->role),
-				 errdetail("Role names starting with \"pg_\" are reserved.")));
+						stmt->role),
+			   errdetail("Role names starting with \"pg_\" are reserved.")));
 
 	/*
 	 * Check the pg_authid relation to be certain the role doesn't already
@@ -977,7 +977,7 @@ DropRole(DropRoleStmt *stmt)
 		if (rolspec->roletype != ROLESPEC_CSTRING)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("cannot use special role specifier in DROP ROLE")));
+				  errmsg("cannot use special role specifier in DROP ROLE")));
 		role = rolspec->rolename;
 
 		tuple = SearchSysCache1(AUTHNAME, PointerGetDatum(role));
@@ -1167,22 +1167,22 @@ RenameRole(const char *oldname, const char *newname)
 				 errmsg("current user cannot be renamed")));
 
 	/*
-	 * Check that the user is not trying to rename a system role and
-	 * not trying to rename a role into the reserved "pg_" namespace.
+	 * Check that the user is not trying to rename a system role and not
+	 * trying to rename a role into the reserved "pg_" namespace.
 	 */
 	if (IsReservedName(NameStr(authform->rolname)))
 		ereport(ERROR,
 				(errcode(ERRCODE_RESERVED_NAME),
 				 errmsg("role name \"%s\" is reserved",
-					 NameStr(authform->rolname)),
-				 errdetail("Role names starting with \"pg_\" are reserved.")));
+						NameStr(authform->rolname)),
+			   errdetail("Role names starting with \"pg_\" are reserved.")));
 
 	if (IsReservedName(newname))
 		ereport(ERROR,
 				(errcode(ERRCODE_RESERVED_NAME),
 				 errmsg("role name \"%s\" is reserved",
-					 newname),
-				 errdetail("Role names starting with \"pg_\" are reserved.")));
+						newname),
+			   errdetail("Role names starting with \"pg_\" are reserved.")));
 
 	/* make sure the new name doesn't exist */
 	if (SearchSysCacheExists1(AUTHNAME, CStringGetDatum(newname)))
@@ -1262,17 +1262,9 @@ GrantRole(GrantRoleStmt *stmt)
 	ListCell   *item;
 
 	if (stmt->grantor)
-	{
-		check_rolespec_name(stmt->grantor,
-							"Cannot specify reserved role as grantor.");
 		grantor = get_rolespec_oid(stmt->grantor, false);
-	}
 	else
 		grantor = GetUserId();
-
-	foreach(item, stmt->grantee_roles)
-		check_rolespec_name(lfirst(item),
-							"Cannot GRANT roles to a reserved role.");
 
 	grantee_ids = roleSpecsToIds(stmt->grantee_roles);
 
@@ -1363,9 +1355,6 @@ ReassignOwnedObjects(ReassignOwnedStmt *stmt)
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 					 errmsg("permission denied to reassign objects")));
 	}
-
-	check_rolespec_name(stmt->newrole,
-						"Cannot specify reserved role as owner.");
 
 	/* Must have privileges on the receiving side too */
 	newrole = get_rolespec_oid(stmt->newrole, false);

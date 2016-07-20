@@ -242,8 +242,8 @@ extern PGDLLIMPORT LWLockMinimallyPadded *BufferIOLWLockArray;
 extern uint32 LockBufHdr(BufferDesc *desc);
 #define UnlockBufHdr(desc, s)	\
 	do {	\
-		pg_atomic_write_u32(&(desc)->state, (s) & (~BM_LOCKED)); \
 		pg_write_barrier(); \
+		pg_atomic_write_u32(&(desc)->state, (s) & (~BM_LOCKED)); \
 	} while (0)
 
 
@@ -300,7 +300,7 @@ extern CkptSortItem *CkptBufferIds;
  * Internal buffer management routines
  */
 /* bufmgr.c */
-extern void WritebackContextInit(WritebackContext *context, int *max_coalesce);
+extern void WritebackContextInit(WritebackContext *context, int *max_pending);
 extern void IssuePendingWritebacks(WritebackContext *context);
 extern void ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag);
 
