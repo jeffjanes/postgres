@@ -1393,10 +1393,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			if (notice_lock_waits && myWaitStatus == STATUS_WAITING)
 				ereport(NOTICE,
 						(errmsg("process %d still waiting for %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-						   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+								MyProcPid, modename, buf.data, msecs, usecs)));
 
 			if (notice_lock_waits && myWaitStatus == STATUS_OK)
 				ereport(NOTICE,

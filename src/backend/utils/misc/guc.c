@@ -1289,7 +1289,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
-		{"notice_lock_waits", PGC_SUSET, LOGGING_WHAT,
+		{"notice_lock_waits", PGC_USERSET, LOGGING_WHAT,
 			gettext_noop("Issues NOTICES for long lock waits."),
 			NULL
 		},
