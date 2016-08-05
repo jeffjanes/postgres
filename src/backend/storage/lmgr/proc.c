@@ -1400,62 +1400,63 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 					(errmsg("process %d acquired %s on %s after %ld.%03d ms",
 							MyProcPid, modename, buf.data, msecs, usecs)));
 
-			if (!log_lock_waits) continue;
-
-			if (deadlock_state == DS_SOFT_DEADLOCK)
-				ereport(LOG,
-						(errmsg("process %d avoided deadlock for %s on %s by rearranging queue order after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-						   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
-			else if (deadlock_state == DS_HARD_DEADLOCK)
+			if (log_lock_waits)
 			{
-				/*
-				 * This message is a bit redundant with the error that will be
-				 * reported subsequently, but in some cases the error report
-				 * might not make it to the log (eg, if it's caught by an
-				 * exception handler), and we want to ensure all long-wait
-				 * events get logged.
-				 */
-				ereport(LOG,
-						(errmsg("process %d detected deadlock while waiting for %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-						   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
-			}
-
-			if (myWaitStatus == STATUS_WAITING)
-				ereport(LOG,
-						(errmsg("process %d still waiting for %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-						   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
-			else if (myWaitStatus == STATUS_OK)
-				ereport(LOG,
-					(errmsg("process %d acquired %s on %s after %ld.%03d ms",
-							MyProcPid, modename, buf.data, msecs, usecs)));
-			else
-			{
-				Assert(myWaitStatus == STATUS_ERROR);
-
-				/*
-				 * Currently, the deadlock checker always kicks its own
-				 * process, which means that we'll only see STATUS_ERROR when
-				 * deadlock_state == DS_HARD_DEADLOCK, and there's no need to
-				 * print redundant messages.  But for completeness and
-				 * future-proofing, print a message if it looks like someone
-				 * else kicked us off the lock.
-				 */
-				if (deadlock_state != DS_HARD_DEADLOCK)
+				if (deadlock_state == DS_SOFT_DEADLOCK)
 					ereport(LOG,
-							(errmsg("process %d failed to acquire %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
+							(errmsg("process %d avoided deadlock for %s on %s by rearranging queue order after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
 							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-						   "Processes holding the lock: %s. Wait queue: %s.",
+							   "Processes holding the lock: %s. Wait queue: %s.",
 												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				else if (deadlock_state == DS_HARD_DEADLOCK)
+				{
+					/*
+					 * This message is a bit redundant with the error that will be
+					 * reported subsequently, but in some cases the error report
+					 * might not make it to the log (eg, if it's caught by an
+					 * exception handler), and we want to ensure all long-wait
+					 * events get logged.
+					 */
+					ereport(LOG,
+							(errmsg("process %d detected deadlock while waiting for %s on %s after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
+							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+							   "Processes holding the lock: %s. Wait queue: %s.",
+												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				}
+
+				if (myWaitStatus == STATUS_WAITING)
+					ereport(LOG,
+							(errmsg("process %d still waiting for %s on %s after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
+							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+							   "Processes holding the lock: %s. Wait queue: %s.",
+												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				else if (myWaitStatus == STATUS_OK)
+					ereport(LOG,
+						(errmsg("process %d acquired %s on %s after %ld.%03d ms",
+								MyProcPid, modename, buf.data, msecs, usecs)));
+				else
+				{
+					Assert(myWaitStatus == STATUS_ERROR);
+
+					/*
+					 * Currently, the deadlock checker always kicks its own
+					 * process, which means that we'll only see STATUS_ERROR when
+					 * deadlock_state == DS_HARD_DEADLOCK, and there's no need to
+					 * print redundant messages.  But for completeness and
+					 * future-proofing, print a message if it looks like someone
+					 * else kicked us off the lock.
+					 */
+					if (deadlock_state != DS_HARD_DEADLOCK)
+						ereport(LOG,
+								(errmsg("process %d failed to acquire %s on %s after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
+								 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+							   "Processes holding the lock: %s. Wait queue: %s.",
+													   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				}
 			}
 
 			/*
