@@ -50,7 +50,7 @@ my @contrib_excludes = (
 
 # Set of variables for frontend modules
 my $frontend_defines = { 'initdb' => 'FRONTEND' };
-my @frontend_uselibpq = ('pg_ctl', 'pg_upgrade', 'pgbench', 'psql');
+my @frontend_uselibpq = ('pg_ctl', 'pg_upgrade', 'pgbench', 'psql', 'initdb');
 my @frontend_uselibpgport = (
 	'pg_archivecleanup', 'pg_test_fsync',
 	'pg_test_timing',    'pg_upgrade',
@@ -269,9 +269,6 @@ sub mkvcbuild
 	$ecpg->AddIncludeDir('src/interfaces/libpq');
 	$ecpg->AddPrefixInclude('src/interfaces/ecpg/preproc');
 	$ecpg->AddFiles('src/interfaces/ecpg/preproc', 'pgc.l', 'preproc.y');
-	$ecpg->AddDefine('MAJOR_VERSION=4');
-	$ecpg->AddDefine('MINOR_VERSION=12');
-	$ecpg->AddDefine('PATCHLEVEL=0');
 	$ecpg->AddDefine('ECPG_COMPILE');
 	$ecpg->AddReference($libpgcommon, $libpgport);
 

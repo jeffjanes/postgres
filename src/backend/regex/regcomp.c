@@ -97,19 +97,19 @@ static chr	chrnamed(struct vars *, const chr *, const chr *, chr);
 static void initcm(struct vars *, struct colormap *);
 static void freecm(struct colormap *);
 static void cmtreefree(struct colormap *, union tree *, int);
-static color setcolor(struct colormap *, chr, pcolor);
+static color setcolor(struct colormap *, chr, color);
 static color maxcolor(struct colormap *);
 static color newcolor(struct colormap *);
-static void freecolor(struct colormap *, pcolor);
+static void freecolor(struct colormap *, color);
 static color pseudocolor(struct colormap *);
 static color subcolor(struct colormap *, chr c);
-static color newsub(struct colormap *, pcolor);
+static color newsub(struct colormap *, color);
 static void subrange(struct vars *, chr, chr, struct state *, struct state *);
 static void subblock(struct vars *, chr, struct state *, struct state *);
 static void okcolors(struct nfa *, struct colormap *);
 static void colorchain(struct colormap *, struct arc *);
 static void uncolorchain(struct colormap *, struct arc *);
-static void rainbow(struct nfa *, struct colormap *, int, pcolor, struct state *, struct state *);
+static void rainbow(struct nfa *, struct colormap *, int, color, struct state *, struct state *);
 static void colorcomplement(struct nfa *, struct colormap *, int, struct state *, struct state *, struct state *);
 
 #ifdef REG_DEBUG
@@ -125,13 +125,13 @@ static struct state *newfstate(struct nfa *, int flag);
 static void dropstate(struct nfa *, struct state *);
 static void freestate(struct nfa *, struct state *);
 static void destroystate(struct nfa *, struct state *);
-static void newarc(struct nfa *, int, pcolor, struct state *, struct state *);
-static void createarc(struct nfa *, int, pcolor, struct state *, struct state *);
+static void newarc(struct nfa *, int, color, struct state *, struct state *);
+static void createarc(struct nfa *, int, color, struct state *, struct state *);
 static struct arc *allocarc(struct nfa *, struct state *);
 static void freearc(struct nfa *, struct arc *);
 static void changearctarget(struct arc *, struct state *);
 static int	hasnonemptyout(struct state *);
-static struct arc *findarc(struct state *, int, pcolor);
+static struct arc *findarc(struct state *, int, color);
 static void cparc(struct nfa *, struct arc *, struct state *, struct state *);
 static void sortins(struct nfa *, struct state *);
 static int	sortins_cmp(const void *, const void *);
@@ -210,10 +210,10 @@ static pg_wchar pg_wc_toupper(pg_wchar c);
 static pg_wchar pg_wc_tolower(pg_wchar c);
 
 /* === regc_locale.c === */
-static celt element(struct vars *, const chr *, const chr *);
-static struct cvec *range(struct vars *, celt, celt, int);
-static int	before(celt, celt);
-static struct cvec *eclass(struct vars *, celt, int);
+static chr	element(struct vars *, const chr *, const chr *);
+static struct cvec *range(struct vars *, chr, chr, int);
+static int	before(chr, chr);
+static struct cvec *eclass(struct vars *, chr, int);
 static struct cvec *cclass(struct vars *, const chr *, const chr *, int);
 static struct cvec *allcases(struct vars *, chr);
 static int	cmp(const chr *, const chr *, size_t);
@@ -1424,8 +1424,8 @@ brackpart(struct vars * v,
 		  struct state * lp,
 		  struct state * rp)
 {
-	celt		startc;
-	celt		endc;
+	chr			startc;
+	chr			endc;
 	struct cvec *cv;
 	const chr  *startp;
 	const chr  *endp;

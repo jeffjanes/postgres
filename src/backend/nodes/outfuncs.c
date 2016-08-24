@@ -1424,6 +1424,17 @@ _outMinMaxExpr(StringInfo str, const MinMaxExpr *node)
 }
 
 static void
+_outSQLValueFunction(StringInfo str, const SQLValueFunction *node)
+{
+	WRITE_NODE_TYPE("SQLVALUEFUNCTION");
+
+	WRITE_ENUM_FIELD(op, SQLValueFunctionOp);
+	WRITE_OID_FIELD(type);
+	WRITE_INT_FIELD(typmod);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
 _outXmlExpr(StringInfo str, const XmlExpr *node)
 {
 	WRITE_NODE_TYPE("XMLEXPR");
@@ -2018,6 +2029,7 @@ _outPlannerGlobal(StringInfo str, const PlannerGlobal *node)
 	WRITE_BOOL_FIELD(dependsOnRole);
 	WRITE_BOOL_FIELD(parallelModeOK);
 	WRITE_BOOL_FIELD(parallelModeNeeded);
+	WRITE_CHAR_FIELD(maxParallelHazard);
 }
 
 static void
@@ -3521,6 +3533,9 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_MinMaxExpr:
 				_outMinMaxExpr(str, obj);
+				break;
+			case T_SQLValueFunction:
+				_outSQLValueFunction(str, obj);
 				break;
 			case T_XmlExpr:
 				_outXmlExpr(str, obj);

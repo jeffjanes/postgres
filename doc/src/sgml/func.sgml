@@ -2039,18 +2039,35 @@
       <row>
        <entry>
         <indexterm>
+         <primary>regexp_match</primary>
+        </indexterm>
+        <literal><function>regexp_match(<parameter>string</parameter> <type>text</type>, <parameter>pattern</parameter> <type>text</type> [, <parameter>flags</parameter> <type>text</type>])</function></literal>
+       </entry>
+       <entry><type>text[]</type></entry>
+       <entry>
+        Return captured substring(s) resulting from the first match of a POSIX
+        regular expression to the <parameter>string</parameter>. See
+        <xref linkend="functions-posix-regexp"> for more information.
+       </entry>
+       <entry><literal>regexp_match('foobarbequebaz', '(bar)(beque)')</literal></entry>
+       <entry><literal>{bar,beque}</literal></entry>
+      </row>
+
+      <row>
+       <entry>
+        <indexterm>
          <primary>regexp_matches</primary>
         </indexterm>
         <literal><function>regexp_matches(<parameter>string</parameter> <type>text</type>, <parameter>pattern</parameter> <type>text</type> [, <parameter>flags</parameter> <type>text</type>])</function></literal>
        </entry>
        <entry><type>setof text[]</type></entry>
        <entry>
-        Return all captured substrings resulting from matching a POSIX regular
-        expression against the <parameter>string</parameter>. See
+        Return captured substring(s) resulting from matching a POSIX regular
+        expression to the <parameter>string</parameter>. See
         <xref linkend="functions-posix-regexp"> for more information.
        </entry>
-       <entry><literal>regexp_matches('foobarbequebaz', '(bar)(beque)')</literal></entry>
-       <entry><literal>{bar,beque}</literal></entry>
+       <entry><literal>regexp_matches('foobarbequebaz', 'ba.', 'g')</literal></entry>
+       <entry><literal>{bar}</literal><para><literal>{baz}</literal></para> (2 rows)</entry>
       </row>
 
       <row>
@@ -4113,6 +4130,9 @@ substring('foobar' from '#"o_b#"%' for '#')    <lineannotation>NULL</lineannotat
     <primary>regexp_replace</primary>
    </indexterm>
    <indexterm>
+    <primary>regexp_match</primary>
+   </indexterm>
+   <indexterm>
     <primary>regexp_matches</primary>
    </indexterm>
    <indexterm>
@@ -4272,64 +4292,106 @@ regexp_replace('foobarbaz', 'b(..)', E'X\\1Y', 'g')
    </para>
 
     <para>
-     The <function>regexp_matches</> function returns a text array of
-     all of the captured substrings resulting from matching a POSIX
-     regular expression pattern.  It has the syntax
-     <function>regexp_matches</function>(<replaceable>string</>, <replaceable>pattern</>
-     <optional>, <replaceable>flags</> </optional>).
-     The function can return no rows, one row, or multiple rows (see
-     the <literal>g</> flag below).  If the <replaceable>pattern</>
-     does not match, the function returns no rows.  If the pattern
-     contains no parenthesized subexpressions, then each row
-     returned is a single-element text array containing the substring
-     matching the whole pattern.  If the pattern contains parenthesized
-     subexpressions, the function returns a text array whose
-     <replaceable>n</>'th element is the substring matching the
-     <replaceable>n</>'th parenthesized subexpression of the pattern
-     (not counting <quote>non-capturing</> parentheses; see below for
-     details).
-     The <replaceable>flags</> parameter is an optional text
-     string containing zero or more single-letter flags that change the
-     function's behavior.  Flag <literal>g</> causes the function to find
-     each match in the string, not only the first one, and return a row for
-     each such match.  Supported flags (though
-     not <literal>g</>)
-     are described in <xref linkend="posix-embedded-options-table">.
+     The <function>regexp_match</> function returns a text array of
+     captured substring(s) resulting from the first match of a POSIX
+     regular expression pattern to a string.  It has the syntax
+     <function>regexp_match</function>(<replaceable>string</>,
+     <replaceable>pattern</> <optional>, <replaceable>flags</> </optional>).
+     If there is no match, the result is <literal>NULL</>.
+     If a match is found, and the <replaceable>pattern</> contains no
+     parenthesized subexpressions, then the result is a single-element text
+     array containing the substring matching the whole pattern.
+     If a match is found, and the <replaceable>pattern</> contains
+     parenthesized subexpressions, then the result is a text array
+     whose <replaceable>n</>'th element is the substring matching
+     the <replaceable>n</>'th parenthesized subexpression of
+     the <replaceable>pattern</> (not counting <quote>non-capturing</>
+     parentheses; see below for details).
+     The <replaceable>flags</> parameter is an optional text string
+     containing zero or more single-letter flags that change the function's
+     behavior.  Supported flags are described
+     in <xref linkend="posix-embedded-options-table">.
     </para>
 
    <para>
     Some examples:
 <programlisting>
-SELECT regexp_matches('foobarbequebaz', '(bar)(beque)');
- regexp_matches 
-----------------
- {bar,beque}
+SELECT regexp_match('foobarbequebaz', 'bar.*que');
+ regexp_match
+--------------
+ {barbeque}
 (1 row)
 
+SELECT regexp_match('foobarbequebaz', '(bar)(beque)');
+ regexp_match
+--------------
+ {bar,beque}
+(1 row)
+</programlisting>
+    In the common case where you just want the whole matching substring
+    or <literal>NULL</> for no match, write something like
+<programlisting>
+SELECT (regexp_match('foobarbequebaz', 'bar.*que'))[1];
+ regexp_match
+--------------
+ barbeque
+(1 row)
+</programlisting>
+   </para>
+
+    <para>
+     The <function>regexp_matches</> function returns a set of text arrays
+     of captured substring(s) resulting from matching a POSIX regular
+     expression pattern to a string.  It has the same syntax as
+     <function>regexp_match</function>.
+     This function returns no rows if there is no match, one row if there is
+     a match and the <literal>g</> flag is not given, or <replaceable>N</>
+     rows if there are <replaceable>N</> matches and the <literal>g</> flag
+     is given.  Each returned row is a text array containing the whole
+     matched substring or the substrings matching parenthesized
+     subexpressions of the <replaceable>pattern</>, just as described above
+     for <function>regexp_match</function>.
+     <function>regexp_matches</> accepts all the flags shown
+     in <xref linkend="posix-embedded-options-table">, plus
+     the <literal>g</> flag which commands it to return all matches, not
+     just the first one.
+    </para>
+
+   <para>
+    Some examples:
+<programlisting>
+ SELECT regexp_matches('foo', 'not there');
+ regexp_matches
+----------------
+(0 rows)
+
 SELECT regexp_matches('foobarbequebazilbarfbonk', '(b[^b]+)(b[^b]+)', 'g');
- regexp_matches 
+ regexp_matches
 ----------------
  {bar,beque}
  {bazil,barf}
 (2 rows)
-
-SELECT regexp_matches('foobarbequebaz', 'barbeque');
- regexp_matches 
-----------------
- {barbeque}
-(1 row)
 </programlisting>
    </para>
 
-   <para>
-    It is possible to force <function>regexp_matches()</> to always
-    return one row by using a sub-select;  this is particularly useful
-    in a <literal>SELECT</> target list when you want all rows
-    returned, even non-matching ones:
+   <tip>
+    <para>
+     In most cases <function>regexp_matches()</> should be used with
+     the <literal>g</> flag, since if you only want the first match, it's
+     easier and more efficient to use <function>regexp_match()</>.
+     However, <function>regexp_match()</> only exists
+     in <productname>PostgreSQL</> version 10 and up.  When working in older
+     versions, a common trick is to place a <function>regexp_matches()</>
+     call in a sub-select, for example:
 <programlisting>
 SELECT col1, (SELECT regexp_matches(col2, '(bar)(beque)')) FROM tab;
 </programlisting>
-   </para>
+     This produces a text array if there's a match, or <literal>NULL</> if
+     not, the same as <function>regexp_match()</> would do.  Without the
+     sub-select, this query would produce no output at all for table rows
+     without a match, which is typically not the desired behavior.
+    </para>
+   </tip>
 
     <para>
      The <function>regexp_split_to_table</> function splits a string using a POSIX
@@ -4408,6 +4470,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', E'\\s*') AS foo;
     zero-length matches that occur at the start or end of the string
     or immediately after a previous match.  This is contrary to the strict
     definition of regexp matching that is implemented by
+    <function>regexp_match</> and
     <function>regexp_matches</>, but is usually the most convenient behavior
     in practice.  Other software systems such as Perl use similar definitions.
    </para>
@@ -5482,7 +5545,7 @@ SELECT SUBSTRING('XY1234Z', 'Y*?([0-9]{1,3})');
     into the digits and the parts before and after them.  We might try to
     do that like this:
 <screen>
-SELECT regexp_matches('abc01234xyz', '(.*)(\d+)(.*)');
+SELECT regexp_match('abc01234xyz', '(.*)(\d+)(.*)');
 <lineannotation>Result: </lineannotation><computeroutput>{abc0123,4,xyz}</computeroutput>
 </screen>
     That didn't work: the first <literal>.*</> is greedy so
@@ -5490,14 +5553,14 @@ SELECT regexp_matches('abc01234xyz', '(.*)(\d+)(.*)');
     match at the last possible place, the last digit.  We might try to fix
     that by making it non-greedy:
 <screen>
-SELECT regexp_matches('abc01234xyz', '(.*?)(\d+)(.*)');
+SELECT regexp_match('abc01234xyz', '(.*?)(\d+)(.*)');
 <lineannotation>Result: </lineannotation><computeroutput>{abc,0,""}</computeroutput>
 </screen>
     That didn't work either, because now the RE as a whole is non-greedy
     and so it ends the overall match as soon as possible.  We can get what
     we want by forcing the RE as a whole to be greedy:
 <screen>
-SELECT regexp_matches('abc01234xyz', '(?:(.*?)(\d+)(.*)){1,1}');
+SELECT regexp_match('abc01234xyz', '(?:(.*?)(\d+)(.*)){1,1}');
 <lineannotation>Result: </lineannotation><computeroutput>{abc,01234,xyz}</computeroutput>
 </screen>
     Controlling the RE's overall greediness separately from its components'
@@ -9294,7 +9357,7 @@ CREATE TYPE rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple
         <entry><type>tsvector</type></entry>
         <entry>convert array of lexemes to <type>tsvector</type></entry>
         <entry><literal>array_to_tsvector('{fat,cat,rat}'::text[])</literal></entry>
-        <entry><literal>'fat' 'cat' 'rat'</literal></entry>
+        <entry><literal>'cat' 'fat' 'rat'</literal></entry>
        </row>
        <row>
         <entry>
@@ -16290,6 +16353,18 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
    </indexterm>
 
    <indexterm>
+    <primary>pg_index_column_has_property</primary>
+   </indexterm>
+
+   <indexterm>
+    <primary>pg_index_has_property</primary>
+   </indexterm>
+
+   <indexterm>
+    <primary>pg_indexam_has_property</primary>
+   </indexterm>
+
+   <indexterm>
     <primary>pg_options_to_table</primary>
    </indexterm>
 
@@ -16477,6 +16552,21 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
               number of columns, pretty-printing is implied</entry>
       </row>
       <row>
+       <entry><literal><function>pg_index_column_has_property(<parameter>index_oid</parameter>, <parameter>column_no</>, <parameter>prop_name</>)</function></literal></entry>
+       <entry><type>boolean</type></entry>
+       <entry>test whether an index column has a specified property</entry>
+      </row>
+      <row>
+       <entry><literal><function>pg_index_has_property(<parameter>index_oid</parameter>, <parameter>prop_name</>)</function></literal></entry>
+       <entry><type>boolean</type></entry>
+       <entry>test whether an index has a specified property</entry>
+      </row>
+      <row>
+       <entry><literal><function>pg_indexam_has_property(<parameter>am_oid</parameter>, <parameter>prop_name</>)</function></literal></entry>
+       <entry><type>boolean</type></entry>
+       <entry>test whether an index access method has a specified property</entry>
+      </row>
+      <row>
        <entry><literal><function>pg_options_to_table(<parameter>reloptions</parameter>)</function></literal></entry>
        <entry><type>setof record</type></entry>
        <entry>get the set of storage option name/value pairs</entry>
@@ -16618,6 +16708,144 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
    <function>pg_get_userbyid</function> extracts a role's name given
    its OID.
   </para>
+
+  <para>
+   <function>pg_index_column_has_property</function>,
+   <function>pg_index_has_property</function>, and
+   <function>pg_indexam_has_property</function> return whether the
+   specified index column, index, or index access method possesses the named
+   property. <literal>NULL</literal> is returned if the property name is not
+   known or does not apply to the particular object, or if the OID or column
+   number does not identify a valid object.  Refer to
+   <xref linkend="functions-info-index-column-props"> for column properties,
+   <xref linkend="functions-info-index-props"> for index properties, and
+   <xref linkend="functions-info-indexam-props"> for access method properties.
+   (Note that extension access methods can define additional property names
+   for their indexes.)
+  </para>
+
+  <table id="functions-info-index-column-props">
+   <title>Index Column Properties</title>
+   <tgroup cols="2">
+    <thead>
+     <row><entry>Name</entry><entry>Description</entry></row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>asc</literal></entry>
+      <entry>Does the column sort in ascending order on a forward scan?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>desc</literal></entry>
+      <entry>Does the column sort in descending order on a forward scan?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>nulls_first</literal></entry>
+      <entry>Does the column sort with nulls first on a forward scan?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>nulls_last</literal></entry>
+      <entry>Does the column sort with nulls last on a forward scan?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>orderable</literal></entry>
+      <entry>Does the column possess any defined sort ordering?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>distance_orderable</literal></entry>
+      <entry>Can the column be scanned in order by a <quote>distance</>
+      operator, for example <literal>ORDER BY col &lt;-&gt; constant</> ?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>returnable</literal></entry>
+      <entry>Can the column value be returned by an index-only scan?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>search_array</literal></entry>
+      <entry>Does the column natively support <literal>col = ANY(array)</>
+      searches?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>search_nulls</literal></entry>
+      <entry>Does the column support <literal>IS NULL</> and
+      <literal>IS NOT NULL</> searches?
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <table id="functions-info-index-props">
+   <title>Index Properties</title>
+   <tgroup cols="2">
+    <thead>
+     <row><entry>Name</entry><entry>Description</entry></row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>clusterable</literal></entry>
+      <entry>Can the index be used in a <literal>CLUSTER</> command?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>index_scan</literal></entry>
+      <entry>Does the index support plain (non-bitmap) scans?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>bitmap_scan</literal></entry>
+      <entry>Does the index support bitmap scans?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>backward_scan</literal></entry>
+      <entry>Can the index be scanned backwards?
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <table id="functions-info-indexam-props">
+   <title>Index Access Method Properties</title>
+   <tgroup cols="2">
+    <thead>
+     <row><entry>Name</entry><entry>Description</entry></row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>can_order</literal></entry>
+      <entry>Does the access method support <literal>ASC</>,
+      <literal>DESC</> and related keywords in
+      <literal>CREATE INDEX</>?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>can_unique</literal></entry>
+      <entry>Does the access method support unique indexes?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>can_multi_col</literal></entry>
+      <entry>Does the access method support indexes with multiple columns?
+      </entry>
+     </row>
+     <row>
+      <entry><literal>can_exclude</literal></entry>
+      <entry>Does the access method support exclusion constraints?
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
 
   <para>
    <function>pg_options_to_table</function> returns the set of storage
@@ -16892,6 +17120,10 @@ SELECT collation for ('foo' COLLATE "de_DE");
    </indexterm>
 
    <indexterm>
+    <primary>txid_current_if_assigned</primary>
+   </indexterm>
+
+   <indexterm>
     <primary>txid_current_snapshot</primary>
    </indexterm>
 
@@ -16930,6 +17162,11 @@ SELECT collation for ('foo' COLLATE "de_DE");
        <entry><literal><function>txid_current()</function></literal></entry>
        <entry><type>bigint</type></entry>
        <entry>get current transaction ID, assigning a new one if the current transaction does not have one</entry>
+      </row>
+      <row>
+       <entry><literal><function>txid_current_if_assigned()</function></literal></entry>
+       <entry><type>bigint</type></entry>
+       <entry>same as <function>txid_current()</function> but returns null instead of assigning an xid if none is already assigned</entry>
       </row>
       <row>
        <entry><literal><function>txid_current_snapshot()</function></literal></entry>

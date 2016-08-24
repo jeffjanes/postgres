@@ -807,13 +807,14 @@ ReorderBufferCommitChild(ReorderBuffer *rb, TransactionId xid,
 		elog(ERROR, "subxact logged without previous toplevel record");
 
 	/*
-	 * Pass the our base snapshot to the parent transaction if it doesn't have
+	 * Pass our base snapshot to the parent transaction if it doesn't have
 	 * one, or ours is older. That can happen if there are no changes in the
 	 * toplevel transaction but in one of the child transactions. This allows
-	 * the parent to simply use it's base snapshot initially.
+	 * the parent to simply use its base snapshot initially.
 	 */
-	if (txn->base_snapshot == NULL ||
-		txn->base_snapshot_lsn > subtxn->base_snapshot_lsn)
+	if (subtxn->base_snapshot != NULL &&
+		(txn->base_snapshot == NULL ||
+		 txn->base_snapshot_lsn > subtxn->base_snapshot_lsn))
 	{
 		txn->base_snapshot = subtxn->base_snapshot;
 		txn->base_snapshot_lsn = subtxn->base_snapshot_lsn;
@@ -2316,7 +2317,10 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	if (write(fd, rb->outbuf, ondisk->size) != ondisk->size)
 	{
+		int save_errno = errno;
+
 		CloseTransientFile(fd);
+		errno = save_errno;
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to data file for XID %u: %m",
@@ -3069,7 +3073,8 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, Oid relid, const char *fname)
 	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY, 0);
 	if (fd < 0)
 		ereport(ERROR,
-				(errmsg("could not open file \"%s\": %m", path)));
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", path)));
 
 	while (true)
 	{

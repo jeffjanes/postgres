@@ -1471,7 +1471,7 @@ CREATE VIEW routines AS
            CAST(null AS cardinal_number) AS result_cast_char_octet_length,
            CAST(null AS sql_identifier) AS result_cast_char_set_catalog,
            CAST(null AS sql_identifier) AS result_cast_char_set_schema,
-           CAST(null AS sql_identifier) AS result_cast_character_set_name,
+           CAST(null AS sql_identifier) AS result_cast_char_set_name,
            CAST(null AS sql_identifier) AS result_cast_collation_catalog,
            CAST(null AS sql_identifier) AS result_cast_collation_schema,
            CAST(null AS sql_identifier) AS result_cast_collation_name,
@@ -2068,7 +2068,7 @@ CREATE VIEW triggers AS
            -- XXX strange hacks follow
            CAST(
              CASE WHEN pg_has_role(c.relowner, 'USAGE')
-               THEN (SELECT m[1] FROM regexp_matches(pg_get_triggerdef(t.oid), E'.{35,} WHEN \\((.+)\\) EXECUTE PROCEDURE') AS rm(m) LIMIT 1)
+               THEN (regexp_match(pg_get_triggerdef(t.oid), E'.{35,} WHEN \\((.+)\\) EXECUTE PROCEDURE'))[1]
                ELSE null END
              AS character_data) AS action_condition,
            CAST(
