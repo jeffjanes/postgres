@@ -2,6 +2,9 @@ echo $HOSTNAME
 
 TMPDATA=/tmp/data2
 INST=/home/jjanes/pgsql/torn_bisect/
+JJXID='--JJ_xid=4'
+JJTORN='--JJ_torn_page=1000'
+JJTORNOFF='--JJ_torn_page=0'
 
 on_exit() {
   echo "Cleaning up"
@@ -49,8 +52,6 @@ checkpoint_warning = 0
 archive_mode = off
 archive_command = 'echo archive_command %p %f `date`'       # Don't actually archive, just make pgsql think we are
 archive_timeout = 30
-log_checkpoints = on
-log_autovacuum_min_duration=0
 track_io_timing=on
 autovacuum_naptime = 10s
 ## if updates are not HOT, the table/index can easily bloat faster than default throttled autovac can possibly
@@ -62,8 +63,6 @@ restart_after_crash = on
 ## consistent view of the written-but-not-fsynced data even after PG restarts.  Turning it off gives more 
 ## testing per unit of time.
 fsync=off
-log_error_verbosity = verbose
-JJ_vac=1
 shared_preload_libraries = 'pg_stat_statements' 
 
 wal_compression=1
@@ -74,23 +73,28 @@ track_commit_timestamp=1
 gin_pending_list_limit=1MB
 END
 
-## the extra verbosity is often just annoying, turn it off when not needed.
-## (but leave them turned on above, so I remember what settings I need when
-## I do need it.
+## The below settings create to much noise to leave them on all the time.
+## But once a problem is found, these are some of the first things to try
+## for diagnosing it
 
 cat <<END  >> $TMPDATA/postgresql.conf
-log_error_verbosity = default
-log_checkpoints = off
-log_autovacuum_min_duration=-1
-JJ_vac=0
+#log_error_verbosity = verbose
+#log_checkpoints = on
+#log_autovacuum_min_duration=-1
+#JJ_vac=1
 END
 
 $INST/bin/pg_ctl -D $TMPDATA start -w || exit
 $INST/bin/createdb
+$INST/bin/psql -c 'select version()'
+$INST/bin/pg_config
 $INST/bin/psql -c 'create extension pageinspect'
 $INST/bin/psql -c 'create extension pgstattuple'
 $INST/bin/psql -c 'create extension pg_stat_statements'
+$INST/bin/psql -c 'create extension pg_buffercache'
 $INST/bin/psql -c "create extension pg_freespacemap"
+$INST/bin/psql -c "create extension btree_gist"
+$INST/bin/psql -c "create extension btree_gin"
 
 ##  run the initial load now, before JJ_torn_page is turned on,
 ##  or else we crash before even getting the table initialized due to WAL of the GIN or GIST index build.
@@ -103,7 +107,7 @@ perl count.pl 8 0|| on_error;
 #while (true) ; do  psql -c "\dit+ ";  sleep 5; done &
 
 for g in `seq 1 5000` ; do
-  $INST/bin/pg_ctl -D $TMPDATA restart -o "--ignore_checksum_failure=0 --JJ_torn_page=1000 --JJ_xid=4" -w
+  $INST/bin/pg_ctl -D $TMPDATA restart -o "--ignore_checksum_failure=0 $JJTORN $JJXID" -w
   echo JJ starting loop $g;
   for f in `seq 1 100`; do 
     #$INST/bin/psql -c 'SELECT datname, datfrozenxid, age(datfrozenxid) FROM pg_database;'; 
@@ -113,8 +117,8 @@ for g in `seq 1 5000` ; do
   echo JJ ending loop $g;
   ## give autovac a chance to run to completion
   # need to disable crashing, as sometimes the vacuum itself triggers the crash
-  $INST/bin/pg_ctl -D $TMPDATA restart -o "--ignore_checksum_failure=0 --JJ_torn_page=0 --JJ_xid=4" -w || (sleep 5; \
-  $INST/bin/pg_ctl -D $TMPDATA restart -o "--ignore_checksum_failure=0 --JJ_torn_page=0 --JJ_xid=4" -w || on_error;)
+  $INST/bin/pg_ctl -D $TMPDATA restart -o "--ignore_checksum_failure=0 $JJTORNOFF $JJXID" -w || (sleep 5; \
+  $INST/bin/pg_ctl -D $TMPDATA restart -o "--ignore_checksum_failure=0 $JJTORNOFF $JJXID" -w || on_error;)
   ## trying to get autovac to work in the face of consistent crashing 
   ## is just too hard, so do manual vacs unless autovac is specifically 
   ## what you are testing.
