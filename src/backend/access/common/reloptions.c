@@ -148,6 +148,15 @@ static relopt_int intRelOpts[] =
 	},
 	{
 		{
+			"init_buckets",
+			"Number of buckets to create for a hash index",
+			RELOPT_KIND_HASH,
+			ShareUpdateExclusiveLock	/* applies only at create or truncate */
+		},
+		-1, 2, INT_MAX /*XXX 32bit max*/
+	},
+	{
+		{
 			"autovacuum_vacuum_threshold",
 			"Minimum number of tuple updates or deletes prior to vacuum",
 			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,

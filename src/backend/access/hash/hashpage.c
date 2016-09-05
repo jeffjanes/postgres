@@ -366,6 +366,9 @@ _hash_metapinit(Relation rel, double num_tuples, ForkNumber forkNum)
 	 * _hash_expandtable().
 	 */
 	dnumbuckets = num_tuples / ffactor;
+elog(NOTICE,"JJ 369 dnumbuckets %f", dnumbuckets);
+	dnumbuckets = HashGetBuckets(rel,dnumbuckets);
+elog(NOTICE,"JJ 371 dnumbuckets %f", dnumbuckets);
 	if (dnumbuckets <= 2.0)
 		num_buckets = 2;
 	else if (dnumbuckets >= (double) 0x40000000)

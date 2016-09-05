@@ -217,6 +217,20 @@ typedef HashMetaPageData *HashMetaPage;
 #define ISSET(A, N)		((A)[(N)/BITS_PER_MAP] & (1<<((N)%BITS_PER_MAP)))
 
 /*
+ * Storage type for Hash's reloptions
+ */
+typedef struct HashOptions
+{
+	int32		vl_len_;		/* varlena header (do not touch directly!) */
+	int			fillfactor;		/* page fill factor in percent (0..100) */
+	int			init_buckets;	/* initial number of buckets */
+} HashOptions;
+
+#define HashGetBuckets(relation,defaultib) \
+	((relation)->rd_options ? \
+	 ((HashOptions *) (relation)->rd_options)->init_buckets : defaultib)
+
+/*
  * page-level and high-level locking modes (see README)
  */
 #define HASH_READ		BUFFER_LOCK_SHARE
