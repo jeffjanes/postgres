@@ -179,6 +179,21 @@ typedef HashMetaPageData *HashMetaPage;
 #define HASH_DEFAULT_FILLFACTOR		75
 
 /*
+ * HashGetFillFactor
+ *		Returns the hash index's fillfactor.  Note multiple eval of argument!
+ */
+#define HashGetFillFactor(relation, defaultff) \
+	((relation)->rd_options ? \
+	 ((HashOptions *) (relation)->rd_options)->fillfactor : (defaultff))
+
+/*
+ * HashGetTargetPageUsage
+ *		Returns the hash index's desired space usage per page in bytes.
+ */
+#define HashGetTargetPageUsage(relation, defaultff) \
+	(BLCKSZ * HashFillFactor(relation, defaultff) / 100)
+
+/*
  * Constants
  */
 #define BYTE_TO_BIT				3		/* 2^3 bits/byte */
