@@ -2368,7 +2368,35 @@ SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
     14
 (1 row)
 
+CREATE INDEX hash_tuplesort_init_buckets_idx ON tenk1 USING hash (stringu1 name_ops) WITH (fillfactor = 100,init_buckets=1000);
+WARNING:  hash indexes are not WAL-logged and their use is discouraged
+SELECT 
+       (SELECT relpages FROM pg_class WHERE relname ='hash_tuplesort_init_buckets_idx') >
+       (SELECT relpages FROM pg_class WHERE relname ='hash_tuplesort_idx');
+ ?column? 
+----------
+ t
+(1 row)
+
 DROP INDEX hash_tuplesort_idx;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on tenk1
+         Recheck Cond: (stringu1 = 'TVAAAA'::name)
+         ->  Bitmap Index Scan on hash_tuplesort_init_buckets_idx
+               Index Cond: (stringu1 = 'TVAAAA'::name)
+(5 rows)
+
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+ count 
+-------
+    14
+(1 row)
+
+DROP INDEX hash_tuplesort_init_buckets_idx;
 RESET maintenance_work_mem;
 --
 -- Test functional index

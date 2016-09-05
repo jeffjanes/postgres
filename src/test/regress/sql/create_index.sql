@@ -697,7 +697,15 @@ CREATE INDEX hash_tuplesort_idx ON tenk1 USING hash (stringu1 name_ops) WITH (fi
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
 SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+CREATE INDEX hash_tuplesort_init_buckets_idx ON tenk1 USING hash (stringu1 name_ops) WITH (fillfactor = 100,init_buckets=1000);
+SELECT 
+       (SELECT relpages FROM pg_class WHERE relname ='hash_tuplesort_init_buckets_idx') >
+       (SELECT relpages FROM pg_class WHERE relname ='hash_tuplesort_idx');
 DROP INDEX hash_tuplesort_idx;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+DROP INDEX hash_tuplesort_init_buckets_idx;
 RESET maintenance_work_mem;
 
 
