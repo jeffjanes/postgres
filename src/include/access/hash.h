@@ -191,7 +191,7 @@ typedef HashMetaPageData *HashMetaPage;
  *		Returns the hash index's desired space usage per page in bytes.
  */
 #define HashGetTargetPageUsage(relation, defaultff) \
-	(BLCKSZ * HashFillFactor(relation, defaultff) / 100)
+	(BLCKSZ * HashGetFillFactor(relation, defaultff) / 100)
 
 /*
  * Constants
@@ -242,7 +242,7 @@ typedef struct HashOptions
 } HashOptions;
 
 #define HashGetBuckets(relation,defaultib) \
-	((relation)->rd_options ? \
+	((relation)->rd_options && ((HashOptions *) (relation)->rd_options)->init_buckets > 0 ? \
 	 ((HashOptions *) (relation)->rd_options)->init_buckets : defaultib)
 
 /*
