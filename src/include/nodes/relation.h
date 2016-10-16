@@ -1087,7 +1087,8 @@ struct CustomPathMethods;
 typedef struct CustomPath
 {
 	Path		path;
-	uint32		flags;			/* mask of CUSTOMPATH_* flags, see above */
+	uint32		flags;			/* mask of CUSTOMPATH_* flags, see
+								 * nodes/extensible.h */
 	List	   *custom_paths;	/* list of child Path nodes, if any */
 	List	   *custom_private;
 	const struct CustomPathMethods *methods;
@@ -1189,7 +1190,7 @@ typedef struct GatherPath
 {
 	Path		path;
 	Path	   *subpath;		/* path for each worker */
-	bool		single_copy;	/* path must not be executed >1x */
+	bool		single_copy;	/* don't execute path more than once */
 } GatherPath;
 
 /*

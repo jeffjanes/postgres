@@ -1253,9 +1253,7 @@ exec_parse_message(const char *query_string,	/* string to execute */
 		unnamed_stmt_context =
 			AllocSetContextCreate(MessageContext,
 								  "unnamed prepared statement",
-								  ALLOCSET_DEFAULT_MINSIZE,
-								  ALLOCSET_DEFAULT_INITSIZE,
-								  ALLOCSET_DEFAULT_MAXSIZE);
+								  ALLOCSET_DEFAULT_SIZES);
 		oldcontext = MemoryContextSwitchTo(unnamed_stmt_context);
 	}
 
@@ -3770,8 +3768,7 @@ PostgresMain(int argc, char *argv[],
 	/*
 	 * Send this backend's cancellation info to the frontend.
 	 */
-	if (whereToSendOutput == DestRemote &&
-		PG_PROTOCOL_MAJOR(FrontendProtocol) >= 2)
+	if (whereToSendOutput == DestRemote)
 	{
 		StringInfoData buf;
 
@@ -3794,9 +3791,7 @@ PostgresMain(int argc, char *argv[],
 	 */
 	MessageContext = AllocSetContextCreate(TopMemoryContext,
 										   "MessageContext",
-										   ALLOCSET_DEFAULT_MINSIZE,
-										   ALLOCSET_DEFAULT_INITSIZE,
-										   ALLOCSET_DEFAULT_MAXSIZE);
+										   ALLOCSET_DEFAULT_SIZES);
 
 	/*
 	 * Remember stand-alone backend startup time

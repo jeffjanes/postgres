@@ -67,6 +67,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
@@ -254,6 +255,7 @@ static RecoveryTargetAction recoveryTargetAction = RECOVERY_TARGET_ACTION_PAUSE;
 static TransactionId recoveryTargetXid;
 static TimestampTz recoveryTargetTime;
 static char *recoveryTargetName;
+static XLogRecPtr recoveryTargetLSN;
 static int	recovery_min_apply_delay = 0;
 static TimestampTz recoveryDelayUntilTime;
 
@@ -275,6 +277,7 @@ static bool fast_promote = false;
  */
 static TransactionId recoveryStopXid;
 static TimestampTz recoveryStopTime;
+static XLogRecPtr recoveryStopLSN;
 static char recoveryStopName[MAXFNAMELEN];
 static bool recoveryStopAfter;
 
@@ -4663,9 +4666,7 @@ XLOGShmemInit(void)
 	{
 		walDebugCxt = AllocSetContextCreate(TopMemoryContext,
 											"WAL Debug",
-											ALLOCSET_DEFAULT_MINSIZE,
-											ALLOCSET_DEFAULT_INITSIZE,
-											ALLOCSET_DEFAULT_MAXSIZE);
+											ALLOCSET_DEFAULT_SIZES);
 		MemoryContextAllowInCriticalSection(walDebugCxt, true);
 	}
 #endif
@@ -5024,7 +5025,8 @@ readRecoveryCommandFile(void)
 				rtli = (TimeLineID) strtoul(item->value, NULL, 0);
 				if (errno == EINVAL || errno == ERANGE)
 					ereport(FATAL,
-							(errmsg("recovery_target_timeline is not a valid number: \"%s\"",
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("recovery_target_timeline is not a valid number: \"%s\"",
 									item->value)));
 			}
 			if (rtli)
@@ -5040,7 +5042,8 @@ readRecoveryCommandFile(void)
 			recoveryTargetXid = (TransactionId) strtoul(item->value, NULL, 0);
 			if (errno == EINVAL || errno == ERANGE)
 				ereport(FATAL,
-				 (errmsg("recovery_target_xid is not a valid number: \"%s\"",
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				  errmsg("recovery_target_xid is not a valid number: \"%s\"",
 						 item->value)));
 			ereport(DEBUG2,
 					(errmsg_internal("recovery_target_xid = %u",
@@ -5077,6 +5080,23 @@ readRecoveryCommandFile(void)
 			ereport(DEBUG2,
 					(errmsg_internal("recovery_target_name = '%s'",
 									 recoveryTargetName)));
+		}
+		else if (strcmp(item->name, "recovery_target_lsn") == 0)
+		{
+			recoveryTarget = RECOVERY_TARGET_LSN;
+
+			/*
+			 * Convert the LSN string given by the user to XLogRecPtr form.
+			 */
+			recoveryTargetLSN =
+				DatumGetLSN(DirectFunctionCall3(pg_lsn_in,
+												CStringGetDatum(item->value),
+												ObjectIdGetDatum(InvalidOid),
+														Int32GetDatum(-1)));
+			ereport(DEBUG2,
+					(errmsg_internal("recovery_target_lsn = '%X/%X'",
+									 (uint32) (recoveryTargetLSN >> 32),
+									 (uint32) recoveryTargetLSN)));
 		}
 		else if (strcmp(item->name, "recovery_target") == 0)
 		{
@@ -5155,7 +5175,8 @@ readRecoveryCommandFile(void)
 		}
 		else
 			ereport(FATAL,
-					(errmsg("unrecognized recovery parameter \"%s\"",
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unrecognized recovery parameter \"%s\"",
 							item->name)));
 	}
 
@@ -5174,7 +5195,8 @@ readRecoveryCommandFile(void)
 	{
 		if (recoveryRestoreCommand == NULL)
 			ereport(FATAL,
-					(errmsg("recovery command file \"%s\" must specify restore_command when standby mode is not enabled",
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("recovery command file \"%s\" must specify restore_command when standby mode is not enabled",
 							RECOVERY_COMMAND_FILE)));
 	}
 
@@ -5187,6 +5209,15 @@ readRecoveryCommandFile(void)
 		recoveryTargetActionSet &&
 		!EnableHotStandby)
 		recoveryTargetAction = RECOVERY_TARGET_ACTION_SHUTDOWN;
+
+	/*
+	 * We don't support standby_mode in standalone backends; that requires
+	 * other processes such as the WAL receiver to be alive.
+	 */
+	if (StandbyModeRequested && !IsUnderPostmaster)
+		ereport(FATAL,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("standby mode is not supported by single-user servers")));
 
 	/* Enable fetching from archive recovery area */
 	ArchiveRecoveryRequested = true;
@@ -5204,7 +5235,8 @@ readRecoveryCommandFile(void)
 			/* Timeline 1 does not have a history file, all else should */
 			if (rtli != 1 && !existsTimeLineHistory(rtli))
 				ereport(FATAL,
-						(errmsg("recovery target timeline %u does not exist",
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("recovery target timeline %u does not exist",
 								rtli)));
 			recoveryTargetTLI = rtli;
 			recoveryTargetIsLatest = false;
@@ -5388,8 +5420,26 @@ recoveryStopsBefore(XLogReaderState *record)
 
 		recoveryStopAfter = false;
 		recoveryStopXid = InvalidTransactionId;
+		recoveryStopLSN = InvalidXLogRecPtr;
 		recoveryStopTime = 0;
 		recoveryStopName[0] = '\0';
+		return true;
+	}
+
+	/* Check if target LSN has been reached */
+	if (recoveryTarget == RECOVERY_TARGET_LSN &&
+		!recoveryTargetInclusive &&
+		record->ReadRecPtr >= recoveryTargetLSN)
+	{
+		recoveryStopAfter = false;
+		recoveryStopXid = InvalidTransactionId;
+		recoveryStopLSN = record->ReadRecPtr;
+		recoveryStopTime = 0;
+		recoveryStopName[0] = '\0';
+		ereport(LOG,
+				(errmsg("recovery stopping before WAL position (LSN) \"%X/%X\"",
+						(uint32) (recoveryStopLSN >> 32),
+						(uint32) recoveryStopLSN)));
 		return true;
 	}
 
@@ -5467,6 +5517,7 @@ recoveryStopsBefore(XLogReaderState *record)
 		recoveryStopAfter = false;
 		recoveryStopXid = recordXid;
 		recoveryStopTime = recordXtime;
+		recoveryStopLSN = InvalidXLogRecPtr;
 		recoveryStopName[0] = '\0';
 
 		if (isCommit)
@@ -5520,6 +5571,7 @@ recoveryStopsAfter(XLogReaderState *record)
 		{
 			recoveryStopAfter = true;
 			recoveryStopXid = InvalidTransactionId;
+			recoveryStopLSN = InvalidXLogRecPtr;
 			(void) getRecordTimestamp(record, &recoveryStopTime);
 			strlcpy(recoveryStopName, recordRestorePointData->rp_name, MAXFNAMELEN);
 
@@ -5529,6 +5581,23 @@ recoveryStopsAfter(XLogReaderState *record)
 						timestamptz_to_str(recoveryStopTime))));
 			return true;
 		}
+	}
+
+	/* Check if the target LSN has been reached */
+	if (recoveryTarget == RECOVERY_TARGET_LSN &&
+		recoveryTargetInclusive &&
+		record->ReadRecPtr >= recoveryTargetLSN)
+	{
+		recoveryStopAfter = true;
+		recoveryStopXid = InvalidTransactionId;
+		recoveryStopLSN = record->ReadRecPtr;
+		recoveryStopTime = 0;
+		recoveryStopName[0] = '\0';
+		ereport(LOG,
+				(errmsg("recovery stopping after WAL position (LSN) \"%X/%X\"",
+						(uint32) (recoveryStopLSN >> 32),
+						(uint32) recoveryStopLSN)));
+		return true;
 	}
 
 	if (rmid != RM_XACT_ID)
@@ -5586,6 +5655,7 @@ recoveryStopsAfter(XLogReaderState *record)
 			recoveryStopAfter = true;
 			recoveryStopXid = recordXid;
 			recoveryStopTime = recordXtime;
+			recoveryStopLSN = InvalidXLogRecPtr;
 			recoveryStopName[0] = '\0';
 
 			if (xact_info == XLOG_XACT_COMMIT ||
@@ -5617,6 +5687,7 @@ recoveryStopsAfter(XLogReaderState *record)
 		recoveryStopAfter = true;
 		recoveryStopXid = InvalidTransactionId;
 		recoveryStopTime = 0;
+		recoveryStopLSN = InvalidXLogRecPtr;
 		recoveryStopName[0] = '\0';
 		return true;
 	}
@@ -5756,7 +5827,8 @@ recoveryApplyDelay(XLogReaderState *record)
 
 		WaitLatch(&XLogCtl->recoveryWakeupLatch,
 				  WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-				  secs * 1000L + microsecs / 1000);
+				  secs * 1000L + microsecs / 1000,
+				  WAIT_EVENT_RECOVERY_APPLY_DELAY);
 	}
 	return true;
 }
@@ -6043,6 +6115,11 @@ StartupXLOG(void)
 			ereport(LOG,
 					(errmsg("starting point-in-time recovery to \"%s\"",
 							recoveryTargetName)));
+		else if (recoveryTarget == RECOVERY_TARGET_LSN)
+			ereport(LOG,
+					(errmsg("starting point-in-time recovery to WAL position (LSN) \"%X/%X\"",
+							(uint32) (recoveryTargetLSN >> 32),
+							(uint32) recoveryTargetLSN)));
 		else if (recoveryTarget == RECOVERY_TARGET_IMMEDIATE)
 			ereport(LOG,
 					(errmsg("starting point-in-time recovery to earliest consistent point")));
@@ -7112,6 +7189,12 @@ StartupXLOG(void)
 					 "%s %s\n",
 					 recoveryStopAfter ? "after" : "before",
 					 timestamptz_to_str(recoveryStopTime));
+		else if (recoveryTarget == RECOVERY_TARGET_LSN)
+			snprintf(reason, sizeof(reason),
+					 "%s LSN %X/%X\n",
+					 recoveryStopAfter ? "after" : "before",
+					 (uint32 ) (recoveryStopLSN >> 32),
+					 (uint32) recoveryStopLSN);
 		else if (recoveryTarget == RECOVERY_TARGET_NAME)
 			snprintf(reason, sizeof(reason),
 					 "at restore point \"%s\"",
@@ -7349,12 +7432,6 @@ StartupXLOG(void)
 	 */
 	InRecovery = false;
 
-	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
-	ControlFile->state = DB_IN_PRODUCTION;
-	ControlFile->time = (pg_time_t) time(NULL);
-	UpdateControlFile();
-	LWLockRelease(ControlFileLock);
-
 	/* start the archive_timeout timer running */
 	XLogCtl->lastSegSwitchTime = (pg_time_t) time(NULL);
 
@@ -7412,14 +7489,31 @@ StartupXLOG(void)
 	CompleteCommitTsInitialization();
 
 	/*
-	 * All done.  Allow backends to write WAL.  (Although the bool flag is
-	 * probably atomic in itself, we use the info_lck here to ensure that
-	 * there are no race conditions concerning visibility of other recent
-	 * updates to shared memory.)
+	 * All done with end-of-recovery actions.
+	 *
+	 * Now allow backends to write WAL and update the control file status in
+	 * consequence.  The boolean flag allowing backends to write WAL is
+	 * updated while holding ControlFileLock to prevent other backends to look
+	 * at an inconsistent state of the control file in shared memory.  There
+	 * is still a small window during which backends can write WAL and the
+	 * control file is still referring to a system not in DB_IN_PRODUCTION
+	 * state while looking at the on-disk control file.
+	 *
+	 * Also, although the boolean flag to allow WAL is probably atomic in
+	 * itself, we use the info_lck here to ensure that there are no race
+	 * conditions concerning visibility of other recent updates to shared
+	 * memory.
 	 */
+	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+	ControlFile->state = DB_IN_PRODUCTION;
+	ControlFile->time = (pg_time_t) time(NULL);
+
 	SpinLockAcquire(&XLogCtl->info_lck);
 	XLogCtl->SharedRecoveryInProgress = false;
 	SpinLockRelease(&XLogCtl->info_lck);
+
+	UpdateControlFile();
+	LWLockRelease(ControlFileLock);
 
 	/*
 	 * If there were cascading standby servers connected to us, nudge any wal
@@ -11294,7 +11388,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 
 						WaitLatch(&XLogCtl->recoveryWakeupLatch,
 							 WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-								  wait_time);
+								  wait_time, WAIT_EVENT_RECOVERY_WAL_STREAM);
 						ResetLatch(&XLogCtl->recoveryWakeupLatch);
 						now = GetCurrentTimestamp();
 					}
@@ -11457,7 +11551,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 */
 					WaitLatch(&XLogCtl->recoveryWakeupLatch,
 							  WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-							  5000L);
+							  5000L, WAIT_EVENT_RECOVERY_WAL_ALL);
 					ResetLatch(&XLogCtl->recoveryWakeupLatch);
 					break;
 				}

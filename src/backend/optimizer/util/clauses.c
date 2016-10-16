@@ -4378,9 +4378,7 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	 */
 	mycxt = AllocSetContextCreate(CurrentMemoryContext,
 								  "inline_function",
-								  ALLOCSET_DEFAULT_MINSIZE,
-								  ALLOCSET_DEFAULT_INITSIZE,
-								  ALLOCSET_DEFAULT_MAXSIZE);
+								  ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(mycxt);
 
 	/* Fetch the function body */
@@ -4451,6 +4449,7 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 		querytree->utilityStmt ||
 		querytree->hasAggs ||
 		querytree->hasWindowFuncs ||
+		querytree->hasTargetSRFs ||
 		querytree->hasSubLinks ||
 		querytree->cteList ||
 		querytree->rtable ||
@@ -4491,17 +4490,13 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	Assert(!modifyTargetList);
 
 	/*
-	 * Additional validity checks on the expression.  It mustn't return a set,
-	 * and it mustn't be more volatile than the surrounding function (this is
-	 * to avoid breaking hacks that involve pretending a function is immutable
-	 * when it really ain't).  If the surrounding function is declared strict,
-	 * then the expression must contain only strict constructs and must use
-	 * all of the function parameters (this is overkill, but an exact analysis
-	 * is hard).
+	 * Additional validity checks on the expression.  It mustn't be more
+	 * volatile than the surrounding function (this is to avoid breaking hacks
+	 * that involve pretending a function is immutable when it really ain't).
+	 * If the surrounding function is declared strict, then the expression
+	 * must contain only strict constructs and must use all of the function
+	 * parameters (this is overkill, but an exact analysis is hard).
 	 */
-	if (expression_returns_set(newexpr))
-		goto fail;
-
 	if (funcform->provolatile == PROVOLATILE_IMMUTABLE &&
 		contain_mutable_functions(newexpr))
 		goto fail;
@@ -4896,9 +4891,7 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	 */
 	mycxt = AllocSetContextCreate(CurrentMemoryContext,
 								  "inline_set_returning_function",
-								  ALLOCSET_DEFAULT_MINSIZE,
-								  ALLOCSET_DEFAULT_INITSIZE,
-								  ALLOCSET_DEFAULT_MAXSIZE);
+								  ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(mycxt);
 
 	/*

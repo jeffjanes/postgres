@@ -20,11 +20,14 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
-
+#ifdef HAVE_SYS_SELECT_H
+#include <sys/select.h>
+#endif
 #ifdef HAVE_LIBZ
 #include <zlib.h>
 #endif
 
+#include "common/file_utils.h"
 #include "common/string.h"
 #include "fe_utils/string_utils.h"
 #include "getopt_long.h"
@@ -58,6 +61,7 @@ static TablespaceList tablespace_dirs = {NULL, NULL};
 static char *xlog_dir = "";
 static char format = 'p';		/* p(lain)/t(ar) */
 static char *label = "pg_basebackup base backup";
+static bool noclean = false;
 static bool showprogress = false;
 static int	verbose = 0;
 static int	compresslevel = 0;
@@ -65,10 +69,18 @@ static bool includewal = false;
 static bool streamwal = false;
 static bool fastcheckpoint = false;
 static bool writerecoveryconf = false;
+static bool do_sync = true;
 static int	standby_message_timeout = 10 * 1000;		/* 10 sec = default */
 static pg_time_t last_progress_report = 0;
 static int32 maxrate = 0;		/* no limit by default */
 
+static bool success = false;
+static bool made_new_pgdata = false;
+static bool found_existing_pgdata = false;
+static bool made_new_xlogdir = false;
+static bool found_existing_xlogdir = false;
+static bool made_tablespace_dirs = false;
+static bool found_tablespace_dirs = false;
 
 /* Progress counters */
 static uint64 totalsize;
@@ -82,6 +94,7 @@ static int	bgpipe[2] = {-1, -1};
 
 /* Handle to child process */
 static pid_t bgchild = -1;
+static bool in_log_streamer = false;
 
 /* End position for xlog streaming, empty string if unknown yet */
 static XLogRecPtr xlogendptr;
@@ -98,7 +111,7 @@ static PQExpBuffer recoveryconfcontents = NULL;
 /* Function headers */
 static void usage(void);
 static void disconnect_and_exit(int code);
-static void verify_dir_is_empty_or_create(char *dirname);
+static void verify_dir_is_empty_or_create(char *dirname, bool *created, bool *found);
 static void progress_report(int tablespacenum, const char *filename, bool force);
 
 static void ReceiveTarFile(PGconn *conn, PGresult *res, int rownum);
@@ -113,6 +126,69 @@ static bool reached_end_position(XLogRecPtr segendpos, uint32 timeline,
 static const char *get_tablespace_mapping(const char *dir);
 static void tablespace_list_append(const char *arg);
 
+
+static void
+cleanup_directories_atexit(void)
+{
+	if (success || in_log_streamer)
+		return;
+
+	if (!noclean)
+	{
+		if (made_new_pgdata)
+		{
+			fprintf(stderr, _("%s: removing data directory \"%s\"\n"),
+					progname, basedir);
+			if (!rmtree(basedir, true))
+				fprintf(stderr, _("%s: failed to remove data directory\n"),
+						progname);
+		}
+		else if (found_existing_pgdata)
+		{
+			fprintf(stderr,
+					_("%s: removing contents of data directory \"%s\"\n"),
+					progname, basedir);
+			if (!rmtree(basedir, false))
+				fprintf(stderr, _("%s: failed to remove contents of data directory\n"),
+						progname);
+		}
+
+		if (made_new_xlogdir)
+		{
+			fprintf(stderr, _("%s: removing transaction log directory \"%s\"\n"),
+					progname, xlog_dir);
+			if (!rmtree(xlog_dir, true))
+				fprintf(stderr, _("%s: failed to remove transaction log directory\n"),
+						progname);
+		}
+		else if (found_existing_xlogdir)
+		{
+			fprintf(stderr,
+					_("%s: removing contents of transaction log directory \"%s\"\n"),
+					progname, xlog_dir);
+			if (!rmtree(xlog_dir, false))
+				fprintf(stderr, _("%s: failed to remove contents of transaction log directory\n"),
+						progname);
+		}
+	}
+	else
+	{
+		if (made_new_pgdata || found_existing_pgdata)
+			fprintf(stderr,
+			  _("%s: data directory \"%s\" not removed at user's request\n"),
+					progname, basedir);
+
+		if (made_new_xlogdir || found_existing_xlogdir)
+			fprintf(stderr,
+					_("%s: transaction log directory \"%s\" not removed at user's request\n"),
+					progname, xlog_dir);
+	}
+
+	if (made_tablespace_dirs || found_tablespace_dirs)
+		fprintf(stderr,
+				_("%s: changes to tablespace directories will not be undone"),
+				progname);
+}
 
 static void
 disconnect_and_exit(int code)
@@ -253,6 +329,8 @@ usage(void)
 	printf(_("  -c, --checkpoint=fast|spread\n"
 			 "                         set fast or spread checkpointing\n"));
 	printf(_("  -l, --label=LABEL      set backup label\n"));
+	printf(_("  -n, --noclean          do not clean up after errors\n"));
+	printf(_("  -N, --nosync           do not wait for changes to be written safely to disk\n"));
 	printf(_("  -P, --progress         show progress information\n"));
 	printf(_("  -v, --verbose          output verbose messages\n"));
 	printf(_("  -V, --version          output version information, then exit\n"));
@@ -375,6 +453,8 @@ LogStreamerMain(logstreamer_param *param)
 {
 	StreamCtl	stream;
 
+	in_log_streamer = true;
+
 	MemSet(&stream, 0, sizeof(stream));
 	stream.startpos = param->startptr;
 	stream.timeline = param->timeline;
@@ -382,6 +462,7 @@ LogStreamerMain(logstreamer_param *param)
 	stream.stream_stop = reached_end_position;
 	stream.standby_message_timeout = standby_message_timeout;
 	stream.synchronous = false;
+	stream.do_sync = do_sync;
 	stream.mark_done = true;
 	stream.basedir = param->xlogdir;
 	stream.partial_suffix = NULL;
@@ -501,7 +582,7 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier)
  * be give and the process ended.
  */
 static void
-verify_dir_is_empty_or_create(char *dirname)
+verify_dir_is_empty_or_create(char *dirname, bool *created, bool *found)
 {
 	switch (pg_check_dir(dirname))
 	{
@@ -517,12 +598,16 @@ verify_dir_is_empty_or_create(char *dirname)
 						progname, dirname, strerror(errno));
 				disconnect_and_exit(1);
 			}
+			if (created)
+				*created = true;
 			return;
 		case 1:
 
 			/*
 			 * Exists, empty
 			 */
+			if (found)
+				*found = true;
 			return;
 		case 2:
 		case 3:
@@ -1115,6 +1200,10 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 
 	if (copybuf != NULL)
 		PQfreemem(copybuf);
+
+	/* sync the resulting tar file, errors are not considered fatal */
+	if (do_sync && strcmp(basedir, "-") != 0)
+		(void) fsync_fname(filename, false, progname);
 }
 
 
@@ -1391,6 +1480,11 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 
 	if (basetablespace && writerecoveryconf)
 		WriteRecoveryConf();
+
+	/*
+	 * No data is synced here, everything is done for all tablespaces at the
+	 * end.
+	 */
 }
 
 /*
@@ -1683,7 +1777,7 @@ BaseBackup(void)
 		{
 			char	   *path = (char *) get_tablespace_mapping(PQgetvalue(res, i, 1));
 
-			verify_dir_is_empty_or_create(path);
+			verify_dir_is_empty_or_create(path, &made_tablespace_dirs, &found_tablespace_dirs);
 		}
 	}
 
@@ -1869,6 +1963,26 @@ BaseBackup(void)
 	PQclear(res);
 	PQfinish(conn);
 
+	/*
+	 * Make data persistent on disk once backup is completed. For tar
+	 * format once syncing the parent directory is fine, each tar file
+	 * created per tablespace has been already synced. In plain format,
+	 * all the data of the base directory is synced, taking into account
+	 * all the tablespaces. Errors are not considered fatal.
+	 */
+	if (do_sync)
+	{
+		if (format == 't')
+		{
+			if (strcmp(basedir, "-") != 0)
+				(void) fsync_fname(basedir, true, progname);
+		}
+		else
+		{
+			(void) fsync_pgdata(basedir, progname);
+		}
+	}
+
 	if (verbose)
 		fprintf(stderr, "%s: base backup completed\n", progname);
 }
@@ -1892,6 +2006,8 @@ main(int argc, char **argv)
 		{"gzip", no_argument, NULL, 'z'},
 		{"compress", required_argument, NULL, 'Z'},
 		{"label", required_argument, NULL, 'l'},
+		{"noclean", no_argument, NULL, 'n'},
+		{"nosync", no_argument, NULL, 'N'},
 		{"dbname", required_argument, NULL, 'd'},
 		{"host", required_argument, NULL, 'h'},
 		{"port", required_argument, NULL, 'p'},
@@ -1926,7 +2042,9 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "D:F:r:RT:xX:l:zZ:d:c:h:p:U:s:S:wWvP",
+	atexit(cleanup_directories_atexit);
+
+	while ((c = getopt_long(argc, argv, "D:F:r:RT:xX:l:nNzZ:d:c:h:p:U:s:S:wWvP",
 							long_options, &option_index)) != -1)
 	{
 		switch (c)
@@ -2000,6 +2118,12 @@ main(int argc, char **argv)
 				break;
 			case 'l':
 				label = pg_strdup(optarg);
+				break;
+			case 'n':
+				noclean = true;
+				break;
+			case 'N':
+				do_sync = false;
 				break;
 			case 'z':
 #ifdef HAVE_LIBZ
@@ -2170,14 +2294,14 @@ main(int argc, char **argv)
 	 * unless we are writing to stdout.
 	 */
 	if (format == 'p' || strcmp(basedir, "-") != 0)
-		verify_dir_is_empty_or_create(basedir);
+		verify_dir_is_empty_or_create(basedir, &made_new_pgdata, &found_existing_pgdata);
 
 	/* Create transaction log symlink, if required */
 	if (strcmp(xlog_dir, "") != 0)
 	{
 		char	   *linkloc;
 
-		verify_dir_is_empty_or_create(xlog_dir);
+		verify_dir_is_empty_or_create(xlog_dir, &made_new_xlogdir, &found_existing_xlogdir);
 
 		/* form name of the place where the symlink must go */
 		linkloc = psprintf("%s/pg_xlog", basedir);
@@ -2198,5 +2322,6 @@ main(int argc, char **argv)
 
 	BaseBackup();
 
+	success = true;
 	return 0;
 }

@@ -2254,6 +2254,12 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
  * thereby changing the partition contents and thus the window functions'
  * results for rows that remain.
  *
+ * 5. If the subquery contains any set-returning functions in its targetlist,
+ * we cannot push volatile quals into it.  That would push them below the SRFs
+ * and thereby change the number of times they are evaluated.  Also, a
+ * volatile qual could succeed for some SRF output rows and fail for others,
+ * a behavior that cannot occur if it's evaluated before SRF expansion.
+ *
  * In addition, we make several checks on the subquery's output columns to see
  * if it is safe to reference them in pushed-down quals.  If output column k
  * is found to be unsafe to reference, we set safetyInfo->unsafeColumns[k]
@@ -2298,8 +2304,10 @@ subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 	if (subquery->limitOffset != NULL || subquery->limitCount != NULL)
 		return false;
 
-	/* Check points 3 and 4 */
-	if (subquery->distinctClause || subquery->hasWindowFuncs)
+	/* Check points 3, 4, and 5 */
+	if (subquery->distinctClause ||
+		subquery->hasWindowFuncs ||
+		subquery->hasTargetSRFs)
 		safetyInfo->unsafeVolatile = true;
 
 	/*
@@ -2422,7 +2430,8 @@ check_output_expressions(Query *subquery, pushdown_safety_info *safetyInfo)
 			continue;
 
 		/* Functions returning sets are unsafe (point 1) */
-		if (expression_returns_set((Node *) tle->expr))
+		if (subquery->hasTargetSRFs &&
+			expression_returns_set((Node *) tle->expr))
 		{
 			safetyInfo->unsafeColumns[tle->resno] = true;
 			continue;
@@ -2835,7 +2844,8 @@ remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel)
 		 * If it contains a set-returning function, we can't remove it since
 		 * that could change the number of rows returned by the subquery.
 		 */
-		if (expression_returns_set(texpr))
+		if (subquery->hasTargetSRFs &&
+			expression_returns_set(texpr))
 			continue;
 
 		/*
