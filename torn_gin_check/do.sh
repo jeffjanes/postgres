@@ -87,6 +87,7 @@ END
 $INST/bin/pg_ctl -D $TMPDATA start -w || exit
 $INST/bin/createdb
 $INST/bin/psql -c 'select version()'
+$INST/bin/psql -c " SELECT name, current_setting(name), SOURCE FROM pg_settings WHERE SOURCE NOT IN ('default', 'override');"
 $INST/bin/pg_config
 $INST/bin/psql -c 'create extension pageinspect'
 $INST/bin/psql -c 'create extension pgstattuple'
