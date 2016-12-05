@@ -116,6 +116,7 @@ typedef struct Query
 
 	bool		hasAggs;		/* has aggregates in tlist or havingQual */
 	bool		hasWindowFuncs; /* has window functions in tlist */
+	bool		hasTargetSRFs;	/* has set-returning functions in tlist */
 	bool		hasSubLinks;	/* has subquery SubLink */
 	bool		hasDistinctOn;	/* distinctClause is from DISTINCT ON */
 	bool		hasRecursive;	/* WITH RECURSIVE was specified */
@@ -666,6 +667,7 @@ typedef struct DefElem
 	char	   *defname;
 	Node	   *arg;			/* a (Value *) or a (TypeName *) */
 	DefElemAction defaction;	/* unspecified action, or SET/ADD/DROP */
+	int			location;		/* token location, or -1 if unknown */
 } DefElem;
 
 /*
@@ -773,6 +775,13 @@ typedef struct XmlSerialize
  *	  FirstLowInvalidHeapAttributeNumber from column numbers before storing
  *	  them in these fields.  A whole-row Var reference is represented by
  *	  setting the bit for InvalidAttrNumber.
+ *
+ *	  securityQuals is a list of security barrier quals (boolean expressions),
+ *	  to be tested in the listed order before returning a row from the
+ *	  relation.  It is always NIL in parser output.  Entries are added by the
+ *	  rewriter to implement security-barrier views and/or row-level security.
+ *	  Note that the planner turns each boolean expression into an implicitly
+ *	  AND'ed sublist, as is its usual habit with qualification expressions.
  *--------------------
  */
 typedef enum RTEKind
@@ -870,7 +879,7 @@ typedef struct RangeTblEntry
 	Bitmapset  *selectedCols;	/* columns needing SELECT permission */
 	Bitmapset  *insertedCols;	/* columns needing INSERT permission */
 	Bitmapset  *updatedCols;	/* columns needing UPDATE permission */
-	List	   *securityQuals;	/* any security barrier quals to apply */
+	List	   *securityQuals;	/* security barrier quals to apply, if any */
 } RangeTblEntry;
 
 /*
@@ -1202,6 +1211,21 @@ typedef struct CommonTableExpr
 	 ((Query *) (cte)->ctequery)->targetList : \
 	 ((Query *) (cte)->ctequery)->returningList)
 
+/*
+ * TriggerTransition -
+ *	   representation of transition row or table naming clause
+ *
+ * Only transition tables are initially supported in the syntax, and only for
+ * AFTER triggers, but other permutations are accepted by the parser so we can
+ * give a meaningful message from C code.
+ */
+typedef struct TriggerTransition
+{
+	NodeTag		type;
+	char	   *name;
+	bool		isNew;
+	bool		isTable;
+} TriggerTransition;
 
 /*****************************************************************************
  *		Optimizable Statements
@@ -2103,6 +2127,8 @@ typedef struct CreateTrigStmt
 	List	   *columns;		/* column names, or NIL for all columns */
 	Node	   *whenClause;		/* qual expression, or NULL if none */
 	bool		isconstraint;	/* This is a constraint trigger */
+	/* explicitly named transition data */
+	List	   *transitionRels; /* TriggerTransition nodes, or NIL if none */
 	/* The remaining fields are only used for constraint triggers */
 	bool		deferrable;		/* [NOT] DEFERRABLE */
 	bool		initdeferred;	/* INITIALLY {DEFERRED|IMMEDIATE} */
@@ -2707,10 +2733,11 @@ typedef struct AlterEnumStmt
 {
 	NodeTag		type;
 	List	   *typeName;		/* qualified name (list of Value strings) */
+	char	   *oldVal;			/* old enum value's name, if renaming */
 	char	   *newVal;			/* new enum value's name */
 	char	   *newValNeighbor; /* neighboring enum value, if specified */
 	bool		newValIsAfter;	/* place new enum value after neighbor? */
-	bool		skipIfExists;	/* no error if label already exists */
+	bool		skipIfNewValExists;		/* no error if new already exists? */
 } AlterEnumStmt;
 
 /* ----------------------

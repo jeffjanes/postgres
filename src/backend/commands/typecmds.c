@@ -111,7 +111,7 @@ static char *domainAddConstraint(Oid domainOid, Oid domainNamespace,
  *		Registers a new base type.
  */
 ObjectAddress
-DefineType(List *names, List *parameters)
+DefineType(ParseState *pstate, List *names, List *parameters)
 {
 	char	   *typeName;
 	Oid			typeNamespace;
@@ -286,13 +286,15 @@ DefineType(List *names, List *parameters)
 			ereport(WARNING,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("type attribute \"%s\" not recognized",
-							defel->defname)));
+							defel->defname),
+					 parser_errposition(pstate, defel->location)));
 			continue;
 		}
 		if (*defelp != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("conflicting or redundant options")));
+					 errmsg("conflicting or redundant options"),
+					 parser_errposition(pstate, defel->location)));
 		*defelp = defel;
 	}
 
@@ -1239,16 +1241,24 @@ AlterEnum(AlterEnumStmt *stmt)
 	/* Check it's an enum and check user has permission to ALTER the enum */
 	checkEnumOwner(tup);
 
-	/* Add the new label */
-	AddEnumLabel(enum_type_oid, stmt->newVal,
-				 stmt->newValNeighbor, stmt->newValIsAfter,
-				 stmt->skipIfExists);
+	ReleaseSysCache(tup);
+
+	if (stmt->oldVal)
+	{
+		/* Rename an existing label */
+		RenameEnumLabel(enum_type_oid, stmt->oldVal, stmt->newVal);
+	}
+	else
+	{
+		/* Add a new label */
+		AddEnumLabel(enum_type_oid, stmt->newVal,
+					 stmt->newValNeighbor, stmt->newValIsAfter,
+					 stmt->skipIfNewValExists);
+	}
 
 	InvokeObjectPostAlterHook(TypeRelationId, enum_type_oid, 0);
 
 	ObjectAddressSet(address, TypeRelationId, enum_type_oid);
-
-	ReleaseSysCache(tup);
 
 	return address;
 }
@@ -3493,7 +3503,7 @@ AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 
 		/* check for duplicate name (more friendly than unique-index failure) */
 		if (SearchSysCacheExists2(TYPENAMENSP,
-								  CStringGetDatum(NameStr(typform->typname)),
+								  NameGetDatum(&typform->typname),
 								  ObjectIdGetDatum(nspOid)))
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_OBJECT),

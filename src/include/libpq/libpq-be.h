@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * libpq_be.h
+ * libpq-be.h
  *	  This file contains definitions for structures and externs used
  *	  by the postmaster during client authentication.
  *
@@ -144,7 +144,6 @@ typedef struct Port
 	 * Information that needs to be held during the authentication cycle.
 	 */
 	HbaLine    *hba;
-	char		md5Salt[4];		/* Password salt */
 
 	/*
 	 * Information that really has no business at all being in struct Port,

@@ -341,12 +341,9 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	 * Optionally add a Gather node for testing purposes, provided this is
 	 * actually a safe thing to do.  (Note: we assume adding a Material node
 	 * above did not change the parallel safety of the plan, so we can still
-	 * rely on best_path->parallel_safe.  However, that flag doesn't account
-	 * for initPlans, which render the plan parallel-unsafe.)
+	 * rely on best_path->parallel_safe.)
 	 */
-	if (force_parallel_mode != FORCE_PARALLEL_OFF &&
-		best_path->parallel_safe &&
-		top_plan->initPlan == NIL)
+	if (force_parallel_mode != FORCE_PARALLEL_OFF && best_path->parallel_safe)
 	{
 		Gather	   *gather = makeNode(Gather);
 
@@ -604,6 +601,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		preprocess_expression(root, (Node *) parse->targetList,
 							  EXPRKIND_TARGET);
 
+	/* Constant-folding might have removed all set-returning functions */
+	if (parse->hasTargetSRFs)
+		parse->hasTargetSRFs = expression_returns_set((Node *) parse->targetList);
+
 	newWithCheckOptions = NIL;
 	foreach(l, parse->withCheckOptions)
 	{
@@ -797,10 +798,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	SS_identify_outer_params(root);
 
 	/*
-	 * If any initPlans were created in this query level, increment the
-	 * surviving Paths' costs to account for them.  They won't actually get
-	 * attached to the plan tree till create_plan() runs, but we want to be
-	 * sure their costs are included now.
+	 * If any initPlans were created in this query level, adjust the surviving
+	 * Paths' costs and parallel-safety flags to account for them.  The
+	 * initPlans won't actually get attached to the plan tree till
+	 * create_plan() runs, but we must include their effects now.
 	 */
 	final_rel = fetch_upper_rel(root, UPPERREL_FINAL, NULL);
 	SS_charge_for_initplans(root, final_rel);
@@ -1702,16 +1703,14 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		 * Figure out whether there's a hard limit on the number of rows that
 		 * query_planner's result subplan needs to return.  Even if we know a
 		 * hard limit overall, it doesn't apply if the query has any
-		 * grouping/aggregation operations.  (XXX it also doesn't apply if the
-		 * tlist contains any SRFs; but checking for that here seems more
-		 * costly than it's worth, since root->limit_tuples is only used for
-		 * cost estimates, and only in a small number of cases.)
+		 * grouping/aggregation operations, or SRFs in the tlist.
 		 */
 		if (parse->groupClause ||
 			parse->groupingSets ||
 			parse->distinctClause ||
 			parse->hasAggs ||
 			parse->hasWindowFuncs ||
+			parse->hasTargetSRFs ||
 			root->hasHavingQual)
 			root->limit_tuples = -1.0;
 		else
@@ -1928,7 +1927,11 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 	 * weird usage that it doesn't seem worth greatly complicating matters to
 	 * account for it.
 	 */
-	tlist_rows = tlist_returns_set_rows(tlist);
+	if (parse->hasTargetSRFs)
+		tlist_rows = tlist_returns_set_rows(tlist);
+	else
+		tlist_rows = 1;
+
 	if (tlist_rows > 1)
 	{
 		foreach(lc, current_rel->pathlist)
@@ -3286,6 +3289,12 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
 	/* plus the per-hash-entry overhead */
 	hashentrysize += hash_agg_entry_size(agg_costs->numAggs);
 
+	/*
+	 * Note that this disregards the effect of fill-factor and growth policy
+	 * of the hash-table. That's probably ok, given default the default
+	 * fill-factor is relatively high. It'd be hard to meaningfully factor in
+	 * "double-in-size" growth policies here.
+	 */
 	return hashentrysize * dNumGroups;
 }
 
@@ -3729,11 +3738,11 @@ create_grouping_paths(PlannerInfo *root,
 											   &total_groups);
 
 			/*
-			 * Gather is always unsorted, so we'll need to sort, unless
-			 * there's no GROUP BY clause, in which case there will only be a
-			 * single group.
+			 * Since Gather's output is always unsorted, we'll need to sort,
+			 * unless there's no GROUP BY clause or a degenerate (constant)
+			 * one, in which case there will only be a single group.
 			 */
-			if (parse->groupClause)
+			if (root->group_pathkeys)
 				path = (Path *) create_sort_path(root,
 												 grouped_rel,
 												 path,
@@ -4995,7 +5004,8 @@ make_sort_input_target(PlannerInfo *root,
 			 * Check for SRF or volatile functions.  Check the SRF case first
 			 * because we must know whether we have any postponed SRFs.
 			 */
-			if (expression_returns_set((Node *) expr))
+			if (parse->hasTargetSRFs &&
+				expression_returns_set((Node *) expr))
 			{
 				/* We'll decide below whether these are postponable */
 				col_is_srf[i] = true;
@@ -5034,6 +5044,7 @@ make_sort_input_target(PlannerInfo *root,
 		{
 			/* For sortgroupref cols, just check if any contain SRFs */
 			if (!have_srf_sortcols &&
+				parse->hasTargetSRFs &&
 				expression_returns_set((Node *) expr))
 				have_srf_sortcols = true;
 		}

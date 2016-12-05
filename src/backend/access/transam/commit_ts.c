@@ -32,6 +32,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
+#include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
@@ -288,11 +289,18 @@ TransactionIdGetCommitTsData(TransactionId xid, TimestampTz *ts,
 	TransactionId oldestCommitTsXid;
 	TransactionId newestCommitTsXid;
 
-	/* error if the given Xid doesn't normally commit */
-	if (!TransactionIdIsNormal(xid))
+	if (!TransactionIdIsValid(xid))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 		errmsg("cannot retrieve commit timestamp for transaction %u", xid)));
+	else if (!TransactionIdIsNormal(xid))
+	{
+		/* frozen and bootstrap xids are always committed far in the past */
+		*ts = 0;
+		if (nodeid)
+			*nodeid = 0;
+		return false;
+	}
 
 	LWLockAcquire(CommitTsLock, LW_SHARED);
 
@@ -843,6 +851,8 @@ SetCommitTsLimit(TransactionId oldestXact, TransactionId newestXact)
 	else
 	{
 		Assert(ShmemVariableCache->newestCommitTsXid == InvalidTransactionId);
+		ShmemVariableCache->oldestCommitTsXid = oldestXact;
+		ShmemVariableCache->newestCommitTsXid = newestXact;
 	}
 	LWLockRelease(CommitTsLock);
 }

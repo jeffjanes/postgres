@@ -647,6 +647,16 @@ get_agg_clause_costs_walker(Node *node, get_agg_clause_costs_context *context)
 			/* Use average width if aggregate definition gave one */
 			if (aggtransspace > 0)
 				avgwidth = aggtransspace;
+			else if (aggtransfn == F_ARRAY_APPEND)
+			{
+				/*
+				 * If the transition function is array_append(), it'll use an
+				 * expanded array as transvalue, which will occupy at least
+				 * ALLOCSET_SMALL_INITSIZE and possibly more.  Use that as the
+				 * estimate for lack of a better idea.
+				 */
+				avgwidth = ALLOCSET_SMALL_INITSIZE;
+			}
 			else
 			{
 				/*
@@ -1140,8 +1150,14 @@ is_parallel_safe(PlannerInfo *root, Node *node)
 {
 	max_parallel_hazard_context context;
 
-	/* If max_parallel_hazard found nothing unsafe, we don't need to look */
-	if (root->glob->maxParallelHazard == PROPARALLEL_SAFE)
+	/*
+	 * Even if the original querytree contained nothing unsafe, we need to
+	 * search the expression if we have generated any PARAM_EXEC Params while
+	 * planning, because those are parallel-restricted and there might be one
+	 * in this expression.  But otherwise we don't need to look.
+	 */
+	if (root->glob->maxParallelHazard == PROPARALLEL_SAFE &&
+		root->glob->nParamExec == 0)
 		return true;
 	/* Else use max_parallel_hazard's search logic, but stop on RESTRICTED */
 	context.max_hazard = PROPARALLEL_SAFE;
@@ -3330,6 +3346,23 @@ eval_const_expressions_mutator(Node *node,
 				newcoalesce->location = coalesceexpr->location;
 				return (Node *) newcoalesce;
 			}
+		case T_SQLValueFunction:
+			{
+				/*
+				 * All variants of SQLValueFunction are stable, so if we are
+				 * estimating the expression's value, we should evaluate the
+				 * current function value.  Otherwise just copy.
+				 */
+				SQLValueFunction *svf = (SQLValueFunction *) node;
+
+				if (context->estimate)
+					return (Node *) evaluate_expr((Expr *) svf,
+												  svf->type,
+												  svf->typmod,
+												  InvalidOid);
+				else
+					return copyObject((Node *) svf);
+			}
 		case T_FieldSelect:
 			{
 				/*
@@ -4449,6 +4482,7 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 		querytree->utilityStmt ||
 		querytree->hasAggs ||
 		querytree->hasWindowFuncs ||
+		querytree->hasTargetSRFs ||
 		querytree->hasSubLinks ||
 		querytree->cteList ||
 		querytree->rtable ||
@@ -4489,17 +4523,13 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	Assert(!modifyTargetList);
 
 	/*
-	 * Additional validity checks on the expression.  It mustn't return a set,
-	 * and it mustn't be more volatile than the surrounding function (this is
-	 * to avoid breaking hacks that involve pretending a function is immutable
-	 * when it really ain't).  If the surrounding function is declared strict,
-	 * then the expression must contain only strict constructs and must use
-	 * all of the function parameters (this is overkill, but an exact analysis
-	 * is hard).
+	 * Additional validity checks on the expression.  It mustn't be more
+	 * volatile than the surrounding function (this is to avoid breaking hacks
+	 * that involve pretending a function is immutable when it really ain't).
+	 * If the surrounding function is declared strict, then the expression
+	 * must contain only strict constructs and must use all of the function
+	 * parameters (this is overkill, but an exact analysis is hard).
 	 */
-	if (expression_returns_set(newexpr))
-		goto fail;
-
 	if (funcform->provolatile == PROVOLATILE_IMMUTABLE &&
 		contain_mutable_functions(newexpr))
 		goto fail;

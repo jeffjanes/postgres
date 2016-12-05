@@ -417,6 +417,7 @@ transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt)
 
 	qry->hasSubLinks = pstate->p_hasSubLinks;
 	qry->hasWindowFuncs = pstate->p_hasWindowFuncs;
+	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasAggs = pstate->p_hasAggs;
 	if (pstate->p_hasAggs)
 		parseCheckAggregates(pstate, qry);
@@ -643,8 +644,12 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 		{
 			List	   *sublist = (List *) lfirst(lc);
 
-			/* Do basic expression transformation (same as a ROW() expr) */
-			sublist = transformExpressionList(pstate, sublist, EXPR_KIND_VALUES);
+			/*
+			 * Do basic expression transformation (same as a ROW() expr, but
+			 * allow SetToDefault at top level)
+			 */
+			sublist = transformExpressionList(pstate, sublist,
+											  EXPR_KIND_VALUES, true);
 
 			/*
 			 * All the sublists must be the same length, *after*
@@ -751,10 +756,14 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 		Assert(list_length(valuesLists) == 1);
 		Assert(selectStmt->intoClause == NULL);
 
-		/* Do basic expression transformation (same as a ROW() expr) */
+		/*
+		 * Do basic expression transformation (same as a ROW() expr, but allow
+		 * SetToDefault at top level)
+		 */
 		exprList = transformExpressionList(pstate,
 										   (List *) linitial(valuesLists),
-										   EXPR_KIND_VALUES);
+										   EXPR_KIND_VALUES,
+										   true);
 
 		/* Prepare row for assignment to target table */
 		exprList = transformInsertRow(pstate, exprList,
@@ -819,6 +828,7 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 	qry->rtable = pstate->p_rtable;
 	qry->jointree = makeFromExpr(pstate->p_joinlist, NULL);
 
+	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasSubLinks = pstate->p_hasSubLinks;
 
 	assign_query_collations(pstate, qry);
@@ -938,7 +948,7 @@ transformInsertRow(ParseState *pstate, List *exprlist,
 }
 
 /*
- * transformSelectStmt -
+ * transformOnConflictClause -
  *	  transforms an OnConflictClause in an INSERT
  */
 static OnConflictExpr *
@@ -986,11 +996,10 @@ transformOnConflictClause(ParseState *pstate,
 		exclRelIndex = list_length(pstate->p_rtable);
 
 		/*
-		 * Build a targetlist for the EXCLUDED pseudo relation. Have to be
-		 * careful to use resnos that correspond to attnos of the underlying
-		 * relation.
+		 * Build a targetlist representing the columns of the EXCLUDED pseudo
+		 * relation.  Have to be careful to use resnos that correspond to
+		 * attnos of the underlying relation.
 		 */
-		Assert(pstate->p_next_resno == 1);
 		for (attno = 0; attno < targetrel->rd_rel->relnatts; attno++)
 		{
 			Form_pg_attribute attr = targetrel->rd_att->attrs[attno];
@@ -1011,14 +1020,11 @@ transformOnConflictClause(ParseState *pstate,
 							  attr->atttypid, attr->atttypmod,
 							  attr->attcollation,
 							  0);
-				var->location = -1;
-
-				name = NameStr(attr->attname);
+				name = pstrdup(NameStr(attr->attname));
 			}
 
-			Assert(pstate->p_next_resno == attno + 1);
 			te = makeTargetEntry((Expr *) var,
-								 pstate->p_next_resno++,
+								 attno + 1,
 								 name,
 								 false);
 
@@ -1027,15 +1033,16 @@ transformOnConflictClause(ParseState *pstate,
 		}
 
 		/*
-		 * Additionally add a whole row tlist entry for EXCLUDED. That's
-		 * really only needed for ruleutils' benefit, which expects to find
-		 * corresponding entries in child tlists. Alternatively we could do
-		 * this only when required, but that doesn't seem worth the trouble.
+		 * Add a whole-row-Var entry to support references to "EXCLUDED.*".
+		 * Like the other entries in exclRelTlist, its resno must match the
+		 * Var's varattno, else the wrong things happen while resolving
+		 * references in setrefs.c.  This is against normal conventions for
+		 * targetlists, but it's okay since we don't use this as a real tlist.
 		 */
 		var = makeVar(exclRelIndex, InvalidAttrNumber,
-					  RelationGetRelid(targetrel),
+					  targetrel->rd_rel->reltype,
 					  -1, InvalidOid, 0);
-		te = makeTargetEntry((Expr *) var, 0, NULL, true);
+		te = makeTargetEntry((Expr *) var, InvalidAttrNumber, NULL, true);
 		exclRelTlist = lappend(exclRelTlist, te);
 
 		/*
@@ -1231,6 +1238,7 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 
 	qry->hasSubLinks = pstate->p_hasSubLinks;
 	qry->hasWindowFuncs = pstate->p_hasWindowFuncs;
+	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasAggs = pstate->p_hasAggs;
 	if (pstate->p_hasAggs || qry->groupClause || qry->groupingSets || qry->havingQual)
 		parseCheckAggregates(pstate, qry);
@@ -1290,9 +1298,7 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 	}
 
 	/*
-	 * For each row of VALUES, transform the raw expressions.  This is also a
-	 * handy place to reject DEFAULT nodes, which the grammar allows for
-	 * simplicity.
+	 * For each row of VALUES, transform the raw expressions.
 	 *
 	 * Note that the intermediate representation we build is column-organized
 	 * not row-organized.  That simplifies the type and collation processing
@@ -1302,8 +1308,12 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 	{
 		List	   *sublist = (List *) lfirst(lc);
 
-		/* Do basic expression transformation (same as a ROW() expr) */
-		sublist = transformExpressionList(pstate, sublist, EXPR_KIND_VALUES);
+		/*
+		 * Do basic expression transformation (same as a ROW() expr, but here
+		 * we disallow SetToDefault)
+		 */
+		sublist = transformExpressionList(pstate, sublist,
+										  EXPR_KIND_VALUES, false);
 
 		/*
 		 * All the sublists must be the same length, *after* transformation
@@ -1326,17 +1336,12 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 										exprLocation((Node *) sublist))));
 		}
 
-		/* Check for DEFAULT and build per-column expression lists */
+		/* Build per-column expression lists */
 		i = 0;
 		foreach(lc2, sublist)
 		{
 			Node	   *col = (Node *) lfirst(lc2);
 
-			if (IsA(col, SetToDefault))
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("DEFAULT can only appear in a VALUES list within INSERT"),
-						 parser_errposition(pstate, exprLocation(col))));
 			colexprs[i] = lappend(colexprs[i], col);
 			i++;
 		}
@@ -1691,6 +1696,7 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 
 	qry->hasSubLinks = pstate->p_hasSubLinks;
 	qry->hasWindowFuncs = pstate->p_hasWindowFuncs;
+	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasAggs = pstate->p_hasAggs;
 	if (pstate->p_hasAggs || qry->groupClause || qry->groupingSets || qry->havingQual)
 		parseCheckAggregates(pstate, qry);
@@ -2170,6 +2176,7 @@ transformUpdateStmt(ParseState *pstate, UpdateStmt *stmt)
 	qry->rtable = pstate->p_rtable;
 	qry->jointree = makeFromExpr(pstate->p_joinlist, qual);
 
+	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasSubLinks = pstate->p_hasSubLinks;
 
 	assign_query_collations(pstate, qry);
@@ -2565,7 +2572,7 @@ CheckSelectLocking(Query *qry, LockClauseStrength strength)
 		  translator: %s is a SQL row locking clause such as FOR UPDATE */
 				 errmsg("%s is not allowed with window functions",
 						LCS_asString(strength))));
-	if (expression_returns_set((Node *) qry->targetList))
+	if (qry->hasTargetSRFs)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*------

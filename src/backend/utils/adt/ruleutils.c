@@ -813,6 +813,8 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
 	SysScanDesc tgscan;
 	int			findx = 0;
 	char	   *tgname;
+	char	   *tgoldtable;
+	char	   *tgnewtable;
 	Oid			argtypes[1];	/* dummy */
 	Datum		value;
 	bool		isnull;
@@ -922,6 +924,27 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
 			appendStringInfoString(&buf, "DEFERRED ");
 		else
 			appendStringInfoString(&buf, "IMMEDIATE ");
+	}
+
+	value = fastgetattr(ht_trig, Anum_pg_trigger_tgoldtable,
+						tgrel->rd_att, &isnull);
+	if (!isnull)
+		tgoldtable = NameStr(*((NameData *) DatumGetPointer(value)));
+	else
+		tgoldtable = NULL;
+	value = fastgetattr(ht_trig, Anum_pg_trigger_tgnewtable,
+						tgrel->rd_att, &isnull);
+	if (!isnull)
+		tgnewtable = NameStr(*((NameData *) DatumGetPointer(value)));
+	else
+		tgnewtable = NULL;
+	if (tgoldtable != NULL || tgnewtable != NULL)
+	{
+		appendStringInfoString(&buf, "REFERENCING ");
+		if (tgoldtable != NULL)
+			appendStringInfo(&buf, "OLD TABLE AS %s ", tgoldtable);
+		if (tgnewtable != NULL)
+			appendStringInfo(&buf, "NEW TABLE AS %s ", tgnewtable);
 	}
 
 	if (TRIGGER_FOR_ROW(trigrec->tgtype))
@@ -1038,7 +1061,7 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
  *
  * Note that the SQL-function versions of this omit any info about the
  * index tablespace; this is intentional because pg_dump wants it that way.
- * However pg_get_indexdef_string() includes index tablespace if not default.
+ * However pg_get_indexdef_string() includes the index tablespace.
  * ----------
  */
 Datum
@@ -1079,7 +1102,11 @@ pg_get_indexdef_ext(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(string_to_text(res));
 }
 
-/* Internal version that returns a palloc'd C string; no pretty-printing */
+/*
+ * Internal version for use by ALTER TABLE.
+ * Includes a tablespace clause in the result.
+ * Returns a palloc'd C string; no pretty-printing.
+ */
 char *
 pg_get_indexdef_string(Oid indexrelid)
 {
@@ -1337,20 +1364,19 @@ pg_get_indexdef_worker(Oid indexrelid, int colno,
 		}
 
 		/*
-		 * If it's in a nondefault tablespace, say so, but only if requested
+		 * Print tablespace, but only if requested
 		 */
 		if (showTblSpc)
 		{
 			Oid			tblspc;
 
 			tblspc = get_rel_tablespace(indexrelid);
-			if (OidIsValid(tblspc))
-			{
-				if (isConstraint)
-					appendStringInfoString(&buf, " USING INDEX");
-				appendStringInfo(&buf, " TABLESPACE %s",
-							  quote_identifier(get_tablespace_name(tblspc)));
-			}
+			if (!OidIsValid(tblspc))
+				tblspc = MyDatabaseTableSpace;
+			if (isConstraint)
+				appendStringInfoString(&buf, " USING INDEX");
+			appendStringInfo(&buf, " TABLESPACE %s",
+							 quote_identifier(get_tablespace_name(tblspc)));
 		}
 
 		/*
