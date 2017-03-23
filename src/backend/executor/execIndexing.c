@@ -95,7 +95,7 @@
  * with the higher XID backs out.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -391,7 +391,8 @@ ExecInsertIndexTuples(TupleTableSlot *slot,
 						 isnull,	/* null flags */
 						 tupleid,		/* tid of heap tuple */
 						 heapRelation,	/* heap relation */
-						 checkUnique);	/* type of uniqueness check to do */
+						 checkUnique,	/* type of uniqueness check to do */
+						 indexInfo);	/* index AM may need this */
 
 		/*
 		 * If the index has an associated exclusion constraint, check that.

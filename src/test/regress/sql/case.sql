@@ -58,6 +58,11 @@ SELECT '6' AS "One",
     ELSE 7
   END AS "Two WHEN with default";
 
+
+SELECT '7' AS "None",
+   CASE WHEN random() < 0 THEN 1
+   END AS "NULL on no matches";
+
 -- Constant-expression folding shouldn't evaluate unreachable subexpressions
 SELECT CASE WHEN 1=0 THEN 1/0 WHEN 1=1 THEN 1 ELSE 2/0 END;
 SELECT CASE 1 WHEN 0 THEN 1/0 WHEN 1 THEN 1 ELSE 2/0 END;
@@ -197,6 +202,34 @@ CREATE OPERATOR = (procedure = inline_eq,
                    leftarg = foodomain, rightarg = foodomain);
 
 SELECT CASE volfoo('bar') WHEN 'foo'::foodomain THEN 'is foo' ELSE 'is not foo' END;
+
+ROLLBACK;
+
+-- Test multiple evaluation of a CASE arg that is a read/write object (#14472)
+-- Wrap this in a single transaction so the transient '=' operator doesn't
+-- cause problems in concurrent sessions
+BEGIN;
+
+CREATE DOMAIN arrdomain AS int[];
+
+CREATE FUNCTION make_ad(int,int) returns arrdomain as
+  'declare x arrdomain;
+   begin
+     x := array[$1,$2];
+     return x;
+   end' language plpgsql volatile;
+
+CREATE FUNCTION ad_eq(arrdomain, arrdomain) returns boolean as
+  'begin return array_eq($1, $2); end' language plpgsql;
+
+CREATE OPERATOR = (procedure = ad_eq,
+                   leftarg = arrdomain, rightarg = arrdomain);
+
+SELECT CASE make_ad(1,2)
+  WHEN array[2,4]::arrdomain THEN 'wrong'
+  WHEN array[2,5]::arrdomain THEN 'still wrong'
+  WHEN array[1,2]::arrdomain THEN 'right'
+  END;
 
 ROLLBACK;
 

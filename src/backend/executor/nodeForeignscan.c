@@ -3,7 +3,7 @@
  * nodeForeignscan.c
  *	  Routines to support scans of foreign tables
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -151,8 +151,6 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	 * create expression context for node
 	 */
 	ExecAssignExprContext(estate, &scanstate->ss.ps);
-
-	scanstate->ss.ps.ps_TupFromTlist = false;
 
 	/*
 	 * initialize child expressions
@@ -354,4 +352,20 @@ ExecForeignScanInitializeWorker(ForeignScanState *node, shm_toc *toc)
 		coordinate = shm_toc_lookup(toc, plan_node_id);
 		fdwroutine->InitializeWorkerForeignScan(node, toc, coordinate);
 	}
+}
+
+/* ----------------------------------------------------------------
+ *		ExecShutdownForeignScan
+ *
+ *		Gives FDW chance to stop asynchronous resource consumption
+ *		and release any resources still held.
+ * ----------------------------------------------------------------
+ */
+void
+ExecShutdownForeignScan(ForeignScanState *node)
+{
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	if (fdwroutine->ShutdownForeignScan)
+		fdwroutine->ShutdownForeignScan(node);
 }

@@ -2,7 +2,7 @@
  * dbsize.c
  *		Database object size functions, and related inquiries
  *
- * Copyright (c) 2002-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/dbsize.c
@@ -11,7 +11,6 @@
 
 #include "postgres.h"
 
-#include <sys/types.h>
 #include <sys/stat.h>
 
 #include "access/heapam.h"
@@ -309,7 +308,7 @@ Datum
 pg_relation_size(PG_FUNCTION_ARGS)
 {
 	Oid			relOid = PG_GETARG_OID(0);
-	text	   *forkName = PG_GETARG_TEXT_P(1);
+	text	   *forkName = PG_GETARG_TEXT_PP(1);
 	Relation	rel;
 	int64		size;
 

@@ -3,7 +3,7 @@
  * execParallel.c
  *	  Support routines for parallel execution.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * This file contains routines that are intended to support setting up,
@@ -25,17 +25,22 @@
 
 #include "executor/execParallel.h"
 #include "executor/executor.h"
+#include "executor/nodeBitmapHeapscan.h"
 #include "executor/nodeCustom.h"
 #include "executor/nodeForeignscan.h"
 #include "executor/nodeSeqscan.h"
+#include "executor/nodeIndexscan.h"
+#include "executor/nodeIndexonlyscan.h"
 #include "executor/tqueue.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
+#include "utils/dsa.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
+#include "pgstat.h"
 
 /*
  * Magic numbers for parallel executor communication.  We use constants
@@ -47,6 +52,8 @@
 #define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xE000000000000003)
 #define PARALLEL_KEY_TUPLE_QUEUE		UINT64CONST(0xE000000000000004)
 #define PARALLEL_KEY_INSTRUMENTATION	UINT64CONST(0xE000000000000005)
+#define PARALLEL_KEY_DSA				UINT64CONST(0xE000000000000006)
+#define PARALLEL_KEY_QUERY_TEXT		UINT64CONST(0xE000000000000007)
 
 #define PARALLEL_TUPLE_QUEUE_SIZE		65536
 
@@ -154,13 +161,16 @@ ExecSerializePlan(Plan *plan, EState *estate)
 	pstmt->planTree = plan;
 	pstmt->rtable = estate->es_range_table;
 	pstmt->resultRelations = NIL;
-	pstmt->utilityStmt = NULL;
-	pstmt->subplans = NIL;
+	pstmt->nonleafResultRelations = NIL;
+	pstmt->subplans = estate->es_plannedstmt->subplans;
 	pstmt->rewindPlanIDs = NULL;
 	pstmt->rowMarks = NIL;
 	pstmt->relationOids = NIL;
 	pstmt->invalItems = NIL;	/* workers can't replan anyway... */
 	pstmt->nParamExec = estate->es_plannedstmt->nParamExec;
+	pstmt->utilityStmt = NULL;
+	pstmt->stmt_location = -1;
+	pstmt->stmt_len = -1;
 
 	/* Return serialized copy of our dummy PlannedStmt. */
 	return nodeToString(pstmt);
@@ -193,12 +203,24 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 				ExecSeqScanEstimate((SeqScanState *) planstate,
 									e->pcxt);
 				break;
+			case T_IndexScanState:
+				ExecIndexScanEstimate((IndexScanState *) planstate,
+									  e->pcxt);
+				break;
+			case T_IndexOnlyScanState:
+				ExecIndexOnlyScanEstimate((IndexOnlyScanState *) planstate,
+										  e->pcxt);
+				break;
 			case T_ForeignScanState:
 				ExecForeignScanEstimate((ForeignScanState *) planstate,
 										e->pcxt);
 				break;
 			case T_CustomScanState:
 				ExecCustomScanEstimate((CustomScanState *) planstate,
+									   e->pcxt);
+				break;
+			case T_BitmapHeapScanState:
+				ExecBitmapHeapEstimate((BitmapHeapScanState *) planstate,
 									   e->pcxt);
 				break;
 			default:
@@ -245,6 +267,14 @@ ExecParallelInitializeDSM(PlanState *planstate,
 				ExecSeqScanInitializeDSM((SeqScanState *) planstate,
 										 d->pcxt);
 				break;
+			case T_IndexScanState:
+				ExecIndexScanInitializeDSM((IndexScanState *) planstate,
+										   d->pcxt);
+				break;
+			case T_IndexOnlyScanState:
+				ExecIndexOnlyScanInitializeDSM((IndexOnlyScanState *) planstate,
+											   d->pcxt);
+				break;
 			case T_ForeignScanState:
 				ExecForeignScanInitializeDSM((ForeignScanState *) planstate,
 											 d->pcxt);
@@ -253,6 +283,11 @@ ExecParallelInitializeDSM(PlanState *planstate,
 				ExecCustomScanInitializeDSM((CustomScanState *) planstate,
 											d->pcxt);
 				break;
+			case T_BitmapHeapScanState:
+				ExecBitmapHeapInitializeDSM((BitmapHeapScanState *) planstate,
+											d->pcxt);
+				break;
+
 			default:
 				break;
 		}
@@ -345,6 +380,9 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate, int nworkers)
 	int			param_len;
 	int			instrumentation_len = 0;
 	int			instrument_offset = 0;
+	Size		dsa_minsize = dsa_minimum_size();
+	char	   *query_string;
+	int			query_len;
 
 	/* Allocate object for return value. */
 	pei = palloc0(sizeof(ParallelExecutorInfo));
@@ -363,6 +401,11 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate, int nworkers)
 	 * segment, we need to figure out how big it should be.  Estimate space
 	 * for the various things we need to store.
 	 */
+
+	/* Estimate space for query text. */
+	query_len = strlen(estate->es_sourceText);
+	shm_toc_estimate_chunk(&pcxt->estimator, query_len);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/* Estimate space for serialized PlannedStmt. */
 	pstmt_len = strlen(pstmt_data) + 1;
@@ -413,6 +456,10 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate, int nworkers)
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
 	}
 
+	/* Estimate space for DSA area. */
+	shm_toc_estimate_chunk(&pcxt->estimator, dsa_minsize);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+
 	/* Everyone's had a chance to ask for space, so now create the DSM. */
 	InitializeParallelDSM(pcxt);
 
@@ -423,6 +470,11 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate, int nworkers)
 	 * ParallelContext itself needs to store there.  None of the space we
 	 * asked for has been allocated or initialized yet, though, so do that.
 	 */
+
+	/* Store query string */
+	query_string = shm_toc_allocate(pcxt->toc, query_len);
+	memcpy(query_string, estate->es_sourceText, query_len);
+	shm_toc_insert(pcxt->toc, PARALLEL_KEY_QUERY_TEXT, query_string);
 
 	/* Store serialized PlannedStmt. */
 	pstmt_space = shm_toc_allocate(pcxt->toc, pstmt_len);
@@ -467,6 +519,28 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate, int nworkers)
 	}
 
 	/*
+	 * Create a DSA area that can be used by the leader and all workers.
+	 * (However, if we failed to create a DSM and are using private memory
+	 * instead, then skip this.)
+	 */
+	if (pcxt->seg != NULL)
+	{
+		char	   *area_space;
+
+		area_space = shm_toc_allocate(pcxt->toc, dsa_minsize);
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_DSA, area_space);
+		pei->area = dsa_create_in_place(area_space, dsa_minsize,
+										LWTRANCHE_PARALLEL_QUERY_DSA,
+										pcxt->seg);
+	}
+
+	/*
+	 * Make the area available to executor nodes running in the leader.  See
+	 * also ParallelQueryMain which makes it available to workers.
+	 */
+	estate->es_query_dsa = pei->area;
+
+	/*
 	 * Give parallel-aware nodes a chance to initialize their shared data.
 	 * This also initializes the elements of instrumentation->ps_instrument,
 	 * if it exists.
@@ -488,7 +562,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate, int nworkers)
 }
 
 /*
- * Copy instrumentation information about this node and its descendents from
+ * Copy instrumentation information about this node and its descendants from
  * dynamic shared memory.
  */
 static bool
@@ -502,7 +576,7 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	int			plan_node_id = planstate->plan->plan_node_id;
 	MemoryContext oldcontext;
 
-	/* Find the instumentation for this node. */
+	/* Find the instrumentation for this node. */
 	for (i = 0; i < instrumentation->num_plan_nodes; ++i)
 		if (instrumentation->plan_node_id[i] == plan_node_id)
 			break;
@@ -563,7 +637,7 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 }
 
 /*
- * Clean up whatever ParallelExecutreInfo resources still exist after
+ * Clean up whatever ParallelExecutorInfo resources still exist after
  * ExecParallelFinish.  We separate these routines because someone might
  * want to examine the contents of the DSM after ExecParallelFinish and
  * before calling this routine.
@@ -571,6 +645,11 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 void
 ExecParallelCleanup(ParallelExecutorInfo *pei)
 {
+	if (pei->area != NULL)
+	{
+		dsa_detach(pei->area);
+		pei->area = NULL;
+	}
 	if (pei->pcxt != NULL)
 	{
 		DestroyParallelContext(pei->pcxt);
@@ -607,6 +686,10 @@ ExecParallelGetQueryDesc(shm_toc *toc, DestReceiver *receiver,
 	char	   *paramspace;
 	PlannedStmt *pstmt;
 	ParamListInfo paramLI;
+	char	   *queryString;
+
+	/* Get the query string from shared memory */
+	queryString = shm_toc_lookup(toc, PARALLEL_KEY_QUERY_TEXT);
 
 	/* Reconstruct leader-supplied PlannedStmt. */
 	pstmtspace = shm_toc_lookup(toc, PARALLEL_KEY_PLANNEDSTMT);
@@ -625,13 +708,13 @@ ExecParallelGetQueryDesc(shm_toc *toc, DestReceiver *receiver,
 	 * revising this someday.
 	 */
 	return CreateQueryDesc(pstmt,
-						   "<parallel query>",
+						   queryString,
 						   GetActiveSnapshot(), InvalidSnapshot,
 						   receiver, paramLI, instrument_options);
 }
 
 /*
- * Copy instrumentation information from this node and its descendents into
+ * Copy instrumentation information from this node and its descendants into
  * dynamic shared memory, so that the parallel leader can retrieve it.
  */
 static bool
@@ -671,7 +754,7 @@ ExecParallelReportInstrumentation(PlanState *planstate,
 }
 
 /*
- * Initialize the PlanState and its descendents with the information
+ * Initialize the PlanState and its descendants with the information
  * retrieved from shared memory.  This has to be done once the PlanState
  * is allocated and initialized by executor; that is, after ExecutorStart().
  */
@@ -689,6 +772,12 @@ ExecParallelInitializeWorker(PlanState *planstate, shm_toc *toc)
 			case T_SeqScanState:
 				ExecSeqScanInitializeWorker((SeqScanState *) planstate, toc);
 				break;
+			case T_IndexScanState:
+				ExecIndexScanInitializeWorker((IndexScanState *) planstate, toc);
+				break;
+			case T_IndexOnlyScanState:
+				ExecIndexOnlyScanInitializeWorker((IndexOnlyScanState *) planstate, toc);
+				break;
 			case T_ForeignScanState:
 				ExecForeignScanInitializeWorker((ForeignScanState *) planstate,
 												toc);
@@ -696,6 +785,10 @@ ExecParallelInitializeWorker(PlanState *planstate, shm_toc *toc)
 			case T_CustomScanState:
 				ExecCustomScanInitializeWorker((CustomScanState *) planstate,
 											   toc);
+				break;
+			case T_BitmapHeapScanState:
+				ExecBitmapHeapInitializeWorker(
+									 (BitmapHeapScanState *) planstate, toc);
 				break;
 			default:
 				break;
@@ -708,10 +801,11 @@ ExecParallelInitializeWorker(PlanState *planstate, shm_toc *toc)
 /*
  * Main entrypoint for parallel query worker processes.
  *
- * We reach this function from ParallelMain, so the setup necessary to create
- * a sensible parallel environment has already been done; ParallelMain worries
- * about stuff like the transaction state, combo CID mappings, and GUC values,
- * so we don't need to deal with any of that here.
+ * We reach this function from ParallelWorkerMain, so the setup necessary to
+ * create a sensible parallel environment has already been done;
+ * ParallelWorkerMain worries about stuff like the transaction state, combo
+ * CID mappings, and GUC values, so we don't need to deal with any of that
+ * here.
  *
  * Our job is to deal with concerns specific to the executor.  The parallel
  * group leader will have stored a serialized PlannedStmt, and it's our job
@@ -728,6 +822,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	QueryDesc  *queryDesc;
 	SharedExecutorInstrumentation *instrumentation;
 	int			instrument_options = 0;
+	void	   *area_space;
+	dsa_area   *area;
 
 	/* Set up DestReceiver, SharedExecutorInstrumentation, and QueryDesc. */
 	receiver = ExecParallelGetReceiver(seg, toc);
@@ -736,13 +832,30 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 		instrument_options = instrumentation->instrument_options;
 	queryDesc = ExecParallelGetQueryDesc(toc, receiver, instrument_options);
 
+	/* Setting debug_query_string for individual workers */
+	debug_query_string = queryDesc->sourceText;
+
+	/* Report workers' query for monitoring purposes */
+	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+
 	/* Prepare to track buffer usage during query execution. */
 	InstrStartParallelQuery();
 
-	/* Start up the executor, have it run the plan, and then shut it down. */
+	/* Attach to the dynamic shared memory area. */
+	area_space = shm_toc_lookup(toc, PARALLEL_KEY_DSA);
+	area = dsa_attach_in_place(area_space, seg);
+
+	/* Start up the executor */
 	ExecutorStart(queryDesc, 0);
+
+	/* Special executor initialization steps for parallel workers */
+	queryDesc->planstate->state->es_query_dsa = area;
 	ExecParallelInitializeWorker(queryDesc->planstate, toc);
-	ExecutorRun(queryDesc, ForwardScanDirection, 0L);
+
+	/* Run the plan */
+	ExecutorRun(queryDesc, ForwardScanDirection, 0L, true);
+
+	/* Shut down the executor */
 	ExecutorFinish(queryDesc);
 
 	/* Report buffer usage during parallel execution. */
@@ -758,6 +871,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	ExecutorEnd(queryDesc);
 
 	/* Cleanup. */
+	dsa_detach(area);
 	FreeQueryDesc(queryDesc);
 	(*receiver->rDestroy) (receiver);
 }

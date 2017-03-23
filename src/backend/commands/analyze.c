@@ -3,7 +3,7 @@
  * analyze.c
  *	  the Postgres statistics generator
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -233,6 +233,12 @@ analyze_rel(Oid relid, RangeVar *relation, int options,
 			return;
 		}
 	}
+	else if (onerel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		/*
+		 * For partitioned tables, we want to do the recursive ANALYZE below.
+		 */
+	}
 	else
 	{
 		/* No need for a WARNING if we already complained during VACUUM */
@@ -252,10 +258,12 @@ analyze_rel(Oid relid, RangeVar *relation, int options,
 	LWLockRelease(ProcArrayLock);
 
 	/*
-	 * Do the normal non-recursive ANALYZE.
+	 * Do the normal non-recursive ANALYZE.  We can skip this for partitioned
+	 * tables, which don't contain any rows.
 	 */
-	do_analyze_rel(onerel, options, params, va_cols, acquirefunc, relpages,
-				   false, in_outer_xact, elevel);
+	if (onerel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+		do_analyze_rel(onerel, options, params, va_cols, acquirefunc,
+					   relpages, false, in_outer_xact, elevel);
 
 	/*
 	 * If there are child tables, do recursive ANALYZE.
@@ -721,9 +729,9 @@ compute_index_stats(Relation onerel, double totalrows,
 		econtext->ecxt_scantuple = slot;
 
 		/* Set up execution state for predicate. */
-		predicate = (List *)
-			ExecPrepareExpr((Expr *) indexInfo->ii_Predicate,
-							estate);
+		predicate = castNode(List,
+							 ExecPrepareExpr((Expr *) indexInfo->ii_Predicate,
+											 estate));
 
 		/* Compute and save index expression values */
 		exprvals = (Datum *) palloc(numrows * attr_cnt * sizeof(Datum));
@@ -992,7 +1000,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 	totalblocks = RelationGetNumberOfBlocks(onerel);
 
 	/* Need a cutoff xmin for HeapTupleSatisfiesVacuum */
-	OldestXmin = GetOldestXmin(onerel, true);
+	OldestXmin = GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM);
 
 	/* Prepare for sampling block numbers */
 	BlockSampler_Init(&bs, totalblocks, targrows, random());
@@ -1259,6 +1267,7 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 				nrels,
 				i;
 	ListCell   *lc;
+	bool 		has_child;
 
 	/*
 	 * Find all members of inheritance set.  We only need AccessShareLock on
@@ -1296,6 +1305,7 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	relblocks = (double *) palloc(list_length(tableOIDs) * sizeof(double));
 	totalblocks = 0;
 	nrels = 0;
+	has_child = false;
 	foreach(lc, tableOIDs)
 	{
 		Oid			childOID = lfirst_oid(lc);
@@ -1349,13 +1359,20 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 		}
 		else
 		{
-			/* ignore, but release the lock on it */
-			Assert(childrel != onerel);
-			heap_close(childrel, AccessShareLock);
+			/*
+			 * ignore, but release the lock on it.  don't try to unlock the
+			 * passed-in relation
+			 */
+			Assert(childrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
+			if (childrel != onerel)
+				heap_close(childrel, AccessShareLock);
+			else
+				heap_close(childrel, NoLock);
 			continue;
 		}
 
 		/* OK, we'll process this child */
+		has_child = true;
 		rels[nrels] = childrel;
 		acquirefuncs[nrels] = acquirefunc;
 		relblocks[nrels] = (double) relpages;
@@ -1364,9 +1381,10 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	}
 
 	/*
-	 * If we don't have at least two tables to consider, fail.
+	 * If we don't have at least one child table to consider, fail.  If the
+	 * relation is a partitioned table, it's not counted as a child table.
 	 */
-	if (nrels < 2)
+	if (!has_child)
 	{
 		ereport(elevel,
 				(errmsg("skipping analyze of \"%s.%s\" inheritance tree --- this inheritance tree contains no analyzable child tables",
@@ -1587,17 +1605,14 @@ update_attstats(Oid relid, bool inh, int natts, VacAttrStats **vacattrstats)
 									 nulls,
 									 replaces);
 			ReleaseSysCache(oldtup);
-			simple_heap_update(sd, &stup->t_self, stup);
+			CatalogTupleUpdate(sd, &stup->t_self, stup);
 		}
 		else
 		{
 			/* No, insert new tuple */
 			stup = heap_form_tuple(RelationGetDescr(sd), values, nulls);
-			simple_heap_insert(sd, stup);
+			CatalogTupleInsert(sd, stup);
 		}
-
-		/* update indexes too */
-		CatalogUpdateIndexes(sd, stup);
 
 		heap_freetuple(stup);
 	}

@@ -4,7 +4,7 @@
  *	  Definitions for planner's internal data structures.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/relation.h
@@ -106,6 +106,8 @@ typedef struct PlannerGlobal
 	List	   *finalrowmarks;	/* "flat" list of PlanRowMarks */
 
 	List	   *resultRelations;	/* "flat" list of integer RT indexes */
+
+	List   *nonleafResultRelations; /* "flat" list of integer RT indexes */
 
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
 
@@ -248,6 +250,8 @@ typedef struct PlannerInfo
 
 	List	   *append_rel_list;	/* list of AppendRelInfos */
 
+	List	   *pcinfo_list;	/* list of PartitionedChildRelInfos */
+
 	List	   *rowMarks;		/* list of PlanRowMarks */
 
 	List	   *placeholder_list;		/* list of PlaceHolderInfos */
@@ -285,6 +289,9 @@ typedef struct PlannerInfo
 
 	double		tuple_fraction; /* tuple_fraction passed to query_planner */
 	double		limit_tuples;	/* limit_tuples passed to query_planner */
+
+	Index		qual_security_level;	/* minimum security_level for quals */
+	/* Note: qual_security_level is zero if there are no securityQuals */
 
 	bool		hasInheritedTarget;		/* true if parse->resultRelation is an
 										 * inheritance child rel */
@@ -443,6 +450,8 @@ typedef struct PlannerInfo
  *					participates (only used for base rels)
  *		baserestrictcost - Estimated cost of evaluating the baserestrictinfo
  *					clauses at a single tuple (only used for base rels)
+ *		baserestrict_min_security - Smallest security_level found among
+ *					clauses in baserestrictinfo
  *		joininfo  - List of RestrictInfo nodes, containing info about each
  *					join clause in which this relation participates (but
  *					note this excludes clauses that might be derivable from
@@ -539,6 +548,8 @@ typedef struct RelOptInfo
 	List	   *baserestrictinfo;		/* RestrictInfo structures (if base
 										 * rel) */
 	QualCost	baserestrictcost;		/* cost of evaluating the above */
+	Index		baserestrict_min_security;		/* min security_level found in
+												 * baserestrictinfo */
 	List	   *joininfo;		/* RestrictInfo structures for join clauses
 								 * involving this rel */
 	bool		has_eclass_joins;		/* T means joininfo is incomplete */
@@ -622,6 +633,7 @@ typedef struct IndexOptInfo
 	bool		amsearchnulls;	/* can AM search for NULL/NOT NULL entries? */
 	bool		amhasgettuple;	/* does AM have amgettuple interface? */
 	bool		amhasgetbitmap; /* does AM have amgetbitmap interface? */
+	bool		amcanparallel;	/* does AM support parallel scan? */
 	/* Rather than include amapi.h here, we declare amcostestimate like this */
 	void		(*amcostestimate) ();	/* AM's cost estimator */
 } IndexOptInfo;
@@ -713,6 +725,8 @@ typedef struct EquivalenceClass
 	bool		ec_below_outer_join;	/* equivalence applies below an OJ */
 	bool		ec_broken;		/* failed to generate needed clauses? */
 	Index		ec_sortref;		/* originating sortclause label, or 0 */
+	Index		ec_min_security;	/* minimum security_level in ec_sources */
+	Index		ec_max_security;	/* maximum security_level in ec_sources */
 	struct EquivalenceClass *ec_merged; /* set if merged into another EC */
 } EquivalenceClass;
 
@@ -1106,6 +1120,8 @@ typedef struct CustomPath
 typedef struct AppendPath
 {
 	Path		path;
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *subpaths;		/* list of component Paths */
 } AppendPath;
 
@@ -1124,6 +1140,8 @@ typedef struct AppendPath
 typedef struct MergeAppendPath
 {
 	Path		path;
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *subpaths;		/* list of component Paths */
 	double		limit_tuples;	/* hard limit on output tuples, or -1 */
 } MergeAppendPath;
@@ -1192,6 +1210,19 @@ typedef struct GatherPath
 	Path	   *subpath;		/* path for each worker */
 	bool		single_copy;	/* don't execute path more than once */
 } GatherPath;
+
+/*
+ * GatherMergePath runs several copies of a plan in parallel and
+ * collects the results. For gather merge parallel leader always execute the
+ * plan.
+ */
+typedef struct GatherMergePath
+{
+	Path		path;
+	Path	   *subpath;		/* path for each worker */
+	int			num_workers;	/* number of workers sought to help */
+} GatherMergePath;
+
 
 /*
  * All join-type paths share these fields.
@@ -1294,6 +1325,17 @@ typedef struct ProjectionPath
 	Path	   *subpath;		/* path representing input source */
 	bool		dummypp;		/* true if no separate Result is needed */
 } ProjectionPath;
+
+/*
+ * ProjectSetPath represents evaluation of a targetlist that includes
+ * set-returning function(s), which will need to be implemented by a
+ * ProjectSet plan node.
+ */
+typedef struct ProjectSetPath
+{
+	Path		path;
+	Path	   *subpath;		/* path representing input source */
+} ProjectSetPath;
 
 /*
  * SortPath represents an explicit sort step
@@ -1448,6 +1490,8 @@ typedef struct ModifyTablePath
 	CmdType		operation;		/* INSERT, UPDATE, or DELETE */
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
 	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *resultRelations;	/* integer list of RT indexes */
 	List	   *subpaths;		/* Path(s) producing source data */
 	List	   *subroots;		/* per-target-table PlannerInfos */
@@ -1560,6 +1604,15 @@ typedef struct LimitPath
  * outer join(s). A clause that is not outerjoin_delayed can be enforced
  * anywhere it is computable.
  *
+ * To handle security-barrier conditions efficiently, we mark RestrictInfo
+ * nodes with a security_level field, in which higher values identify clauses
+ * coming from less-trusted sources.  The exact semantics are that a clause
+ * cannot be evaluated before another clause with a lower security_level value
+ * unless the first clause is leakproof.  As with outer-join clauses, this
+ * creates a reason for clauses to sometimes need to be evaluated higher in
+ * the join tree than their contents would suggest; and even at a single plan
+ * node, this rule constrains the order of application of clauses.
+ *
  * In general, the referenced clause might be arbitrarily complex.  The
  * kinds of clauses we can handle as indexscan quals, mergejoin clauses,
  * or hashjoin clauses are limited (e.g., no volatile functions).  The code
@@ -1613,6 +1666,10 @@ typedef struct RestrictInfo
 	bool		can_join;		/* see comment above */
 
 	bool		pseudoconstant; /* see comment above */
+
+	bool		leakproof;		/* TRUE if known to contain no leaked Vars */
+
+	Index		security_level; /* see comment above */
 
 	/* The set of relids (varnos) actually referenced in the clause: */
 	Relids		clause_relids;
@@ -1789,10 +1846,10 @@ typedef struct SpecialJoinInfo
  *
  * When we expand an inheritable table or a UNION-ALL subselect into an
  * "append relation" (essentially, a list of child RTEs), we build an
- * AppendRelInfo for each child RTE.  The list of AppendRelInfos indicates
- * which child RTEs must be included when expanding the parent, and each
- * node carries information needed to translate Vars referencing the parent
- * into Vars referencing that child.
+ * AppendRelInfo for each non-partitioned child RTE.  The list of
+ * AppendRelInfos indicates which child RTEs must be included when expanding
+ * the parent, and each node carries information needed to translate Vars
+ * referencing the parent into Vars referencing that child.
  *
  * These structs are kept in the PlannerInfo node's append_rel_list.
  * Note that we just throw all the structs into one list, and scan the
@@ -1865,6 +1922,25 @@ typedef struct AppendRelInfo
 	 */
 	Oid			parent_reloid;	/* OID of parent relation */
 } AppendRelInfo;
+
+/*
+ * For a partitioned table, this maps its RT index to the list of RT indexes
+ * of the partitioned child tables in the partition tree.  We need to
+ * separately store this information, because we do not create AppendRelInfos
+ * for the partitioned child tables of a parent table, since AppendRelInfos
+ * contain information that is unnecessary for the partitioned child tables.
+ * The child_rels list must contain at least one element, because the parent
+ * partitioned table is itself counted as a child.
+ *
+ * These structs are kept in the PlannerInfo node's pcinfo_list.
+ */
+typedef struct PartitionedChildRelInfo
+{
+	NodeTag		type;
+
+	Index		parent_relid;
+	List	   *child_rels;
+} PartitionedChildRelInfo;
 
 /*
  * For each distinct placeholder expression generated during planning, we

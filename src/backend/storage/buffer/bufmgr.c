@@ -3,7 +3,7 @@
  * bufmgr.c
  *	  buffer manager interface routines
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1292,12 +1292,17 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * paranoia.  We also reset the usage_count since any recency of use of
 	 * the old content is no longer relevant.  (The usage_count starts out at
 	 * 1 so that the buffer can survive one clock-sweep pass.)
+	 *
+	 * Make sure BM_PERMANENT is set for buffers that must be written at every
+	 * checkpoint.  Unlogged buffers only need to be written at shutdown
+	 * checkpoints, except for their "init" forks, which need to be treated
+	 * just like permanent relations.
 	 */
 	buf->tag = newTag;
 	buf_state &= ~(BM_VALID | BM_DIRTY | BM_JUST_DIRTIED |
 				   BM_CHECKPOINT_NEEDED | BM_IO_ERROR | BM_PERMANENT |
 				   BUF_USAGECOUNT_MASK);
-	if (relpersistence == RELPERSISTENCE_PERMANENT)
+	if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 		buf_state |= BM_TAG_VALID | BM_PERMANENT | BUF_USAGECOUNT_ONE;
 	else
 		buf_state |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
@@ -1590,9 +1595,21 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy)
 			/* increase refcount */
 			buf_state += BUF_REFCOUNT_ONE;
 
-			/* increase usagecount unless already max */
-			if (BUF_STATE_GET_USAGECOUNT(buf_state) != BM_MAX_USAGE_COUNT)
-				buf_state += BUF_USAGECOUNT_ONE;
+			if (strategy == NULL)
+			{
+				/* Default case: increase usagecount unless already max. */
+				if (BUF_STATE_GET_USAGECOUNT(buf_state) < BM_MAX_USAGE_COUNT)
+					buf_state += BUF_USAGECOUNT_ONE;
+			}
+			else
+			{
+				/*
+				 * Ring buffers shouldn't evict others from pool.  Thus we
+				 * don't make usagecount more than 1.
+				 */
+				if (BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
+					buf_state += BUF_USAGECOUNT_ONE;
+			}
 
 			if (pg_atomic_compare_exchange_u32(&buf->state, &old_buf_state,
 											   buf_state))
@@ -3742,6 +3759,55 @@ ConditionalLockBufferForCleanup(Buffer buffer)
 	/* Failed, so release the lock */
 	UnlockBufHdr(bufHdr, buf_state);
 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+	return false;
+}
+
+/*
+ * IsBufferCleanupOK - as above, but we already have the lock
+ *
+ * Check whether it's OK to perform cleanup on a buffer we've already
+ * locked.  If we observe that the pin count is 1, our exclusive lock
+ * happens to be a cleanup lock, and we can proceed with anything that
+ * would have been allowable had we sought a cleanup lock originally.
+ */
+bool
+IsBufferCleanupOK(Buffer buffer)
+{
+	BufferDesc *bufHdr;
+	uint32		buf_state;
+
+	Assert(BufferIsValid(buffer));
+
+	if (BufferIsLocal(buffer))
+	{
+		/* There should be exactly one pin */
+		if (LocalRefCount[-buffer - 1] != 1)
+			return false;
+		/* Nobody else to wait for */
+		return true;
+	}
+
+	/* There should be exactly one local pin */
+	if (GetPrivateRefCount(buffer) != 1)
+		return false;
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+
+	/* caller must hold exclusive lock on buffer */
+	Assert(LWLockHeldByMeInMode(BufferDescriptorGetContentLock(bufHdr),
+								LW_EXCLUSIVE));
+
+	buf_state = LockBufHdr(bufHdr);
+
+	Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
+	if (BUF_STATE_GET_REFCOUNT(buf_state) == 1)
+	{
+		/* pincount is OK. */
+		UnlockBufHdr(bufHdr, buf_state);
+		return true;
+	}
+
+	UnlockBufHdr(bufHdr, buf_state);
 	return false;
 }
 

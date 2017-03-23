@@ -138,8 +138,27 @@ PostgreSQL documentation
        <para>
         Include large objects in the dump.  This is the default behavior
         except when <option>--schema</>, <option>--table</>, or
-        <option>--schema-only</> is specified, so the <option>-b</>
-        switch is only useful to add large objects to selective dumps.
+        <option>--schema-only</> is specified.  The <option>-b</>
+        switch is therefore only useful to add large objects to dumps
+        where a specific schema or table has been requested.  Note that
+        blobs are considered data and therefore will be included when
+        --data-only is used, but not when --schema-only is.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-B</></term>
+      <term><option>--no-blobs</></term>
+      <listitem>
+       <para>
+        Exclude large objects in the dump.
+       </para>
+
+       <para>
+        When both <option>-b</> and <option>-B</> are given, the behavior
+        is to output large objects, when data is being dumped, see the
+        <option>-b</> documentation.
        </para>
       </listitem>
      </varlistentry>
@@ -699,6 +718,11 @@ PostgreSQL documentation
         to dump the parts of the contents of the table that they have access to.
        </para>
 
+       <para>
+        Note that if you use this option currently, you probably also want
+        the dump be in <command>INSERT</command> format, as the
+        <command>COPY FROM</command> during restore does not support row security.
+       </para>
       </listitem>
      </varlistentry>
 
@@ -727,6 +751,15 @@ PostgreSQL documentation
         Use conditional commands (i.e. add an <literal>IF EXISTS</literal>
         clause) when cleaning database objects.  This option is not valid
         unless <option>--clean</> is also specified.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--include-subscriptions</option></term>
+      <listitem>
+       <para>
+        Include logical replication subscriptions in the dump.
        </para>
       </listitem>
      </varlistentry>
@@ -775,6 +808,19 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--no-subscription-connect</option></term>
+      <listitem>
+       <para>
+        When dumping logical replication subscriptions,
+        generate <command>CREATE SUBSCRIPTION</command> commands that do not
+        make remote connections for creating replication slot or initial table
+        copy.  That way, the dump can be restored without requiring network
+        access to the remote servers.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--no-synchronized-snapshots</></term>
       <listitem>
        <para>
@@ -810,6 +856,20 @@ PostgreSQL documentation
         effect on whether or not the table definitions (schema) are dumped;
         it only suppresses dumping the table data. Data in unlogged tables
         is always excluded when dumping from a standby server.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--no-sync</option></term>
+      <listitem>
+       <para>
+        By default, <command>pg_dump</command> will wait for all files
+        to be written safely to disk.  This option causes
+        <command>pg_dump</command> to return without waiting, which is
+        faster, but means that a subsequent operating system crash can leave
+        the dump corrupt.  Generally, this option is useful for testing
+        but should not be used when dumping data from production installation.
        </para>
       </listitem>
      </varlistentry>

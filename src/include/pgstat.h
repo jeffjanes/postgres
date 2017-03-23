@@ -3,7 +3,7 @@
  *
  *	Definitions for the PostgreSQL statistics collector daemon.
  *
- *	Copyright (c) 2001-2016, PostgreSQL Global Development Group
+ *	Copyright (c) 2001-2017, PostgreSQL Global Development Group
  *
  *	src/include/pgstat.h
  * ----------
@@ -14,9 +14,9 @@
 #include "datatype/timestamp.h"
 #include "fmgr.h"
 #include "libpq/pqcomm.h"
+#include "port/atomics.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"
-#include "storage/barrier.h"
 #include "storage/proc.h"
 #include "utils/hsearch.h"
 #include "utils/relcache.h"
@@ -715,8 +715,7 @@ typedef enum BackendState
  * Wait Classes
  * ----------
  */
-#define PG_WAIT_LWLOCK_NAMED		0x01000000U
-#define PG_WAIT_LWLOCK_TRANCHE		0x02000000U
+#define PG_WAIT_LWLOCK				0x01000000U
 #define PG_WAIT_LOCK				0x03000000U
 #define PG_WAIT_BUFFER_PIN			0x04000000U
 #define PG_WAIT_ACTIVITY			0x05000000U
@@ -724,6 +723,7 @@ typedef enum BackendState
 #define PG_WAIT_EXTENSION			0x07000000U
 #define PG_WAIT_IPC					0x08000000U
 #define PG_WAIT_TIMEOUT				0x09000000U
+#define PG_WAIT_IO					0x0A000000U
 
 /* ----------
  * Wait Events - Activity
@@ -746,7 +746,9 @@ typedef enum
 	WAIT_EVENT_SYSLOGGER_MAIN,
 	WAIT_EVENT_WAL_RECEIVER_MAIN,
 	WAIT_EVENT_WAL_SENDER_MAIN,
-	WAIT_EVENT_WAL_WRITER_MAIN
+	WAIT_EVENT_WAL_WRITER_MAIN,
+	WAIT_EVENT_LOGICAL_LAUNCHER_MAIN,
+	WAIT_EVENT_LOGICAL_APPLY_MAIN
 } WaitEventActivity;
 
 /* ----------
@@ -763,6 +765,7 @@ typedef enum
 	WAIT_EVENT_CLIENT_WRITE,
 	WAIT_EVENT_SSL_OPEN_SERVER,
 	WAIT_EVENT_WAL_RECEIVER_WAIT_START,
+	WAIT_EVENT_LIBPQWALRECEIVER,
 	WAIT_EVENT_WAL_SENDER_WAIT_WAL,
 	WAIT_EVENT_WAL_SENDER_WRITE_DATA
 } WaitEventClient;
@@ -778,14 +781,18 @@ typedef enum
 {
 	WAIT_EVENT_BGWORKER_SHUTDOWN = PG_WAIT_IPC,
 	WAIT_EVENT_BGWORKER_STARTUP,
+	WAIT_EVENT_BTREE_PAGE,
 	WAIT_EVENT_EXECUTE_GATHER,
 	WAIT_EVENT_MQ_INTERNAL,
 	WAIT_EVENT_MQ_PUT_MESSAGE,
 	WAIT_EVENT_MQ_RECEIVE,
 	WAIT_EVENT_MQ_SEND,
 	WAIT_EVENT_PARALLEL_FINISH,
+	WAIT_EVENT_PARALLEL_BITMAP_SCAN,
 	WAIT_EVENT_SAFE_SNAPSHOT,
-	WAIT_EVENT_SYNC_REP
+	WAIT_EVENT_SYNC_REP,
+	WAIT_EVENT_LOGICAL_SYNC_DATA,
+	WAIT_EVENT_LOGICAL_SYNC_STATE_CHANGE
 } WaitEventIPC;
 
 /* ----------
@@ -800,6 +807,83 @@ typedef enum
 	WAIT_EVENT_PG_SLEEP,
 	WAIT_EVENT_RECOVERY_APPLY_DELAY
 } WaitEventTimeout;
+
+/* ----------
+ * Wait Events - IO
+ *
+ * Use this category when a process is waiting for a IO.
+ * ----------
+ */
+typedef enum
+{
+	WAIT_EVENT_BUFFILE_READ,
+	WAIT_EVENT_BUFFILE_WRITE,
+	WAIT_EVENT_CONTROL_FILE_READ,
+	WAIT_EVENT_CONTROL_FILE_SYNC,
+	WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE,
+	WAIT_EVENT_CONTROL_FILE_WRITE,
+	WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE,
+	WAIT_EVENT_COPY_FILE_READ,
+	WAIT_EVENT_COPY_FILE_WRITE,
+	WAIT_EVENT_DATA_FILE_EXTEND,
+	WAIT_EVENT_DATA_FILE_FLUSH,
+	WAIT_EVENT_DATA_FILE_IMMEDIATE_SYNC,
+	WAIT_EVENT_DATA_FILE_PREFETCH,
+	WAIT_EVENT_DATA_FILE_READ = PG_WAIT_IO,
+	WAIT_EVENT_DATA_FILE_SYNC,
+	WAIT_EVENT_DATA_FILE_TRUNCATE,
+	WAIT_EVENT_DATA_FILE_WRITE,
+	WAIT_EVENT_DSM_FILL_ZERO_WRITE,
+	WAIT_EVENT_LOCK_FILE_ADDTODATADIR_READ,
+	WAIT_EVENT_LOCK_FILE_ADDTODATADIR_SYNC,
+	WAIT_EVENT_LOCK_FILE_ADDTODATADIR_WRITE,
+	WAIT_EVENT_LOCK_FILE_CREATE_READ,
+	WAIT_EVENT_LOCK_FILE_CREATE_SYNC,
+	WAIT_EVENT_LOCK_FILE_CREATE_WRITE,
+	WAIT_EVENT_LOCK_FILE_RECHECKDATADIR_READ,
+	WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC,
+	WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC,
+	WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE,
+	WAIT_EVENT_LOGICAL_REWRITE_SYNC,
+	WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE,
+	WAIT_EVENT_LOGICAL_REWRITE_WRITE,
+	WAIT_EVENT_RELATION_MAP_READ,
+	WAIT_EVENT_RELATION_MAP_SYNC,
+	WAIT_EVENT_RELATION_MAP_WRITE,
+	WAIT_EVENT_REORDER_BUFFER_READ,
+	WAIT_EVENT_REORDER_BUFFER_WRITE,
+	WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ,
+	WAIT_EVENT_REPLICATION_SLOT_READ,
+	WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC,
+	WAIT_EVENT_REPLICATION_SLOT_SYNC,
+	WAIT_EVENT_REPLICATION_SLOT_WRITE,
+	WAIT_EVENT_SLRU_FLUSH_SYNC,
+	WAIT_EVENT_SLRU_READ,
+	WAIT_EVENT_SLRU_SYNC,
+	WAIT_EVENT_SLRU_WRITE,
+	WAIT_EVENT_SNAPBUILD_READ,
+	WAIT_EVENT_SNAPBUILD_SYNC,
+	WAIT_EVENT_SNAPBUILD_WRITE,
+	WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC,
+	WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE,
+	WAIT_EVENT_TIMELINE_HISTORY_READ,
+	WAIT_EVENT_TIMELINE_HISTORY_SYNC,
+	WAIT_EVENT_TIMELINE_HISTORY_WRITE,
+	WAIT_EVENT_TWOPHASE_FILE_READ,
+	WAIT_EVENT_TWOPHASE_FILE_SYNC,
+	WAIT_EVENT_TWOPHASE_FILE_WRITE,
+	WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ,
+	WAIT_EVENT_WAL_BOOTSTRAP_SYNC,
+	WAIT_EVENT_WAL_BOOTSTRAP_WRITE,
+	WAIT_EVENT_WAL_COPY_READ,
+	WAIT_EVENT_WAL_COPY_SYNC,
+	WAIT_EVENT_WAL_COPY_WRITE,
+	WAIT_EVENT_WAL_INIT_SYNC,
+	WAIT_EVENT_WAL_INIT_WRITE,
+	WAIT_EVENT_WAL_READ,
+	WAIT_EVENT_WAL_SYNC_METHOD_ASSIGN,
+	WAIT_EVENT_WAL_WRITE
+} WaitEventIO;
 
 /* ----------
  * Command type for progress reporting purposes
@@ -895,7 +979,7 @@ typedef struct PgBackendStatus
 	/*
 	 * Command progress reporting.  Any command which wishes can advertise
 	 * that it is running by setting st_progress_command,
-	 * st_progress_command_target, and st_progress_command[].
+	 * st_progress_command_target, and st_progress_param[].
 	 * st_progress_command_target should be the OID of the relation which the
 	 * command targets (we assume there's just one, as this is meant for
 	 * utility commands), but the meaning of each element in the
@@ -1174,7 +1258,7 @@ pgstat_report_wait_end(void)
 #define pgstat_count_buffer_write_time(n)							\
 	(pgStatBlockWriteTime += (n))
 
-extern void pgstat_count_heap_insert(Relation rel, int n);
+extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);
 extern void pgstat_count_heap_update(Relation rel, bool hot);
 extern void pgstat_count_heap_delete(Relation rel);
 extern void pgstat_count_truncate(Relation rel);

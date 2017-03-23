@@ -4,7 +4,7 @@
  *	  Utility routines for the Postgres inverted index access method.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/gin_private.h"
+#include "access/ginxlog.h"
 #include "access/reloptions.h"
 #include "access/xloginsert.h"
 #include "catalog/pg_collation.h"
@@ -49,6 +50,7 @@ ginhandler(PG_FUNCTION_ARGS)
 	amroutine->amstorage = true;
 	amroutine->amclusterable = false;
 	amroutine->ampredlocks = false;
+	amroutine->amcanparallel = false;
 	amroutine->amkeytype = InvalidOid;
 
 	amroutine->ambuild = ginbuild;
@@ -68,6 +70,9 @@ ginhandler(PG_FUNCTION_ARGS)
 	amroutine->amendscan = ginendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
+	amroutine->amestimateparallelscan = NULL;
+	amroutine->aminitparallelscan = NULL;
+	amroutine->amparallelrescan = NULL;
 
 	PG_RETURN_POINTER(amroutine);
 }

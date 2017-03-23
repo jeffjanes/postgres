@@ -36,6 +36,7 @@
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/tqual.h"
+#include "utils/varlena.h"
 
 PG_MODULE_MAGIC;
 
@@ -164,7 +165,7 @@ build_pgstattuple_type(pgstattuple_type *stat, FunctionCallInfo fcinfo)
 Datum
 pgstattuple(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	RangeVar   *relrv;
 	Relation	rel;
 
@@ -190,7 +191,7 @@ pgstattuple(PG_FUNCTION_ARGS)
 Datum
 pgstattuple_v1_5(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	RangeVar   *relrv;
 	Relation	rel;
 
@@ -291,6 +292,9 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 			break;
 		case RELKIND_FOREIGN_TABLE:
 			err = "foreign table";
+			break;
+		case RELKIND_PARTITIONED_TABLE:
+			err = "partitioned table";
 			break;
 		default:
 			err = "unknown";
@@ -441,7 +445,6 @@ pgstat_hash_page(pgstattuple_type *stat, Relation rel, BlockNumber blkno,
 	Buffer		buf;
 	Page		page;
 
-	_hash_getlock(rel, blkno, HASH_SHARE);
 	buf = _hash_getbuf_with_strategy(rel, blkno, HASH_READ, 0, bstrategy);
 	page = BufferGetPage(buf);
 
@@ -472,7 +475,6 @@ pgstat_hash_page(pgstattuple_type *stat, Relation rel, BlockNumber blkno,
 	}
 
 	_hash_relbuf(rel, buf);
-	_hash_droplock(rel, blkno, HASH_SHARE);
 }
 
 /*

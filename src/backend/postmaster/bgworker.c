@@ -2,7 +2,7 @@
  * bgworker.c
  *		POSTGRES pluggable background workers implementation
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/postmaster/bgworker.c
@@ -17,9 +17,10 @@
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "port/atomics.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/postmaster.h"
-#include "storage/barrier.h"
+#include "replication/logicallauncher.h"
 #include "storage/dsm.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -80,9 +81,22 @@ typedef struct BackgroundWorkerSlot
 	BackgroundWorker worker;
 } BackgroundWorkerSlot;
 
+/*
+ * In order to limit the total number of parallel workers (according to
+ * max_parallel_workers GUC), we maintain the number of active parallel
+ * workers.  Since the postmaster cannot take locks, two variables are used for
+ * this purpose: the number of registered parallel workers (modified by the
+ * backends, protected by BackgroundWorkerLock) and the number of terminated
+ * parallel workers (modified only by the postmaster, lockless).  The active
+ * number of parallel workers is the number of registered workers minus the
+ * terminated ones.  These counters can of course overflow, but it's not
+ * important here since the subtraction will still give the right number.
+ */
 typedef struct BackgroundWorkerArray
 {
 	int			total_slots;
+	uint32		parallel_register_count;
+	uint32		parallel_terminate_count;
 	BackgroundWorkerSlot slot[FLEXIBLE_ARRAY_MEMBER];
 } BackgroundWorkerArray;
 
@@ -93,6 +107,15 @@ struct BackgroundWorkerHandle
 };
 
 static BackgroundWorkerArray *BackgroundWorkerData;
+
+/*
+ * List of workers that are allowed to be started outside of
+ * shared_preload_libraries.
+ */
+static const bgworker_main_type InternalBGWorkers[] = {
+	ApplyLauncherMain,
+	NULL
+};
 
 /*
  * Calculate shared memory needed.
@@ -127,6 +150,8 @@ BackgroundWorkerShmemInit(void)
 		int			slotno = 0;
 
 		BackgroundWorkerData->total_slots = max_worker_processes;
+		BackgroundWorkerData->parallel_register_count = 0;
+		BackgroundWorkerData->parallel_terminate_count = 0;
 
 		/*
 		 * Copy contents of worker list into shared memory.  Record the shared
@@ -267,9 +292,12 @@ BackgroundWorkerStateChange(void)
 
 			/*
 			 * We need a memory barrier here to make sure that the load of
-			 * bgw_notify_pid completes before the store to in_use.
+			 * bgw_notify_pid and the update of parallel_terminate_count
+			 * complete before the store to in_use.
 			 */
 			notify_pid = slot->worker.bgw_notify_pid;
+			if ((slot->worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0)
+				BackgroundWorkerData->parallel_terminate_count++;
 			pg_memory_barrier();
 			slot->pid = 0;
 			slot->in_use = false;
@@ -370,6 +398,9 @@ ForgetBackgroundWorker(slist_mutable_iter *cur)
 
 	Assert(rw->rw_shmem_slot < max_worker_processes);
 	slot = &BackgroundWorkerData->slot[rw->rw_shmem_slot];
+	if ((rw->rw_worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0)
+		BackgroundWorkerData->parallel_terminate_count++;
+
 	slot->in_use = false;
 
 	ereport(DEBUG1,
@@ -396,6 +427,41 @@ ReportBackgroundWorkerPID(RegisteredBgWorker *rw)
 
 	if (rw->rw_worker.bgw_notify_pid != 0)
 		kill(rw->rw_worker.bgw_notify_pid, SIGUSR1);
+}
+
+/*
+ * Report that the PID of a background worker is now zero because a
+ * previously-running background worker has exited.
+ *
+ * This function should only be called from the postmaster.
+ */
+void
+ReportBackgroundWorkerExit(slist_mutable_iter *cur)
+{
+	RegisteredBgWorker *rw;
+	BackgroundWorkerSlot *slot;
+	int		notify_pid;
+
+	rw = slist_container(RegisteredBgWorker, rw_lnode, cur->cur);
+
+	Assert(rw->rw_shmem_slot < max_worker_processes);
+	slot = &BackgroundWorkerData->slot[rw->rw_shmem_slot];
+	slot->pid = rw->rw_pid;
+	notify_pid = rw->rw_worker.bgw_notify_pid;
+
+	/*
+	 * If this worker is slated for deregistration, do that before notifying
+	 * the process which started it.  Otherwise, if that process tries to
+	 * reuse the slot immediately, it might not be available yet.  In theory
+	 * that could happen anyway if the process checks slot->pid at just the
+	 * wrong moment, but this makes the window narrower.
+	 */
+	if (rw->rw_terminate ||
+		rw->rw_worker.bgw_restart_time == BGW_NEVER_RESTART)
+		ForgetBackgroundWorker(cur);
+
+	if (notify_pid != 0)
+		kill(notify_pid, SIGUSR1);
 }
 
 /*
@@ -740,12 +806,23 @@ RegisterBackgroundWorker(BackgroundWorker *worker)
 {
 	RegisteredBgWorker *rw;
 	static int	numworkers = 0;
+	bool		internal = false;
+	int			i;
 
 	if (!IsUnderPostmaster)
 		ereport(DEBUG1,
 		 (errmsg("registering background worker \"%s\"", worker->bgw_name)));
 
-	if (!process_shared_preload_libraries_in_progress)
+	for (i = 0; InternalBGWorkers[i]; i++)
+	{
+		if (worker->bgw_main == InternalBGWorkers[i])
+		{
+			internal = true;
+			break;
+		}
+	}
+
+	if (!process_shared_preload_libraries_in_progress && !internal)
 	{
 		if (!IsUnderPostmaster)
 			ereport(LOG,
@@ -824,6 +901,7 @@ RegisterDynamicBackgroundWorker(BackgroundWorker *worker,
 {
 	int			slotno;
 	bool		success = false;
+	bool		parallel;
 	uint64		generation = 0;
 
 	/*
@@ -840,7 +918,26 @@ RegisterDynamicBackgroundWorker(BackgroundWorker *worker,
 	if (!SanityCheckBackgroundWorker(worker, ERROR))
 		return false;
 
+	parallel = (worker->bgw_flags & BGWORKER_CLASS_PARALLEL) != 0;
+
 	LWLockAcquire(BackgroundWorkerLock, LW_EXCLUSIVE);
+
+	/*
+	 * If this is a parallel worker, check whether there are already too many
+	 * parallel workers; if so, don't register another one.  Our view of
+	 * parallel_terminate_count may be slightly stale, but that doesn't really
+	 * matter: we would have gotten the same result if we'd arrived here
+	 * slightly earlier anyway.  There's no help for it, either, since the
+	 * postmaster must not take locks; a memory barrier wouldn't guarantee
+	 * anything useful.
+	 */
+	if (parallel && (BackgroundWorkerData->parallel_register_count -
+					 BackgroundWorkerData->parallel_terminate_count) >=
+		max_parallel_workers)
+	{
+		LWLockRelease(BackgroundWorkerLock);
+		return false;
+	}
 
 	/*
 	 * Look for an unused slot.  If we find one, grab it.
@@ -856,6 +953,8 @@ RegisterDynamicBackgroundWorker(BackgroundWorker *worker,
 			slot->generation++;
 			slot->terminate = false;
 			generation = slot->generation;
+			if (parallel)
+				BackgroundWorkerData->parallel_register_count++;
 
 			/*
 			 * Make sure postmaster doesn't see the slot as in use before it

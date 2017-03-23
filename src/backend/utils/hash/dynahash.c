@@ -40,7 +40,7 @@
  * function must be supplied; comparison defaults to memcmp() and key copying
  * to memcpy() when a user-defined hashing function is selected.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -72,7 +72,7 @@
  * when combined with HASH_DEBUG, these are displayed by hdestroy().
  *
  * Problems & fixes to ejp@ausmelb.oz. WARNING: relies on pre-processor
- * concatenation property, in probably unnecessary code 'optimisation'.
+ * concatenation property, in probably unnecessary code 'optimization'.
  *
  * Modified margo@postgres.berkeley.edu February 1990
  *		added multiple table interface

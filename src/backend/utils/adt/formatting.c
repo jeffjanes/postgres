@@ -4,7 +4,7 @@
  * src/backend/utils/adt/formatting.c
  *
  *
- *	 Portions Copyright (c) 1999-2016, PostgreSQL Global Development Group
+ *	 Portions Copyright (c) 1999-2017, PostgreSQL Global Development Group
  *
  *
  *	 TO_CHAR(); TO_TIMESTAMP(); TO_DATE(); TO_NUMBER();
@@ -80,6 +80,10 @@
 #endif
 #ifdef HAVE_WCTYPE_H
 #include <wctype.h>
+#endif
+
+#ifdef USE_ICU
+#include <unicode/ustring.h>
 #endif
 
 #include "catalog/pg_collation.h"
@@ -1443,6 +1447,42 @@ str_numth(char *dest, char *num, int type)
  *			upper/lower/initcap functions
  *****************************************************************************/
 
+#ifdef USE_ICU
+static int32_t
+icu_convert_case(int32_t (*func)(UChar *, int32_t, const UChar *, int32_t, const char *, UErrorCode *),
+				 pg_locale_t mylocale, UChar **buff_dest, UChar *buff_source, int32_t len_source)
+{
+	UErrorCode	status;
+	int32_t		len_dest;
+
+	len_dest = len_source;  /* try first with same length */
+	*buff_dest = palloc(len_dest * sizeof(**buff_dest));
+	status = U_ZERO_ERROR;
+	len_dest = func(*buff_dest, len_dest, buff_source, len_source, mylocale->info.icu.locale, &status);
+	if (status == U_BUFFER_OVERFLOW_ERROR)
+	{
+		/* try again with adjusted length */
+		pfree(buff_dest);
+		buff_dest = palloc(len_dest * sizeof(**buff_dest));
+		status = U_ZERO_ERROR;
+		len_dest = func(*buff_dest, len_dest, buff_source, len_source, mylocale->info.icu.locale, &status);
+	}
+	if (U_FAILURE(status))
+		ereport(ERROR,
+				(errmsg("case conversion failed: %s", u_errorName(status))));
+	return len_dest;
+}
+
+static int32_t
+u_strToTitle_default_BI(UChar *dest, int32_t destCapacity,
+						const UChar *src, int32_t srcLength,
+						const char *locale,
+						UErrorCode *pErrorCode)
+{
+	return u_strToTitle(dest, destCapacity, src, srcLength, NULL, locale, pErrorCode);
+}
+#endif
+
 /*
  * If the system provides the needed functions for wide-character manipulation
  * (which are all standardized by C99), then we implement upper/lower/initcap
@@ -1479,64 +1519,9 @@ str_tolower(const char *buff, size_t nbytes, Oid collid)
 		result = asc_tolower(buff, nbytes);
 	}
 #ifdef USE_WIDE_UPPER_LOWER
-	else if (pg_database_encoding_max_length() > 1)
-	{
-		pg_locale_t mylocale = 0;
-		wchar_t    *workspace;
-		size_t		curr_char;
-		size_t		result_size;
-
-		if (collid != DEFAULT_COLLATION_OID)
-		{
-			if (!OidIsValid(collid))
-			{
-				/*
-				 * This typically means that the parser could not resolve a
-				 * conflict of implicit collations, so report it that way.
-				 */
-				ereport(ERROR,
-						(errcode(ERRCODE_INDETERMINATE_COLLATION),
-						 errmsg("could not determine which collation to use for lower() function"),
-						 errhint("Use the COLLATE clause to set the collation explicitly.")));
-			}
-			mylocale = pg_newlocale_from_collation(collid);
-		}
-
-		/* Overflow paranoia */
-		if ((nbytes + 1) > (INT_MAX / sizeof(wchar_t)))
-			ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("out of memory")));
-
-		/* Output workspace cannot have more codes than input bytes */
-		workspace = (wchar_t *) palloc((nbytes + 1) * sizeof(wchar_t));
-
-		char2wchar(workspace, nbytes + 1, buff, nbytes, mylocale);
-
-		for (curr_char = 0; workspace[curr_char] != 0; curr_char++)
-		{
-#ifdef HAVE_LOCALE_T
-			if (mylocale)
-				workspace[curr_char] = towlower_l(workspace[curr_char], mylocale);
-			else
-#endif
-				workspace[curr_char] = towlower(workspace[curr_char]);
-		}
-
-		/* Make result large enough; case change might change number of bytes */
-		result_size = curr_char * pg_database_encoding_max_length() + 1;
-		result = palloc(result_size);
-
-		wchar2char(result, workspace, result_size, mylocale);
-		pfree(workspace);
-	}
-#endif   /* USE_WIDE_UPPER_LOWER */
 	else
 	{
-#ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
-#endif
-		char	   *p;
 
 		if (collid != DEFAULT_COLLATION_OID)
 		{
@@ -1551,28 +1536,82 @@ str_tolower(const char *buff, size_t nbytes, Oid collid)
 						 errmsg("could not determine which collation to use for lower() function"),
 						 errhint("Use the COLLATE clause to set the collation explicitly.")));
 			}
-#ifdef HAVE_LOCALE_T
 			mylocale = pg_newlocale_from_collation(collid);
-#endif
 		}
 
-		result = pnstrdup(buff, nbytes);
-
-		/*
-		 * Note: we assume that tolower_l() will not be so broken as to need
-		 * an isupper_l() guard test.  When using the default collation, we
-		 * apply the traditional Postgres behavior that forces ASCII-style
-		 * treatment of I/i, but in non-default collations you get exactly
-		 * what the collation says.
-		 */
-		for (p = result; *p; p++)
+#ifdef USE_ICU
+		if (mylocale && mylocale->provider == COLLPROVIDER_ICU)
 		{
-#ifdef HAVE_LOCALE_T
-			if (mylocale)
-				*p = tolower_l((unsigned char) *p, mylocale);
-			else
+			int32_t		len_uchar;
+			int32_t		len_conv;
+			UChar	   *buff_uchar;
+			UChar	   *buff_conv;
+
+			len_uchar = icu_to_uchar(&buff_uchar, buff, nbytes);
+			len_conv = icu_convert_case(u_strToLower, mylocale, &buff_conv, buff_uchar, len_uchar);
+			icu_from_uchar(&result, buff_conv, len_conv);
+		}
+		else
 #endif
-				*p = pg_tolower((unsigned char) *p);
+		{
+			if (pg_database_encoding_max_length() > 1)
+			{
+				wchar_t    *workspace;
+				size_t		curr_char;
+				size_t		result_size;
+
+				/* Overflow paranoia */
+				if ((nbytes + 1) > (INT_MAX / sizeof(wchar_t)))
+					ereport(ERROR,
+							(errcode(ERRCODE_OUT_OF_MEMORY),
+							 errmsg("out of memory")));
+
+				/* Output workspace cannot have more codes than input bytes */
+				workspace = (wchar_t *) palloc((nbytes + 1) * sizeof(wchar_t));
+
+				char2wchar(workspace, nbytes + 1, buff, nbytes, mylocale);
+
+				for (curr_char = 0; workspace[curr_char] != 0; curr_char++)
+				{
+#ifdef HAVE_LOCALE_T
+					if (mylocale)
+						workspace[curr_char] = towlower_l(workspace[curr_char], mylocale->info.lt);
+					else
+#endif
+						workspace[curr_char] = towlower(workspace[curr_char]);
+				}
+
+				/* Make result large enough; case change might change number of bytes */
+				result_size = curr_char * pg_database_encoding_max_length() + 1;
+				result = palloc(result_size);
+
+				wchar2char(result, workspace, result_size, mylocale);
+				pfree(workspace);
+			}
+#endif   /* USE_WIDE_UPPER_LOWER */
+			else
+			{
+				char	   *p;
+
+				result = pnstrdup(buff, nbytes);
+
+				/*
+				 * Note: we assume that tolower_l() will not be so broken as to need
+				 * an isupper_l() guard test.  When using the default collation, we
+				 * apply the traditional Postgres behavior that forces ASCII-style
+				 * treatment of I/i, but in non-default collations you get exactly
+				 * what the collation says.
+				 */
+				for (p = result; *p; p++)
+				{
+#ifdef HAVE_LOCALE_T
+					if (mylocale)
+						*p = tolower_l((unsigned char) *p, mylocale->info.lt);
+					else
+#endif
+						*p = pg_tolower((unsigned char) *p);
+				}
+			}
 		}
 	}
 
@@ -1599,64 +1638,9 @@ str_toupper(const char *buff, size_t nbytes, Oid collid)
 		result = asc_toupper(buff, nbytes);
 	}
 #ifdef USE_WIDE_UPPER_LOWER
-	else if (pg_database_encoding_max_length() > 1)
-	{
-		pg_locale_t mylocale = 0;
-		wchar_t    *workspace;
-		size_t		curr_char;
-		size_t		result_size;
-
-		if (collid != DEFAULT_COLLATION_OID)
-		{
-			if (!OidIsValid(collid))
-			{
-				/*
-				 * This typically means that the parser could not resolve a
-				 * conflict of implicit collations, so report it that way.
-				 */
-				ereport(ERROR,
-						(errcode(ERRCODE_INDETERMINATE_COLLATION),
-						 errmsg("could not determine which collation to use for upper() function"),
-						 errhint("Use the COLLATE clause to set the collation explicitly.")));
-			}
-			mylocale = pg_newlocale_from_collation(collid);
-		}
-
-		/* Overflow paranoia */
-		if ((nbytes + 1) > (INT_MAX / sizeof(wchar_t)))
-			ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("out of memory")));
-
-		/* Output workspace cannot have more codes than input bytes */
-		workspace = (wchar_t *) palloc((nbytes + 1) * sizeof(wchar_t));
-
-		char2wchar(workspace, nbytes + 1, buff, nbytes, mylocale);
-
-		for (curr_char = 0; workspace[curr_char] != 0; curr_char++)
-		{
-#ifdef HAVE_LOCALE_T
-			if (mylocale)
-				workspace[curr_char] = towupper_l(workspace[curr_char], mylocale);
-			else
-#endif
-				workspace[curr_char] = towupper(workspace[curr_char]);
-		}
-
-		/* Make result large enough; case change might change number of bytes */
-		result_size = curr_char * pg_database_encoding_max_length() + 1;
-		result = palloc(result_size);
-
-		wchar2char(result, workspace, result_size, mylocale);
-		pfree(workspace);
-	}
-#endif   /* USE_WIDE_UPPER_LOWER */
 	else
 	{
-#ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
-#endif
-		char	   *p;
 
 		if (collid != DEFAULT_COLLATION_OID)
 		{
@@ -1671,28 +1655,81 @@ str_toupper(const char *buff, size_t nbytes, Oid collid)
 						 errmsg("could not determine which collation to use for upper() function"),
 						 errhint("Use the COLLATE clause to set the collation explicitly.")));
 			}
-#ifdef HAVE_LOCALE_T
 			mylocale = pg_newlocale_from_collation(collid);
-#endif
 		}
 
-		result = pnstrdup(buff, nbytes);
-
-		/*
-		 * Note: we assume that toupper_l() will not be so broken as to need
-		 * an islower_l() guard test.  When using the default collation, we
-		 * apply the traditional Postgres behavior that forces ASCII-style
-		 * treatment of I/i, but in non-default collations you get exactly
-		 * what the collation says.
-		 */
-		for (p = result; *p; p++)
+#ifdef USE_ICU
+		if (mylocale && mylocale->provider == COLLPROVIDER_ICU)
 		{
-#ifdef HAVE_LOCALE_T
-			if (mylocale)
-				*p = toupper_l((unsigned char) *p, mylocale);
-			else
+			int32_t		len_uchar, len_conv;
+			UChar	   *buff_uchar;
+			UChar	   *buff_conv;
+
+			len_uchar = icu_to_uchar(&buff_uchar, buff, nbytes);
+			len_conv = icu_convert_case(u_strToUpper, mylocale, &buff_conv, buff_uchar, len_uchar);
+			icu_from_uchar(&result, buff_conv, len_conv);
+		}
+		else
 #endif
-				*p = pg_toupper((unsigned char) *p);
+		{
+			if (pg_database_encoding_max_length() > 1)
+			{
+				wchar_t    *workspace;
+				size_t		curr_char;
+				size_t		result_size;
+
+				/* Overflow paranoia */
+				if ((nbytes + 1) > (INT_MAX / sizeof(wchar_t)))
+					ereport(ERROR,
+							(errcode(ERRCODE_OUT_OF_MEMORY),
+							 errmsg("out of memory")));
+
+				/* Output workspace cannot have more codes than input bytes */
+				workspace = (wchar_t *) palloc((nbytes + 1) * sizeof(wchar_t));
+
+				char2wchar(workspace, nbytes + 1, buff, nbytes, mylocale);
+
+				for (curr_char = 0; workspace[curr_char] != 0; curr_char++)
+				{
+#ifdef HAVE_LOCALE_T
+					if (mylocale)
+						workspace[curr_char] = towupper_l(workspace[curr_char], mylocale->info.lt);
+					else
+#endif
+						workspace[curr_char] = towupper(workspace[curr_char]);
+				}
+
+				/* Make result large enough; case change might change number of bytes */
+				result_size = curr_char * pg_database_encoding_max_length() + 1;
+				result = palloc(result_size);
+
+				wchar2char(result, workspace, result_size, mylocale);
+				pfree(workspace);
+			}
+#endif   /* USE_WIDE_UPPER_LOWER */
+			else
+			{
+				char	   *p;
+
+				result = pnstrdup(buff, nbytes);
+
+				/*
+				 * Note: we assume that toupper_l() will not be so broken as to need
+				 * an islower_l() guard test.  When using the default collation, we
+				 * apply the traditional Postgres behavior that forces ASCII-style
+				 * treatment of I/i, but in non-default collations you get exactly
+				 * what the collation says.
+				 */
+				for (p = result; *p; p++)
+				{
+#ifdef HAVE_LOCALE_T
+					if (mylocale)
+						*p = toupper_l((unsigned char) *p, mylocale->info.lt);
+					else
+#endif
+						*p = pg_toupper((unsigned char) *p);
+				}
+			}
 		}
 	}
 
@@ -1720,76 +1757,9 @@ str_initcap(const char *buff, size_t nbytes, Oid collid)
 		result = asc_initcap(buff, nbytes);
 	}
 #ifdef USE_WIDE_UPPER_LOWER
-	else if (pg_database_encoding_max_length() > 1)
-	{
-		pg_locale_t mylocale = 0;
-		wchar_t    *workspace;
-		size_t		curr_char;
-		size_t		result_size;
-
-		if (collid != DEFAULT_COLLATION_OID)
-		{
-			if (!OidIsValid(collid))
-			{
-				/*
-				 * This typically means that the parser could not resolve a
-				 * conflict of implicit collations, so report it that way.
-				 */
-				ereport(ERROR,
-						(errcode(ERRCODE_INDETERMINATE_COLLATION),
-						 errmsg("could not determine which collation to use for initcap() function"),
-						 errhint("Use the COLLATE clause to set the collation explicitly.")));
-			}
-			mylocale = pg_newlocale_from_collation(collid);
-		}
-
-		/* Overflow paranoia */
-		if ((nbytes + 1) > (INT_MAX / sizeof(wchar_t)))
-			ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("out of memory")));
-
-		/* Output workspace cannot have more codes than input bytes */
-		workspace = (wchar_t *) palloc((nbytes + 1) * sizeof(wchar_t));
-
-		char2wchar(workspace, nbytes + 1, buff, nbytes, mylocale);
-
-		for (curr_char = 0; workspace[curr_char] != 0; curr_char++)
-		{
-#ifdef HAVE_LOCALE_T
-			if (mylocale)
-			{
-				if (wasalnum)
-					workspace[curr_char] = towlower_l(workspace[curr_char], mylocale);
-				else
-					workspace[curr_char] = towupper_l(workspace[curr_char], mylocale);
-				wasalnum = iswalnum_l(workspace[curr_char], mylocale);
-			}
-			else
-#endif
-			{
-				if (wasalnum)
-					workspace[curr_char] = towlower(workspace[curr_char]);
-				else
-					workspace[curr_char] = towupper(workspace[curr_char]);
-				wasalnum = iswalnum(workspace[curr_char]);
-			}
-		}
-
-		/* Make result large enough; case change might change number of bytes */
-		result_size = curr_char * pg_database_encoding_max_length() + 1;
-		result = palloc(result_size);
-
-		wchar2char(result, workspace, result_size, mylocale);
-		pfree(workspace);
-	}
-#endif   /* USE_WIDE_UPPER_LOWER */
 	else
 	{
-#ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
-#endif
-		char	   *p;
 
 		if (collid != DEFAULT_COLLATION_OID)
 		{
@@ -1804,39 +1774,104 @@ str_initcap(const char *buff, size_t nbytes, Oid collid)
 						 errmsg("could not determine which collation to use for initcap() function"),
 						 errhint("Use the COLLATE clause to set the collation explicitly.")));
 			}
-#ifdef HAVE_LOCALE_T
 			mylocale = pg_newlocale_from_collation(collid);
-#endif
 		}
 
-		result = pnstrdup(buff, nbytes);
-
-		/*
-		 * Note: we assume that toupper_l()/tolower_l() will not be so broken
-		 * as to need guard tests.  When using the default collation, we apply
-		 * the traditional Postgres behavior that forces ASCII-style treatment
-		 * of I/i, but in non-default collations you get exactly what the
-		 * collation says.
-		 */
-		for (p = result; *p; p++)
+#ifdef USE_ICU
+		if (mylocale && mylocale->provider == COLLPROVIDER_ICU)
 		{
-#ifdef HAVE_LOCALE_T
-			if (mylocale)
-			{
-				if (wasalnum)
-					*p = tolower_l((unsigned char) *p, mylocale);
-				else
-					*p = toupper_l((unsigned char) *p, mylocale);
-				wasalnum = isalnum_l((unsigned char) *p, mylocale);
-			}
-			else
+			int32_t		len_uchar, len_conv;
+			UChar	   *buff_uchar;
+			UChar	   *buff_conv;
+
+			len_uchar = icu_to_uchar(&buff_uchar, buff, nbytes);
+			len_conv = icu_convert_case(u_strToTitle_default_BI, mylocale, &buff_conv, buff_uchar, len_uchar);
+			icu_from_uchar(&result, buff_conv, len_conv);
+		}
+		else
 #endif
+		{
+			if (pg_database_encoding_max_length() > 1)
 			{
-				if (wasalnum)
-					*p = pg_tolower((unsigned char) *p);
-				else
-					*p = pg_toupper((unsigned char) *p);
-				wasalnum = isalnum((unsigned char) *p);
+				wchar_t    *workspace;
+				size_t		curr_char;
+				size_t		result_size;
+
+				/* Overflow paranoia */
+				if ((nbytes + 1) > (INT_MAX / sizeof(wchar_t)))
+					ereport(ERROR,
+							(errcode(ERRCODE_OUT_OF_MEMORY),
+							 errmsg("out of memory")));
+
+				/* Output workspace cannot have more codes than input bytes */
+				workspace = (wchar_t *) palloc((nbytes + 1) * sizeof(wchar_t));
+
+				char2wchar(workspace, nbytes + 1, buff, nbytes, mylocale);
+
+				for (curr_char = 0; workspace[curr_char] != 0; curr_char++)
+				{
+#ifdef HAVE_LOCALE_T
+					if (mylocale)
+					{
+						if (wasalnum)
+							workspace[curr_char] = towlower_l(workspace[curr_char], mylocale->info.lt);
+						else
+							workspace[curr_char] = towupper_l(workspace[curr_char], mylocale->info.lt);
+						wasalnum = iswalnum_l(workspace[curr_char], mylocale->info.lt);
+					}
+					else
+#endif
+					{
+						if (wasalnum)
+							workspace[curr_char] = towlower(workspace[curr_char]);
+						else
+							workspace[curr_char] = towupper(workspace[curr_char]);
+						wasalnum = iswalnum(workspace[curr_char]);
+					}
+				}
+
+				/* Make result large enough; case change might change number of bytes */
+				result_size = curr_char * pg_database_encoding_max_length() + 1;
+				result = palloc(result_size);
+
+				wchar2char(result, workspace, result_size, mylocale);
+				pfree(workspace);
+			}
+#endif   /* USE_WIDE_UPPER_LOWER */
+			else
+			{
+				char	   *p;
+
+				result = pnstrdup(buff, nbytes);
+
+				/*
+				 * Note: we assume that toupper_l()/tolower_l() will not be so broken
+				 * as to need guard tests.  When using the default collation, we apply
+				 * the traditional Postgres behavior that forces ASCII-style treatment
+				 * of I/i, but in non-default collations you get exactly what the
+				 * collation says.
+				 */
+				for (p = result; *p; p++)
+				{
+#ifdef HAVE_LOCALE_T
+					if (mylocale)
+					{
+						if (wasalnum)
+							*p = tolower_l((unsigned char) *p, mylocale->info.lt);
+						else
+							*p = toupper_l((unsigned char) *p, mylocale->info.lt);
+						wasalnum = isalnum_l((unsigned char) *p, mylocale->info.lt);
+					}
+					else
+#endif
+					{
+						if (wasalnum)
+							*p = pg_tolower((unsigned char) *p);
+						else
+							*p = pg_toupper((unsigned char) *p);
+						wasalnum = isalnum((unsigned char) *p);
+					}
+				}
 			}
 		}
 	}
@@ -2265,7 +2300,7 @@ seq_search(char *name, const char *const * array, int type, int max, int *len)
 
 	for (last = 0, a = array; *a != NULL; a++)
 	{
-		/* comperate first chars */
+		/* compare first chars */
 		if (*name != **a)
 			continue;
 
@@ -2434,23 +2469,13 @@ DCH_to_char(FormatNode *node, bool is_interval, TmToChar *in, char *out, Oid col
 				s += strlen(s);
 				break;
 			case DCH_MS:		/* millisecond */
-#ifdef HAVE_INT64_TIMESTAMP
 				sprintf(s, "%03d", (int) (in->fsec / INT64CONST(1000)));
-#else
-				/* No rint() because we can't overflow and we might print US */
-				sprintf(s, "%03d", (int) (in->fsec * 1000));
-#endif
 				if (S_THth(n->suffix))
 					str_numth(s, s, S_TH_TYPE(n->suffix));
 				s += strlen(s);
 				break;
 			case DCH_US:		/* microsecond */
-#ifdef HAVE_INT64_TIMESTAMP
 				sprintf(s, "%06d", (int) in->fsec);
-#else
-				/* don't use rint() because we can't overflow 1000 */
-				sprintf(s, "%06d", (int) (in->fsec * 1000000));
-#endif
 				if (S_THth(n->suffix))
 					str_numth(s, s, S_TH_TYPE(n->suffix));
 				s += strlen(s);
@@ -3031,7 +3056,9 @@ DCH_from_char(FormatNode *node, char *in, TmFromChar *out)
 			case DCH_OF:
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("\"TZ\"/\"tz\"/\"OF\" format patterns are not supported in to_date")));
+				errmsg("formatting field \"%s\" is only supported in to_char",
+					   n->key->name)));
+				break;
 			case DCH_A_D:
 			case DCH_B_C:
 			case DCH_a_d:
@@ -3388,13 +3415,13 @@ Datum
 timestamp_to_char(PG_FUNCTION_ARGS)
 {
 	Timestamp	dt = PG_GETARG_TIMESTAMP(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1),
+	text	   *fmt = PG_GETARG_TEXT_PP(1),
 			   *res;
 	TmToChar	tmtc;
 	struct pg_tm *tm;
 	int			thisdate;
 
-	if ((VARSIZE(fmt) - VARHDRSZ) <= 0 || TIMESTAMP_NOT_FINITE(dt))
+	if (VARSIZE_ANY_EXHDR(fmt) <= 0 || TIMESTAMP_NOT_FINITE(dt))
 		PG_RETURN_NULL();
 
 	ZERO_tmtc(&tmtc);
@@ -3419,14 +3446,14 @@ Datum
 timestamptz_to_char(PG_FUNCTION_ARGS)
 {
 	TimestampTz dt = PG_GETARG_TIMESTAMP(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1),
+	text	   *fmt = PG_GETARG_TEXT_PP(1),
 			   *res;
 	TmToChar	tmtc;
 	int			tz;
 	struct pg_tm *tm;
 	int			thisdate;
 
-	if ((VARSIZE(fmt) - VARHDRSZ) <= 0 || TIMESTAMP_NOT_FINITE(dt))
+	if (VARSIZE_ANY_EXHDR(fmt) <= 0 || TIMESTAMP_NOT_FINITE(dt))
 		PG_RETURN_NULL();
 
 	ZERO_tmtc(&tmtc);
@@ -3456,12 +3483,12 @@ Datum
 interval_to_char(PG_FUNCTION_ARGS)
 {
 	Interval   *it = PG_GETARG_INTERVAL_P(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1),
+	text	   *fmt = PG_GETARG_TEXT_PP(1),
 			   *res;
 	TmToChar	tmtc;
 	struct pg_tm *tm;
 
-	if ((VARSIZE(fmt) - VARHDRSZ) <= 0)
+	if (VARSIZE_ANY_EXHDR(fmt) <= 0)
 		PG_RETURN_NULL();
 
 	ZERO_tmtc(&tmtc);
@@ -3489,8 +3516,8 @@ interval_to_char(PG_FUNCTION_ARGS)
 Datum
 to_timestamp(PG_FUNCTION_ARGS)
 {
-	text	   *date_txt = PG_GETARG_TEXT_P(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *date_txt = PG_GETARG_TEXT_PP(0);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	Timestamp	result;
 	int			tz;
 	struct pg_tm tm;
@@ -3516,8 +3543,8 @@ to_timestamp(PG_FUNCTION_ARGS)
 Datum
 to_date(PG_FUNCTION_ARGS)
 {
-	text	   *date_txt = PG_GETARG_TEXT_P(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *date_txt = PG_GETARG_TEXT_PP(0);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	DateADT		result;
 	struct pg_tm tm;
 	fsec_t		fsec;
@@ -3791,17 +3818,10 @@ do_to_timestamp(text *date_txt, text *fmt,
 		}
 	}
 
-#ifdef HAVE_INT64_TIMESTAMP
 	if (tmfc.ms)
 		*fsec += tmfc.ms * 1000;
 	if (tmfc.us)
 		*fsec += tmfc.us;
-#else
-	if (tmfc.ms)
-		*fsec += (double) tmfc.ms / 1000;
-	if (tmfc.us)
-		*fsec += (double) tmfc.us / 1000000;
-#endif
 
 	/* Range-check date fields according to bit mask computed above */
 	if (fmask != 0)
@@ -3824,12 +3844,7 @@ do_to_timestamp(text *date_txt, text *fmt,
 	if (tm->tm_hour < 0 || tm->tm_hour >= HOURS_PER_DAY ||
 		tm->tm_min < 0 || tm->tm_min >= MINS_PER_HOUR ||
 		tm->tm_sec < 0 || tm->tm_sec >= SECS_PER_MINUTE ||
-#ifdef HAVE_INT64_TIMESTAMP
-		*fsec < INT64CONST(0) || *fsec >= USECS_PER_SEC
-#else
-		*fsec < 0 || *fsec >= 1
-#endif
-		)
+		*fsec < INT64CONST(0) || *fsec >= USECS_PER_SEC)
 		DateTimeParseError(DTERR_FIELD_OVERFLOW, date_str, "timestamp");
 
 	DEBUG_TM(tm);
@@ -5058,8 +5073,8 @@ do { \
 Datum
 numeric_to_number(PG_FUNCTION_ARGS)
 {
-	text	   *value = PG_GETARG_TEXT_P(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *value = PG_GETARG_TEXT_PP(0);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	NUMDesc		Num;
 	Datum		result;
 	FormatNode *format;
@@ -5069,7 +5084,7 @@ numeric_to_number(PG_FUNCTION_ARGS)
 	int			scale,
 				precision;
 
-	len = VARSIZE(fmt) - VARHDRSZ;
+	len = VARSIZE_ANY_EXHDR(fmt);
 
 	if (len <= 0 || len >= INT_MAX / NUM_MAX_ITEM_SIZ)
 		PG_RETURN_NULL();
@@ -5078,8 +5093,8 @@ numeric_to_number(PG_FUNCTION_ARGS)
 
 	numstr = (char *) palloc((len * NUM_MAX_ITEM_SIZ) + 1);
 
-	NUM_processor(format, &Num, VARDATA(value), numstr,
-				  VARSIZE(value) - VARHDRSZ, 0, 0, false, PG_GET_COLLATION());
+	NUM_processor(format, &Num, VARDATA_ANY(value), numstr,
+				  VARSIZE_ANY_EXHDR(value), 0, 0, false, PG_GET_COLLATION());
 
 	scale = Num.post;
 	precision = Num.pre + Num.multi + scale;
@@ -5120,7 +5135,7 @@ Datum
 numeric_to_char(PG_FUNCTION_ARGS)
 {
 	Numeric		value = PG_GETARG_NUMERIC(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	NUMDesc		Num;
 	FormatNode *format;
 	text	   *result;
@@ -5244,7 +5259,7 @@ Datum
 int4_to_char(PG_FUNCTION_ARGS)
 {
 	int32		value = PG_GETARG_INT32(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	NUMDesc		Num;
 	FormatNode *format;
 	text	   *result;
@@ -5339,7 +5354,7 @@ Datum
 int8_to_char(PG_FUNCTION_ARGS)
 {
 	int64		value = PG_GETARG_INT64(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	NUMDesc		Num;
 	FormatNode *format;
 	text	   *result;
@@ -5449,7 +5464,7 @@ Datum
 float4_to_char(PG_FUNCTION_ARGS)
 {
 	float4		value = PG_GETARG_FLOAT4(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	NUMDesc		Num;
 	FormatNode *format;
 	text	   *result;
@@ -5555,7 +5570,7 @@ Datum
 float8_to_char(PG_FUNCTION_ARGS)
 {
 	float8		value = PG_GETARG_FLOAT8(0);
-	text	   *fmt = PG_GETARG_TEXT_P(1);
+	text	   *fmt = PG_GETARG_TEXT_PP(1);
 	NUMDesc		Num;
 	FormatNode *format;
 	text	   *result;

@@ -3,7 +3,7 @@
  * pathnode.c
  *	  Routines to manipulate pathlists and create path nodes
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -744,10 +744,9 @@ add_path_precheck(RelOptInfo *parent_rel,
  *	  As with add_path, we pfree paths that are found to be dominated by
  *	  another partial path; this requires that there be no other references to
  *	  such paths yet.  Hence, GatherPaths must not be created for a rel until
- *	  we're done creating all partial paths for it.  We do not currently build
- *	  partial indexscan paths, so there is no need for an exception for
- *	  IndexPaths here; for safety, we instead Assert that a path to be freed
- *	  isn't an IndexPath.
+ *	  we're done creating all partial paths for it.  Unlike add_path, we don't
+ *	  take an exception for IndexPaths as partial index paths won't be
+ *	  referenced by partial BitmapHeapPaths.
  */
 void
 add_partial_path(RelOptInfo *parent_rel, Path *new_path)
@@ -826,8 +825,6 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 		{
 			parent_rel->partial_pathlist =
 				list_delete_cell(parent_rel->partial_pathlist, p1, p1_prev);
-			/* we should not see IndexPaths here, so always safe to delete */
-			Assert(!IsA(old_path, IndexPath));
 			pfree(old_path);
 			/* p1_prev does not advance */
 		}
@@ -860,8 +857,6 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 	}
 	else
 	{
-		/* we should not see IndexPaths here, so always safe to delete */
-		Assert(!IsA(new_path, IndexPath));
 		/* Reject and recycle the new path */
 		pfree(new_path);
 	}
@@ -1005,6 +1000,7 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
  * 'required_outer' is the set of outer relids for a parameterized path.
  * 'loop_count' is the number of repetitions of the indexscan to factor into
  *		estimates of caching behavior.
+ * 'partial_path' is true if constructing a parallel index scan path.
  *
  * Returns the new path node.
  */
@@ -1019,7 +1015,8 @@ create_index_path(PlannerInfo *root,
 				  ScanDirection indexscandir,
 				  bool indexonly,
 				  Relids required_outer,
-				  double loop_count)
+				  double loop_count,
+				  bool partial_path)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
 	RelOptInfo *rel = index->rel;
@@ -1049,7 +1046,7 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexorderbycols = indexorderbycols;
 	pathnode->indexscandir = indexscandir;
 
-	cost_index(pathnode, root, loop_count);
+	cost_index(pathnode, root, loop_count, partial_path);
 
 	return pathnode;
 }
@@ -1071,7 +1068,8 @@ create_bitmap_heap_path(PlannerInfo *root,
 						RelOptInfo *rel,
 						Path *bitmapqual,
 						Relids required_outer,
-						double loop_count)
+						double loop_count,
+						int parallel_degree)
 {
 	BitmapHeapPath *pathnode = makeNode(BitmapHeapPath);
 
@@ -1080,9 +1078,9 @@ create_bitmap_heap_path(PlannerInfo *root,
 	pathnode->path.pathtarget = rel->reltarget;
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
 														  required_outer);
-	pathnode->path.parallel_aware = false;
+	pathnode->path.parallel_aware = parallel_degree > 0 ? true : false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
-	pathnode->path.parallel_workers = 0;
+	pathnode->path.parallel_workers = parallel_degree;
 	pathnode->path.pathkeys = NIL;		/* always unordered */
 
 	pathnode->bitmapqual = bitmapqual;
@@ -1203,7 +1201,7 @@ create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
  */
 AppendPath *
 create_append_path(RelOptInfo *rel, List *subpaths, Relids required_outer,
-				   int parallel_workers)
+				   int parallel_workers, List *partitioned_rels)
 {
 	AppendPath *pathnode = makeNode(AppendPath);
 	ListCell   *l;
@@ -1218,6 +1216,7 @@ create_append_path(RelOptInfo *rel, List *subpaths, Relids required_outer,
 	pathnode->path.parallel_workers = parallel_workers;
 	pathnode->path.pathkeys = NIL;		/* result is always considered
 										 * unsorted */
+	pathnode->partitioned_rels = partitioned_rels;
 	pathnode->subpaths = subpaths;
 
 	/*
@@ -1260,7 +1259,8 @@ create_merge_append_path(PlannerInfo *root,
 						 RelOptInfo *rel,
 						 List *subpaths,
 						 List *pathkeys,
-						 Relids required_outer)
+						 Relids required_outer,
+						 List *partitioned_rels)
 {
 	MergeAppendPath *pathnode = makeNode(MergeAppendPath);
 	Cost		input_startup_cost;
@@ -1276,6 +1276,7 @@ create_merge_append_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
 	pathnode->path.pathkeys = pathkeys;
+	pathnode->partitioned_rels = partitioned_rels;
 	pathnode->subpaths = subpaths;
 
 	/*
@@ -1333,7 +1334,7 @@ create_merge_append_path(PlannerInfo *root,
 	cost_merge_append(&pathnode->path, root,
 					  pathkeys, list_length(subpaths),
 					  input_startup_cost, input_total_cost,
-					  rel->tuples);
+					  pathnode->path.rows);
 
 	return pathnode;
 }
@@ -1630,6 +1631,66 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 }
 
 /*
+ * create_gather_merge_path
+ *
+ *	  Creates a path corresponding to a gather merge scan, returning
+ *	  the pathnode.
+ */
+GatherMergePath *
+create_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+						 PathTarget *target, List *pathkeys,
+						 Relids required_outer, double *rows)
+{
+	GatherMergePath *pathnode = makeNode(GatherMergePath);
+	Cost			 input_startup_cost = 0;
+	Cost			 input_total_cost = 0;
+
+	Assert(subpath->parallel_safe);
+	Assert(pathkeys);
+
+	pathnode->path.pathtype = T_GatherMerge;
+	pathnode->path.parent = rel;
+	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
+														  required_outer);
+	pathnode->path.parallel_aware = false;
+
+	pathnode->subpath = subpath;
+	pathnode->num_workers = subpath->parallel_workers;
+	pathnode->path.pathkeys = pathkeys;
+	pathnode->path.pathtarget = target ? target : rel->reltarget;
+	pathnode->path.rows += subpath->rows;
+
+	if (pathkeys_contained_in(pathkeys, subpath->pathkeys))
+	{
+		/* Subpath is adequately ordered, we won't need to sort it */
+		input_startup_cost += subpath->startup_cost;
+		input_total_cost += subpath->total_cost;
+	}
+	else
+	{
+		/* We'll need to insert a Sort node, so include cost for that */
+		Path		sort_path;		/* dummy for result of cost_sort */
+
+		cost_sort(&sort_path,
+				  root,
+				  pathkeys,
+				  subpath->total_cost,
+				  subpath->rows,
+				  subpath->pathtarget->width,
+				  0.0,
+				  work_mem,
+				  -1);
+		input_startup_cost += sort_path.startup_cost;
+		input_total_cost += sort_path.total_cost;
+	}
+
+	cost_gather_merge(pathnode, root, rel, pathnode->path.param_info,
+					  input_startup_cost, input_total_cost, rows);
+
+	return pathnode;
+}
+
+/*
  * translate_sub_tlist - get subquery column numbers represented by tlist
  *
  * The given targetlist usually contains only Vars referencing the given relid.
@@ -1749,6 +1810,32 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->pathkeys = pathkeys;
 
 	cost_functionscan(pathnode, root, rel, pathnode->param_info);
+
+	return pathnode;
+}
+
+/*
+ * create_tablefuncscan_path
+ *	  Creates a path corresponding to a sequential scan of a table function,
+ *	  returning the pathnode.
+ */
+Path *
+create_tablefuncscan_path(PlannerInfo *root, RelOptInfo *rel,
+						  Relids required_outer)
+{
+	Path	   *pathnode = makeNode(Path);
+
+	pathnode->pathtype = T_TableFuncScan;
+	pathnode->parent = rel;
+	pathnode->pathtarget = rel->reltarget;
+	pathnode->param_info = get_baserel_parampathinfo(root, rel,
+													 required_outer);
+	pathnode->parallel_aware = false;
+	pathnode->parallel_safe = rel->consider_parallel;
+	pathnode->parallel_workers = 0;
+	pathnode->pathkeys = NIL;	/* result is always unordered */
+
+	cost_tablefuncscan(pathnode, root, rel, pathnode->param_info);
 
 	return pathnode;
 }
@@ -2317,6 +2404,72 @@ apply_projection_to_path(PlannerInfo *root,
 	}
 
 	return path;
+}
+
+/*
+ * create_set_projection_path
+ *	  Creates a pathnode that represents performing a projection that
+ *	  includes set-returning functions.
+ *
+ * 'rel' is the parent relation associated with the result
+ * 'subpath' is the path representing the source of data
+ * 'target' is the PathTarget to be computed
+ */
+ProjectSetPath *
+create_set_projection_path(PlannerInfo *root,
+						   RelOptInfo *rel,
+						   Path *subpath,
+						   PathTarget *target)
+{
+	ProjectSetPath *pathnode = makeNode(ProjectSetPath);
+	double		tlist_rows;
+	ListCell   *lc;
+
+	pathnode->path.pathtype = T_ProjectSet;
+	pathnode->path.parent = rel;
+	pathnode->path.pathtarget = target;
+	/* For now, assume we are above any joins, so no parameterization */
+	pathnode->path.param_info = NULL;
+	pathnode->path.parallel_aware = false;
+	pathnode->path.parallel_safe = rel->consider_parallel &&
+		subpath->parallel_safe &&
+		is_parallel_safe(root, (Node *) target->exprs);
+	pathnode->path.parallel_workers = subpath->parallel_workers;
+	/* Projection does not change the sort order XXX? */
+	pathnode->path.pathkeys = subpath->pathkeys;
+
+	pathnode->subpath = subpath;
+
+	/*
+	 * Estimate number of rows produced by SRFs for each row of input; if
+	 * there's more than one in this node, use the maximum.
+	 */
+	tlist_rows = 1;
+	foreach(lc, target->exprs)
+	{
+		Node	   *node = (Node *) lfirst(lc);
+		double		itemrows;
+
+		itemrows = expression_returns_set_rows(node);
+		if (tlist_rows < itemrows)
+			tlist_rows = itemrows;
+	}
+
+	/*
+	 * In addition to the cost of evaluating the tlist, charge cpu_tuple_cost
+	 * per input row, and half of cpu_tuple_cost for each added output row.
+	 * This is slightly bizarre maybe, but it's what 9.6 did; we may revisit
+	 * this estimate later.
+	 */
+	pathnode->path.rows = subpath->rows * tlist_rows;
+	pathnode->path.startup_cost = subpath->startup_cost +
+		target->cost.startup;
+	pathnode->path.total_cost = subpath->total_cost +
+		target->cost.startup +
+		(cpu_tuple_cost + target->cost.per_tuple) * subpath->rows +
+		(pathnode->path.rows - subpath->rows) * cpu_tuple_cost / 2;
+
+	return pathnode;
 }
 
 /*
@@ -2955,7 +3108,7 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 ModifyTablePath *
 create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 						CmdType operation, bool canSetTag,
-						Index nominalRelation,
+						Index nominalRelation, List *partitioned_rels,
 						List *resultRelations, List *subpaths,
 						List *subroots,
 						List *withCheckOptionLists, List *returningLists,
@@ -3022,6 +3175,7 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->operation = operation;
 	pathnode->canSetTag = canSetTag;
 	pathnode->nominalRelation = nominalRelation;
+	pathnode->partitioned_rels = partitioned_rels;
 	pathnode->resultRelations = resultRelations;
 	pathnode->subpaths = subpaths;
 	pathnode->subroots = subroots;
@@ -3181,7 +3335,7 @@ reparameterize_path(PlannerInfo *root, Path *path,
 				memcpy(newpath, ipath, sizeof(IndexPath));
 				newpath->path.param_info =
 					get_baserel_parampathinfo(root, rel, required_outer);
-				cost_index(newpath, root, loop_count);
+				cost_index(newpath, root, loop_count, false);
 				return (Path *) newpath;
 			}
 		case T_BitmapHeapScan:
@@ -3192,7 +3346,7 @@ reparameterize_path(PlannerInfo *root, Path *path,
 														rel,
 														bpath->bitmapqual,
 														required_outer,
-														loop_count);
+														loop_count, 0);
 			}
 		case T_SubqueryScan:
 			{

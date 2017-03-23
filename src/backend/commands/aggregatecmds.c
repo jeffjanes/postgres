@@ -4,7 +4,7 @@
  *
  *	  Routines for aggregate-manipulation commands
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -109,13 +109,13 @@ DefineAggregate(ParseState *pstate, List *name, List *args, bool oldstyle, List 
 			aggKind = AGGKIND_ORDERED_SET;
 		else
 			numDirectArgs = 0;
-		args = (List *) linitial(args);
+		args = castNode(List, linitial(args));
 	}
 
 	/* Examine aggregate's definition clauses */
 	foreach(pl, parameters)
 	{
-		DefElem    *defel = (DefElem *) lfirst(pl);
+		DefElem    *defel = castNode(DefElem, lfirst(pl));
 
 		/*
 		 * sfunc1, stype1, and initcond1 are accepted as obsolete spellings

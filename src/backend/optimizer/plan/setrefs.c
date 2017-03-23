@@ -4,7 +4,7 @@
  *	  Post-processing of a completed plan tree: fix references to subplan
  *	  vars, compute regproc values for operators, etc
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -224,10 +224,8 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 	 */
 	foreach(lc, root->rowMarks)
 	{
-		PlanRowMark *rc = (PlanRowMark *) lfirst(lc);
+		PlanRowMark *rc = castNode(PlanRowMark, lfirst(lc));
 		PlanRowMark *newrc;
-
-		Assert(IsA(rc, PlanRowMark));
 
 		/* flat copy is enough since all fields are scalars */
 		newrc = (PlanRowMark *) palloc(sizeof(PlanRowMark));
@@ -395,11 +393,11 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, RangeTblEntry *rte)
 	newrte->subquery = NULL;
 	newrte->joinaliasvars = NIL;
 	newrte->functions = NIL;
+	newrte->tablefunc = NULL;
 	newrte->values_lists = NIL;
-	newrte->values_collations = NIL;
-	newrte->ctecoltypes = NIL;
-	newrte->ctecoltypmods = NIL;
-	newrte->ctecolcollations = NIL;
+	newrte->coltypes = NIL;
+	newrte->coltypmods = NIL;
+	newrte->colcollations = NIL;
 	newrte->securityQuals = NIL;
 
 	glob->finalrtable = lappend(glob->finalrtable, newrte);
@@ -556,6 +554,19 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					fix_scan_list(root, splan->functions, rtoffset);
 			}
 			break;
+		case T_TableFuncScan:
+			{
+				TableFuncScan *splan = (TableFuncScan *) plan;
+
+				splan->scan.scanrelid += rtoffset;
+				splan->scan.plan.targetlist =
+					fix_scan_list(root, splan->scan.plan.targetlist, rtoffset);
+				splan->scan.plan.qual =
+					fix_scan_list(root, splan->scan.plan.qual, rtoffset);
+				splan->tablefunc = (TableFunc *)
+					fix_scan_expr(root, (Node *) splan->tablefunc, rtoffset);
+			}
+			break;
 		case T_ValuesScan:
 			{
 				ValuesScan *splan = (ValuesScan *) plan;
@@ -605,6 +616,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			break;
 
 		case T_Gather:
+		case T_GatherMerge:
 			set_upper_references(root, plan, rtoffset);
 			break;
 
@@ -734,6 +746,9 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					fix_scan_expr(root, splan->resconstantqual, rtoffset);
 			}
 			break;
+		case T_ProjectSet:
+			set_upper_references(root, plan, rtoffset);
+			break;
 		case T_ModifyTable:
 			{
 				ModifyTable *splan = (ModifyTable *) plan;
@@ -820,6 +835,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				splan->nominalRelation += rtoffset;
 				splan->exclRelRTI += rtoffset;
 
+				foreach(l, splan->partitioned_rels)
+				{
+					lfirst_int(l) += rtoffset;
+				}
 				foreach(l, splan->resultRelations)
 				{
 					lfirst_int(l) += rtoffset;
@@ -848,6 +867,15 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				root->glob->resultRelations =
 					list_concat(root->glob->resultRelations,
 								list_copy(splan->resultRelations));
+
+				/*
+				 * If the main target relation is a partitioned table, the
+				 * following list contains the RT indexes of partitioned child
+				 * relations, which are not included in the above list.
+				 */
+				root->glob->nonleafResultRelations =
+					list_concat(root->glob->nonleafResultRelations,
+								list_copy(splan->partitioned_rels));
 			}
 			break;
 		case T_Append:
@@ -860,6 +888,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				 */
 				set_dummy_tlist_references(plan, rtoffset);
 				Assert(splan->plan.qual == NIL);
+				foreach(l, splan->partitioned_rels)
+				{
+					lfirst_int(l) += rtoffset;
+				}
 				foreach(l, splan->appendplans)
 				{
 					lfirst(l) = set_plan_refs(root,
@@ -878,6 +910,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				 */
 				set_dummy_tlist_references(plan, rtoffset);
 				Assert(splan->plan.qual == NIL);
+				foreach(l, splan->partitioned_rels)
+				{
+					lfirst_int(l) += rtoffset;
+				}
 				foreach(l, splan->mergeplans)
 				{
 					lfirst(l) = set_plan_refs(root,
@@ -1823,6 +1859,19 @@ set_dummy_tlist_references(Plan *plan, int rtoffset)
 		Var		   *oldvar = (Var *) tle->expr;
 		Var		   *newvar;
 
+		/*
+		 * As in search_indexed_tlist_for_non_var(), we prefer to keep Consts
+		 * as Consts, not Vars referencing Consts.  Here, there's no speed
+		 * advantage to be had, but it makes EXPLAIN output look cleaner, and
+		 * again it avoids confusing the executor.
+		 */
+		if (IsA(oldvar, Const))
+		{
+			/* just reuse the existing TLE node */
+			output_targetlist = lappend(output_targetlist, tle);
+			continue;
+		}
+
 		newvar = makeVar(OUTER_VAR,
 						 tle->resno,
 						 exprType((Node *) oldvar),
@@ -2009,6 +2058,16 @@ search_indexed_tlist_for_non_var(Node *node,
 								 indexed_tlist *itlist, Index newvarno)
 {
 	TargetEntry *tle;
+
+	/*
+	 * If it's a simple Const, replacing it with a Var is silly, even if there
+	 * happens to be an identical Const below; a Var is more expensive to
+	 * execute than a Const.  What's more, replacing it could confuse some
+	 * places in the executor that expect to see simple Consts for, eg,
+	 * dropped columns.
+	 */
+	if (IsA(node, Const))
+		return NULL;
 
 	tle = tlist_member(node, itlist->tlist);
 	if (tle)

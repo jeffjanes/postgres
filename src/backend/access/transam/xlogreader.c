@@ -3,7 +3,7 @@
  * xlogreader.c
  *		Generic XLog reading facility
  *
- * Portions Copyright (c) 2013-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/backend/access/transam/xlogreader.c
@@ -462,7 +462,8 @@ XLogReadRecord(XLogReaderState *state, XLogRecPtr RecPtr, char **errormsg)
 	/*
 	 * Special processing if it's an XLOG SWITCH record
 	 */
-	if (record->xl_rmid == RM_XLOG_ID && record->xl_info == XLOG_SWITCH)
+	if (record->xl_rmid == RM_XLOG_ID &&
+		(record->xl_info & ~XLR_INFO_MASK) == XLOG_SWITCH)
 	{
 		/* Pretend it extends to end of segment */
 		state->EndRecPtr += XLogSegSize - 1;
@@ -996,6 +997,7 @@ ResetDecoder(XLogReaderState *state)
 		state->blocks[block_id].in_use = false;
 		state->blocks[block_id].has_image = false;
 		state->blocks[block_id].has_data = false;
+		state->blocks[block_id].apply_image = false;
 	}
 	state->max_block_id = -1;
 }
@@ -1088,6 +1090,7 @@ DecodeXLogRecord(XLogReaderState *state, XLogRecord *record, char **errormsg)
 
 			blk = &state->blocks[block_id];
 			blk->in_use = true;
+			blk->apply_image = false;
 
 			COPY_HEADER_FIELD(&fork_flags, sizeof(uint8));
 			blk->forknum = fork_flags & BKPBLOCK_FORK_MASK;
@@ -1119,6 +1122,9 @@ DecodeXLogRecord(XLogReaderState *state, XLogRecord *record, char **errormsg)
 				COPY_HEADER_FIELD(&blk->bimg_len, sizeof(uint16));
 				COPY_HEADER_FIELD(&blk->hole_offset, sizeof(uint16));
 				COPY_HEADER_FIELD(&blk->bimg_info, sizeof(uint8));
+
+				blk->apply_image = ((blk->bimg_info & BKPIMAGE_APPLY) != 0);
+
 				if (blk->bimg_info & BKPIMAGE_IS_COMPRESSED)
 				{
 					if (blk->bimg_info & BKPIMAGE_HAS_HOLE)
@@ -1242,6 +1248,9 @@ DecodeXLogRecord(XLogReaderState *state, XLogRecord *record, char **errormsg)
 
 		if (!blk->in_use)
 			continue;
+
+		Assert(blk->has_image || !blk->apply_image);
+
 		if (blk->has_image)
 		{
 			blk->bkp_image = ptr;

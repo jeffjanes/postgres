@@ -8,7 +8,7 @@
  *
  * See fe_utils/psqlscan_int.h for additional commentary.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -243,7 +243,8 @@ other			.
 															 yyleng - 1);
 						value = cur_state->callbacks->get_variable(varname,
 																   false,
-																   false);
+																   false,
+																   cur_state->cb_passthrough);
 						free(varname);
 
 						/*

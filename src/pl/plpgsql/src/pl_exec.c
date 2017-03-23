@@ -3,7 +3,7 @@
  * pl_exec.c		- Executor for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -13,7 +13,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "plpgsql.h"
+#include "postgres.h"
 
 #include <ctype.h>
 
@@ -40,6 +40,8 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+
+#include "plpgsql.h"
 
 
 typedef struct
@@ -1337,12 +1339,6 @@ exec_stmt_block(PLpgSQL_execstate *estate, PLpgSQL_stmt_block *block)
 			 * automatically cleaned up during subxact exit.)
 			 */
 			estate->eval_econtext = old_eval_econtext;
-
-			/*
-			 * AtEOSubXact_SPI() should not have popped any SPI context, but
-			 * just in case it did, make sure we remain connected.
-			 */
-			SPI_restore_connection();
 		}
 		PG_CATCH();
 		{
@@ -1383,13 +1379,6 @@ exec_stmt_block(PLpgSQL_execstate *estate, PLpgSQL_stmt_block *block)
 
 			/* Revert to outer eval_econtext */
 			estate->eval_econtext = old_eval_econtext;
-
-			/*
-			 * If AtEOSubXact_SPI() popped any SPI context of the subxact, it
-			 * will have left us in a disconnected state.  We need this hack
-			 * to return to connected state.
-			 */
-			SPI_restore_connection();
 
 			/*
 			 * Must clean up the econtext too.  However, any tuple table made
@@ -3647,9 +3636,8 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 
 			foreach(l2, plansource->query_list)
 			{
-				Query	   *q = (Query *) lfirst(l2);
+				Query	   *q = castNode(Query, lfirst(l2));
 
-				Assert(IsA(q, Query));
 				if (q->canSetTag)
 				{
 					if (q->commandType == CMD_INSERT ||
@@ -4562,10 +4550,9 @@ exec_assign_value(PLpgSQL_execstate *estate,
 				PLpgSQL_rec *rec;
 				int			fno;
 				HeapTuple	newtup;
-				int			natts;
-				Datum	   *values;
-				bool	   *nulls;
-				bool	   *replaces;
+				int			colnums[1];
+				Datum		values[1];
+				bool		nulls[1];
 				Oid			atttype;
 				int32		atttypmod;
 
@@ -4584,9 +4571,8 @@ exec_assign_value(PLpgSQL_execstate *estate,
 						   errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")));
 
 				/*
-				 * Get the number of the records field to change and the
-				 * number of attributes in the tuple.  Note: disallow system
-				 * column names because the code below won't cope.
+				 * Get the number of the record field to change.  Disallow
+				 * system columns because the code below won't cope.
 				 */
 				fno = SPI_fnumber(rec->tupdesc, recfield->fieldname);
 				if (fno <= 0)
@@ -4594,42 +4580,25 @@ exec_assign_value(PLpgSQL_execstate *estate,
 							(errcode(ERRCODE_UNDEFINED_COLUMN),
 							 errmsg("record \"%s\" has no field \"%s\"",
 									rec->refname, recfield->fieldname)));
-				fno--;
-				natts = rec->tupdesc->natts;
-
-				/*
-				 * Set up values/control arrays for heap_modify_tuple. For all
-				 * the attributes except the one we want to replace, use the
-				 * value that's in the old tuple.
-				 */
-				values = eval_mcontext_alloc(estate, sizeof(Datum) * natts);
-				nulls = eval_mcontext_alloc(estate, sizeof(bool) * natts);
-				replaces = eval_mcontext_alloc(estate, sizeof(bool) * natts);
-
-				memset(replaces, false, sizeof(bool) * natts);
-				replaces[fno] = true;
+				colnums[0] = fno;
 
 				/*
 				 * Now insert the new value, being careful to cast it to the
 				 * right type.
 				 */
-				atttype = rec->tupdesc->attrs[fno]->atttypid;
-				atttypmod = rec->tupdesc->attrs[fno]->atttypmod;
-				values[fno] = exec_cast_value(estate,
-											  value,
-											  &isNull,
-											  valtype,
-											  valtypmod,
-											  atttype,
-											  atttypmod);
-				nulls[fno] = isNull;
+				atttype = rec->tupdesc->attrs[fno - 1]->atttypid;
+				atttypmod = rec->tupdesc->attrs[fno - 1]->atttypmod;
+				values[0] = exec_cast_value(estate,
+											value,
+											&isNull,
+											valtype,
+											valtypmod,
+											atttype,
+											atttypmod);
+				nulls[0] = isNull;
 
-				/*
-				 * Now call heap_modify_tuple() to create a new tuple that
-				 * replaces the old one in the record.
-				 */
-				newtup = heap_modify_tuple(rec->tup, rec->tupdesc,
-										   values, nulls, replaces);
+				newtup = heap_modify_tuple_by_cols(rec->tup, rec->tupdesc,
+												   1, colnums, values, nulls);
 
 				if (rec->freetup)
 					heap_freetuple(rec->tup);
@@ -5574,7 +5543,7 @@ exec_eval_simple_expr(PLpgSQL_execstate *estate,
 			exec_check_rw_parameter(expr, expr->rwparam);
 		if (expr->expr_simple_expr == NULL)
 		{
-			/* Ooops, release refcount and fail */
+			/* Oops, release refcount and fail */
 			ReleaseCachedPlan(cplan, true);
 			return false;
 		}
@@ -5606,8 +5575,6 @@ exec_eval_simple_expr(PLpgSQL_execstate *estate,
 	 * Without this, stable functions within the expression would fail to see
 	 * updates made so far by our own function.
 	 */
-	SPI_push();
-
 	oldcontext = MemoryContextSwitchTo(get_eval_mcontext(estate));
 	if (!estate->readonly_func)
 	{
@@ -5640,8 +5607,7 @@ exec_eval_simple_expr(PLpgSQL_execstate *estate,
 	 */
 	*result = ExecEvalExpr(expr->expr_simple_state,
 						   econtext,
-						   isNull,
-						   NULL);
+						   isNull);
 
 	/* Assorted cleanup */
 	expr->expr_simple_in_use = false;
@@ -5654,8 +5620,6 @@ exec_eval_simple_expr(PLpgSQL_execstate *estate,
 		PopActiveSnapshot();
 
 	MemoryContextSwitchTo(oldcontext);
-
-	SPI_pop();
 
 	/*
 	 * Now we can release our refcount on the cached plan.
@@ -6308,7 +6272,7 @@ exec_cast_value(PLpgSQL_execstate *estate,
 			cast_entry->cast_in_use = true;
 
 			value = ExecEvalExpr(cast_entry->cast_exprstate, econtext,
-								 isnull, NULL);
+								 isnull);
 
 			cast_entry->cast_in_use = false;
 
@@ -6862,13 +6826,11 @@ exec_simple_recheck_plan(PLpgSQL_expr *expr, CachedPlan *cplan)
 	 */
 	if (list_length(cplan->stmt_list) != 1)
 		return;
-	stmt = (PlannedStmt *) linitial(cplan->stmt_list);
+	stmt = castNode(PlannedStmt, linitial(cplan->stmt_list));
 
 	/*
 	 * 2. It must be a RESULT plan --> no scan's required
 	 */
-	if (!IsA(stmt, PlannedStmt))
-		return;
 	if (stmt->commandType != CMD_SELECT)
 		return;
 	plan = stmt->planTree;

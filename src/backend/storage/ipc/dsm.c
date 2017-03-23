@@ -14,7 +14,7 @@
  * hard postmaster crash, remaining segments will be removed, if they
  * still exist, at the next postmaster startup.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -27,7 +27,6 @@
 #include "postgres.h"
 
 #include <fcntl.h>
-#include <string.h>
 #include <unistd.h>
 #ifndef WIN32
 #include <sys/mman.h>
@@ -182,7 +181,7 @@ dsm_postmaster_startup(PGShmemHeader *shim)
 		Assert(dsm_control_address == NULL);
 		Assert(dsm_control_mapped_size == 0);
 		dsm_control_handle = random();
-		if (dsm_control_handle == 0)
+		if (dsm_control_handle == DSM_HANDLE_INVALID)
 			continue;
 		if (dsm_impl_op(DSM_OP_CREATE, dsm_control_handle, segsize,
 						&dsm_control_impl_private, &dsm_control_address,
@@ -476,6 +475,8 @@ dsm_create(Size size, int flags)
 	{
 		Assert(seg->mapped_address == NULL && seg->mapped_size == 0);
 		seg->handle = random();
+		if (seg->handle == DSM_HANDLE_INVALID)	/* Reserve sentinel */
+			continue;
 		if (dsm_impl_op(DSM_OP_CREATE, seg->handle, size, &seg->impl_private,
 						&seg->mapped_address, &seg->mapped_size, ERROR))
 			break;

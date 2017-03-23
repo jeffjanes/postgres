@@ -38,7 +38,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/initdb/initdb.c
@@ -52,7 +52,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <locale.h>
 #include <signal.h>
 #include <time.h>
 
@@ -61,21 +60,24 @@
 #endif
 
 #include "catalog/catalog.h"
+#include "catalog/pg_authid.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_collation.h"
 #include "common/file_utils.h"
 #include "common/restricted_token.h"
 #include "common/username.h"
-#include "mb/pg_wchar.h"
+#include "fe_utils/string_utils.h"
 #include "getaddrinfo.h"
 #include "getopt_long.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
-#include "fe_utils/string_utils.h"
 
 
 /* Ideally this would be in a .h file, but it hardly seems worth the trouble */
 extern const char *select_default_timezone(const char *share_path);
 
 static const char *const auth_methods_host[] = {
-	"trust", "reject", "md5", "password", "ident", "radius",
+	"trust", "reject", "md5", "password", "scram", "ident", "radius",
 #ifdef ENABLE_GSS
 	"gss",
 #endif
@@ -97,7 +99,7 @@ static const char *const auth_methods_host[] = {
 	NULL
 };
 static const char *const auth_methods_local[] = {
-	"trust", "reject", "md5", "password", "peer", "radius",
+	"trust", "reject", "md5", "scram", "password", "peer", "radius",
 #ifdef USE_PAM
 	"pam", "pam ",
 #endif
@@ -195,8 +197,7 @@ static const char *backend_options = "--single -F -O -j -c search_path=pg_catalo
 
 static const char *const subdirs[] = {
 	"global",
-	"pg_xlog/archive_status",
-	"pg_clog",
+	"pg_wal/archive_status",
 	"pg_commit_ts",
 	"pg_dynshmem",
 	"pg_notify",
@@ -213,6 +214,7 @@ static const char *const subdirs[] = {
 	"pg_tblspc",
 	"pg_stat",
 	"pg_stat_tmp",
+	"pg_xact",
 	"pg_logical",
 	"pg_logical/snapshots",
 	"pg_logical/mappings"
@@ -1095,6 +1097,27 @@ setup_config(void)
 	conflines = replace_token(conflines, "#dynamic_shared_memory_type = posix",
 							  repltok);
 
+#if DEFAULT_BACKEND_FLUSH_AFTER > 0
+	snprintf(repltok, sizeof(repltok), "#backend_flush_after = %dkB",
+			 DEFAULT_BACKEND_FLUSH_AFTER * (BLCKSZ / 1024));
+	conflines = replace_token(conflines, "#backend_flush_after = 0",
+							  repltok);
+#endif
+
+#if DEFAULT_BGWRITER_FLUSH_AFTER > 0
+	snprintf(repltok, sizeof(repltok), "#bgwriter_flush_after = %dkB",
+			 DEFAULT_BGWRITER_FLUSH_AFTER * (BLCKSZ / 1024));
+	conflines = replace_token(conflines, "#bgwriter_flush_after = 0",
+							  repltok);
+#endif
+
+#if DEFAULT_CHECKPOINT_FLUSH_AFTER > 0
+	snprintf(repltok, sizeof(repltok), "#checkpoint_flush_after = %dkB",
+			 DEFAULT_CHECKPOINT_FLUSH_AFTER * (BLCKSZ / 1024));
+	conflines = replace_token(conflines, "#checkpoint_flush_after = 0",
+							  repltok);
+#endif
+
 #ifndef USE_PREFETCH
 	conflines = replace_token(conflines,
 							  "#effective_io_concurrency = 1",
@@ -1106,6 +1129,14 @@ setup_config(void)
 							  "#update_process_title = on",
 							  "#update_process_title = off");
 #endif
+
+	if (strcmp(authmethodlocal, "scram") == 0 ||
+		strcmp(authmethodhost, "scram") == 0)
+	{
+		conflines = replace_token(conflines,
+								  "#password_encryption = md5",
+								  "password_encryption = scram");
+	}
 
 	snprintf(path, sizeof(path), "%s/postgresql.conf", pg_data);
 
@@ -1183,15 +1214,23 @@ setup_config(void)
 
 		if (err != 0 ||
 			getaddrinfo("::1", NULL, &hints, &gai_result) != 0)
+		{
 			conflines = replace_token(conflines,
 							   "host    all             all             ::1",
 							 "#host    all             all             ::1");
+			conflines = replace_token(conflines,
+							   "host    replication     all             ::1",
+							 "#host    replication     all             ::1");
+		}
 	}
 #else							/* !HAVE_IPV6 */
 	/* If we didn't compile IPV6 support at all, always comment it out */
 	conflines = replace_token(conflines,
 							  "host    all             all             ::1",
 							  "#host    all             all             ::1");
+	conflines = replace_token(conflines,
+							  "host    replication     all             ::1",
+							  "#host    replication     all             ::1");
 #endif   /* HAVE_IPV6 */
 
 	/* Replace default authentication methods */
@@ -1205,11 +1244,6 @@ setup_config(void)
 	conflines = replace_token(conflines,
 							  "@authcomment@",
 							  (strcmp(authmethodlocal, "trust") == 0 || strcmp(authmethodhost, "trust") == 0) ? AUTHTRUST_WARNING : "");
-
-	/* Replace username for replication */
-	conflines = replace_token(conflines,
-							  "@default_username@",
-							  username);
 
 	snprintf(path, sizeof(path), "%s/pg_hba.conf", pg_data);
 
@@ -1587,178 +1621,16 @@ setup_description(FILE *cmdfd)
 	PG_CMD_PUTS("DROP TABLE tmp_pg_shdescription;\n\n");
 }
 
-#ifdef HAVE_LOCALE_T
-/*
- * "Normalize" a locale name, stripping off encoding tags such as
- * ".utf8" (e.g., "en_US.utf8" -> "en_US", but "br_FR.iso885915@euro"
- * -> "br_FR@euro").  Return true if a new, different name was
- * generated.
- */
-static bool
-normalize_locale_name(char *new, const char *old)
-{
-	char	   *n = new;
-	const char *o = old;
-	bool		changed = false;
-
-	while (*o)
-	{
-		if (*o == '.')
-		{
-			/* skip over encoding tag such as ".utf8" or ".UTF-8" */
-			o++;
-			while ((*o >= 'A' && *o <= 'Z')
-				   || (*o >= 'a' && *o <= 'z')
-				   || (*o >= '0' && *o <= '9')
-				   || (*o == '-'))
-				o++;
-			changed = true;
-		}
-		else
-			*n++ = *o++;
-	}
-	*n = '\0';
-
-	return changed;
-}
-#endif   /* HAVE_LOCALE_T */
-
 /*
  * populate pg_collation
  */
 static void
 setup_collation(FILE *cmdfd)
 {
-#if defined(HAVE_LOCALE_T) && !defined(WIN32)
-	int			i;
-	FILE	   *locale_a_handle;
-	char		localebuf[NAMEDATALEN]; /* we assume ASCII so this is fine */
-	int			count = 0;
-
-	locale_a_handle = popen_check("locale -a", "r");
-	if (!locale_a_handle)
-		return;					/* complaint already printed */
-
-	PG_CMD_PUTS("CREATE TEMP TABLE tmp_pg_collation ( "
-				"	collname name, "
-				"	locale name, "
-				"	encoding int) WITHOUT OIDS;\n\n");
-
-	while (fgets(localebuf, sizeof(localebuf), locale_a_handle))
-	{
-		size_t		len;
-		int			enc;
-		bool		skip;
-		char	   *quoted_locale;
-		char		alias[NAMEDATALEN];
-
-		len = strlen(localebuf);
-
-		if (len == 0 || localebuf[len - 1] != '\n')
-		{
-			if (debug)
-				fprintf(stderr, _("%s: locale name too long, skipped: \"%s\"\n"),
-						progname, localebuf);
-			continue;
-		}
-		localebuf[len - 1] = '\0';
-
-		/*
-		 * Some systems have locale names that don't consist entirely of ASCII
-		 * letters (such as "bokm&aring;l" or "fran&ccedil;ais").  This is
-		 * pretty silly, since we need the locale itself to interpret the
-		 * non-ASCII characters. We can't do much with those, so we filter
-		 * them out.
-		 */
-		skip = false;
-		for (i = 0; i < len; i++)
-		{
-			if (IS_HIGHBIT_SET(localebuf[i]))
-			{
-				skip = true;
-				break;
-			}
-		}
-		if (skip)
-		{
-			if (debug)
-				fprintf(stderr, _("%s: locale name has non-ASCII characters, skipped: \"%s\"\n"),
-						progname, localebuf);
-			continue;
-		}
-
-		enc = pg_get_encoding_from_locale(localebuf, debug);
-		if (enc < 0)
-		{
-			/* error message printed by pg_get_encoding_from_locale() */
-			continue;
-		}
-		if (!PG_VALID_BE_ENCODING(enc))
-			continue;			/* ignore locales for client-only encodings */
-		if (enc == PG_SQL_ASCII)
-			continue;			/* C/POSIX are already in the catalog */
-
-		count++;
-
-		quoted_locale = escape_quotes(localebuf);
-
-		PG_CMD_PRINTF3("INSERT INTO tmp_pg_collation VALUES (E'%s', E'%s', %d);\n\n",
-					   quoted_locale, quoted_locale, enc);
-
-		/*
-		 * Generate aliases such as "en_US" in addition to "en_US.utf8" for
-		 * ease of use.  Note that collation names are unique per encoding
-		 * only, so this doesn't clash with "en_US" for LATIN1, say.
-		 */
-		if (normalize_locale_name(alias, localebuf))
-		{
-			char	   *quoted_alias = escape_quotes(alias);
-
-			PG_CMD_PRINTF3("INSERT INTO tmp_pg_collation VALUES (E'%s', E'%s', %d);\n\n",
-						   quoted_alias, quoted_locale, enc);
-			free(quoted_alias);
-		}
-		free(quoted_locale);
-	}
+	PG_CMD_PUTS("SELECT pg_import_system_collations(if_not_exists => false, schema => 'pg_catalog');\n\n");
 
 	/* Add an SQL-standard name */
-	PG_CMD_PRINTF1("INSERT INTO tmp_pg_collation VALUES ('ucs_basic', 'C', %d);\n\n", PG_UTF8);
-
-	/*
-	 * When copying collations to the final location, eliminate aliases that
-	 * conflict with an existing locale name for the same encoding.  For
-	 * example, "br_FR.iso88591" is normalized to "br_FR", both for encoding
-	 * LATIN1.  But the unnormalized locale "br_FR" already exists for LATIN1.
-	 * Prefer the alias that matches the OS locale name, else the first locale
-	 * name by sort order (arbitrary choice to be deterministic).
-	 *
-	 * Also, eliminate any aliases that conflict with pg_collation's
-	 * hard-wired entries for "C" etc.
-	 */
-	PG_CMD_PUTS("INSERT INTO pg_collation (collname, collnamespace, collowner, collencoding, collcollate, collctype) "
-				" SELECT DISTINCT ON (collname, encoding)"
-				"   collname, "
-				"   (SELECT oid FROM pg_namespace WHERE nspname = 'pg_catalog') AS collnamespace, "
-				"   (SELECT relowner FROM pg_class WHERE relname = 'pg_collation') AS collowner, "
-				"   encoding, locale, locale "
-				"  FROM tmp_pg_collation"
-				"  WHERE NOT EXISTS (SELECT 1 FROM pg_collation WHERE collname = tmp_pg_collation.collname)"
-	 "  ORDER BY collname, encoding, (collname = locale) DESC, locale;\n\n");
-
-	/*
-	 * Even though the table is temp, drop it explicitly so it doesn't get
-	 * copied into template0/postgres databases.
-	 */
-	PG_CMD_PUTS("DROP TABLE tmp_pg_collation;\n\n");
-
-	pclose(locale_a_handle);
-
-	if (count == 0 && !debug)
-	{
-		printf(_("No usable system locales were found.\n"));
-		printf(_("Use the option \"--debug\" to see details.\n"));
-	}
-#endif   /* not HAVE_LOCALE_T  && not WIN32 */
+	PG_CMD_PRINTF3("INSERT INTO pg_collation (collname, collnamespace, collowner, collprovider, collencoding, collcollate, collctype) VALUES ('ucs_basic', 'pg_catalog'::regnamespace, %u, '%c', %d, 'C', 'C');\n\n", BOOTSTRAP_SUPERUSERID, COLLPROVIDER_LIBC, PG_UTF8);
 }
 
 /*
@@ -1829,9 +1701,13 @@ setup_privileges(FILE *cmdfd)
 		"  SET relacl = (SELECT array_agg(a.acl) FROM "
 		" (SELECT E'=r/\"$POSTGRES_SUPERUSERNAME\"' as acl "
 		"  UNION SELECT unnest(pg_catalog.acldefault("
-		"    CASE WHEN relkind = 'S' THEN 's' ELSE 'r' END::\"char\",10::oid))"
+		"    CASE WHEN relkind = " CppAsString2(RELKIND_SEQUENCE) " THEN 's' "
+		"         ELSE 'r' END::\"char\"," CppAsString2(BOOTSTRAP_SUPERUSERID) "::oid))"
 		" ) as a) "
-		"  WHERE relkind IN ('r', 'v', 'm', 'S') AND relacl IS NULL;\n\n",
+		"  WHERE relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+		CppAsString2(RELKIND_VIEW) ", " CppAsString2(RELKIND_MATVIEW) ", "
+		CppAsString2(RELKIND_SEQUENCE) ")"
+		"  AND relacl IS NULL;\n\n",
 		"GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;\n\n",
 		"GRANT CREATE, USAGE ON SCHEMA public TO PUBLIC;\n\n",
 		"REVOKE ALL ON pg_largeobject FROM PUBLIC;\n\n",
@@ -1847,7 +1723,9 @@ setup_privileges(FILE *cmdfd)
 		"        pg_class"
 		"    WHERE"
 		"        relacl IS NOT NULL"
-		"        AND relkind IN ('r', 'v', 'm', 'S');",
+		"        AND relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+		CppAsString2(RELKIND_VIEW) ", " CppAsString2(RELKIND_MATVIEW) ", "
+		CppAsString2(RELKIND_SEQUENCE) ");",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1861,7 +1739,9 @@ setup_privileges(FILE *cmdfd)
 		"        JOIN pg_attribute ON (pg_class.oid = pg_attribute.attrelid)"
 		"    WHERE"
 		"        pg_attribute.attacl IS NOT NULL"
-		"        AND pg_class.relkind IN ('r', 'v', 'm', 'S');",
+		"        AND pg_class.relkind IN (" CppAsString2(RELKIND_RELATION) ", "
+		CppAsString2(RELKIND_VIEW) ", " CppAsString2(RELKIND_MATVIEW) ", "
+		CppAsString2(RELKIND_SEQUENCE) ");",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -2090,8 +1970,6 @@ make_postgres(FILE *cmdfd)
 	for (line = postgres_setup; *line; line++)
 		PG_CMD_PUTS(*line);
 }
-
-
 
 /*
  * signal handler in case we are interrupted.
@@ -2397,13 +2275,13 @@ usage(const char *progname)
 		 "                            default text search configuration\n"));
 	printf(_("  -U, --username=NAME       database superuser name\n"));
 	printf(_("  -W, --pwprompt            prompt for a password for the new superuser\n"));
-	printf(_("  -X, --xlogdir=XLOGDIR     location for the transaction log directory\n"));
+	printf(_("  -X, --waldir=WALDIR       location for the write-ahead log directory\n"));
 	printf(_("\nLess commonly used options:\n"));
 	printf(_("  -d, --debug               generate lots of debugging output\n"));
 	printf(_("  -k, --data-checksums      use data page checksums\n"));
 	printf(_("  -L DIRECTORY              where to find the input files\n"));
-	printf(_("  -n, --noclean             do not clean up after errors\n"));
-	printf(_("  -N, --nosync              do not wait for changes to be written safely to disk\n"));
+	printf(_("  -n, --no-clean            do not clean up after errors\n"));
+	printf(_("  -N, --no-sync             do not wait for changes to be written safely to disk\n"));
 	printf(_("  -s, --show                show internal settings\n"));
 	printf(_("  -S, --sync-only           only sync data directory\n"));
 	printf(_("\nOther options:\n"));
@@ -2450,14 +2328,17 @@ static void
 check_need_password(const char *authmethodlocal, const char *authmethodhost)
 {
 	if ((strcmp(authmethodlocal, "md5") == 0 ||
-		 strcmp(authmethodlocal, "password") == 0) &&
+		 strcmp(authmethodlocal, "password") == 0 ||
+		 strcmp(authmethodlocal, "scram") == 0) &&
 		(strcmp(authmethodhost, "md5") == 0 ||
-		 strcmp(authmethodhost, "password") == 0) &&
+		 strcmp(authmethodhost, "password") == 0 ||
+		 strcmp(authmethodhost, "scram") == 0) &&
 		!(pwprompt || pwfilename))
 	{
 		fprintf(stderr, _("%s: must specify a password for the superuser to enable %s authentication\n"), progname,
 				(strcmp(authmethodlocal, "md5") == 0 ||
-				 strcmp(authmethodlocal, "password") == 0)
+				 strcmp(authmethodlocal, "password") == 0 ||
+				 strcmp(authmethodlocal, "scram") == 0)
 				? authmethodlocal
 				: authmethodhost);
 		exit(1);
@@ -2830,7 +2711,7 @@ create_xlog_or_symlink(void)
 	char	   *subdirloc;
 
 	/* form name of the place for the subdirectory or symlink */
-	subdirloc = psprintf("%s/pg_xlog", pg_data);
+	subdirloc = psprintf("%s/pg_wal", pg_data);
 
 	if (strcmp(xlog_dir, "") != 0)
 	{
@@ -2963,7 +2844,7 @@ initialize_data_directory(void)
 
 	create_xlog_or_symlink();
 
-	/* Create required subdirectories (other than pg_xlog) */
+	/* Create required subdirectories (other than pg_wal) */
 	printf(_("creating subdirectories ... "));
 	fflush(stdout);
 
@@ -3078,10 +2959,12 @@ main(int argc, char *argv[])
 		{"version", no_argument, NULL, 'V'},
 		{"debug", no_argument, NULL, 'd'},
 		{"show", no_argument, NULL, 's'},
-		{"noclean", no_argument, NULL, 'n'},
-		{"nosync", no_argument, NULL, 'N'},
+		{"noclean", no_argument, NULL, 'n'}, /* for backwards compatibility */
+		{"no-clean", no_argument, NULL, 'n'},
+		{"nosync", no_argument, NULL, 'N'},  /* for backwards compatibility */
+		{"no-sync", no_argument, NULL, 'N'},
 		{"sync-only", no_argument, NULL, 'S'},
-		{"xlogdir", required_argument, NULL, 'X'},
+		{"waldir", required_argument, NULL, 'X'},
 		{"data-checksums", no_argument, NULL, 'k'},
 		{NULL, 0, NULL, 0}
 	};
@@ -3165,7 +3048,7 @@ main(int argc, char *argv[])
 				break;
 			case 'n':
 				noclean = true;
-				printf(_("Running in noclean mode.  Mistakes will not be cleaned up.\n"));
+				printf(_("Running in no-clean mode.  Mistakes will not be cleaned up.\n"));
 				break;
 			case 'N':
 				do_sync = false;
@@ -3258,7 +3141,7 @@ main(int argc, char *argv[])
 
 		fputs(_("syncing data to disk ... "), stdout);
 		fflush(stdout);
-		fsync_pgdata(pg_data, progname);
+		fsync_pgdata(pg_data, progname, PG_VERSION_NUM);
 		check_ok();
 		return 0;
 	}
@@ -3324,7 +3207,7 @@ main(int argc, char *argv[])
 	{
 		fputs(_("syncing data to disk ... "), stdout);
 		fflush(stdout);
-		fsync_pgdata(pg_data, progname);
+		fsync_pgdata(pg_data, progname, PG_VERSION_NUM);
 		check_ok();
 	}
 	else
@@ -3353,7 +3236,8 @@ main(int argc, char *argv[])
 	appendShellString(start_db_cmd, pgdata_native);
 
 	/* add suggested -l switch and "start" command */
-	appendPQExpBufferStr(start_db_cmd, " -l logfile start");
+	/* translator: This is a placeholder in a shell command. */
+	appendPQExpBuffer(start_db_cmd, " -l %s start", _("logfile"));
 
 	printf(_("\nSuccess. You can now start the database server using:\n\n"
 			 "    %s\n\n"),

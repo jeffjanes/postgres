@@ -4,7 +4,7 @@
  *
  *	Parallel support for pg_dump and pg_restore
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -51,6 +51,12 @@
 
 #include "postgres_fe.h"
 
+#ifndef WIN32
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
 #endif
@@ -58,14 +64,6 @@
 #include "parallel.h"
 #include "pg_backup_utils.h"
 #include "fe_utils/string_utils.h"
-
-#ifndef WIN32
-#include <sys/types.h>
-#include <sys/wait.h>
-#include "signal.h"
-#include <unistd.h>
-#include <fcntl.h>
-#endif
 
 /* Mnemonic macros for indexing the fd array returned by pipe(2) */
 #define PIPE_READ							0
@@ -94,7 +92,7 @@ struct ParallelSlot
 
 	/* These fields are valid if workerStatus == WRKR_WORKING: */
 	ParallelCompletionPtr callback;		/* function to call on completion */
-	void	   *callback_data;	/* passthru data for it */
+	void	   *callback_data;	/* passthrough data for it */
 
 	ArchiveHandle *AH;			/* Archive data worker is using */
 

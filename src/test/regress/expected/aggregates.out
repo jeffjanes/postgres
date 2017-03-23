@@ -822,8 +822,9 @@ explain (costs off)
      ->  Limit
            ->  Index Only Scan Backward using tenk1_unique2 on tenk1
                  Index Cond: (unique2 IS NOT NULL)
-   ->  Result
-(7 rows)
+   ->  ProjectSet
+         ->  Result
+(8 rows)
 
 select max(unique2), generate_series(1,3) as g from tenk1 order by g desc;
  max  | g 
@@ -1809,6 +1810,15 @@ NOTICE:  avg_transfn called with 3
 
 -- aggregate state should be shared as transfn is the same for both aggs.
 select my_avg(one),my_sum(one) from (values(1),(3)) t(one);
+NOTICE:  avg_transfn called with 1
+NOTICE:  avg_transfn called with 3
+ my_avg | my_sum 
+--------+--------
+      2 |      4
+(1 row)
+
+-- same as previous one, but with DISTINCT, which requires sorting the input.
+select my_avg(distinct one),my_sum(distinct one) from (values(1),(3),(1)) t(one);
 NOTICE:  avg_transfn called with 1
 NOTICE:  avg_transfn called with 3
  my_avg | my_sum 

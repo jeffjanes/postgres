@@ -17,7 +17,7 @@
  *	sync.
  *
  *
- *	Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ *	Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *	Portions Copyright (c) 1994, Regents of the University of California
  *	Portions Copyright (c) 2000, Philip Warner
  *
@@ -37,6 +37,7 @@
 #include "compress_io.h"
 #include "parallel.h"
 #include "pg_backup_utils.h"
+#include "common/file_utils.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -593,6 +594,13 @@ _CloseArchive(ArchiveHandle *AH)
 		WriteDataChunks(AH, ctx->pstate);
 
 		ParallelBackupEnd(AH, ctx->pstate);
+
+		/*
+		 * In directory mode, there is no need to sync all the entries
+		 * individually. Just recurse once through all the files generated.
+		 */
+		if (AH->dosync)
+			fsync_dir_recurse(ctx->directory, progname);
 	}
 	AH->FH = NULL;
 }

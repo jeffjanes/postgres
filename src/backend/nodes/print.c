@@ -3,7 +3,7 @@
  * print.c
  *	  various print routines (used mostly for debugging)
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -277,6 +277,10 @@ print_rt(const List *rtable)
 				break;
 			case RTE_FUNCTION:
 				printf("%d\t%s\t[rangefunction]",
+					   i, rte->eref->aliasname);
+				break;
+			case RTE_TABLEFUNC:
+				printf("%d\t%s\t[table function]",
 					   i, rte->eref->aliasname);
 				break;
 			case RTE_VALUES:

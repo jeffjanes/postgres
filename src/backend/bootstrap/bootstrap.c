@@ -4,7 +4,7 @@
  *	  routines to support running postgres in 'bootstrap' mode
  *	bootstrap mode is used to create the initial template database
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -33,6 +33,7 @@
 #include "replication/walreceiver.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
@@ -536,6 +537,7 @@ static void
 ShutdownAuxiliaryProcess(int code, Datum arg)
 {
 	LWLockReleaseAll();
+	ConditionVariableCancelSleep();
 	pgstat_report_wait_end();
 }
 

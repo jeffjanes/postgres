@@ -3,15 +3,13 @@
  *
  *	tablespace functions
  *
- *	Copyright (c) 2010-2016, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2017, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/tablespace.c
  */
 
 #include "postgres_fe.h"
 
 #include "pg_upgrade.h"
-
-#include <sys/types.h>
 
 static void get_tablespace_paths(void);
 static void set_tablespace_directory_suffix(ClusterInfo *cluster);

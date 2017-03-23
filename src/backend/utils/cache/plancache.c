@@ -38,7 +38,7 @@
  * be infrequent enough that more-detailed tracking is not worth the effort.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -53,7 +53,6 @@
 #include "access/transam.h"
 #include "catalog/namespace.h"
 #include "executor/executor.h"
-#include "executor/spi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
@@ -78,7 +77,7 @@
  */
 #define IsTransactionStmtPlan(plansource)  \
 	((plansource)->raw_parse_tree && \
-	 IsA((plansource)->raw_parse_tree, TransactionStmt))
+	 IsA((plansource)->raw_parse_tree->stmt, TransactionStmt))
 
 /*
  * This is the head of the backend's list of "saved" CachedPlanSources (i.e.,
@@ -96,6 +95,7 @@ static CachedPlan *BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 static bool choose_custom_plan(CachedPlanSource *plansource,
 				   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
+static Query *QueryListGetPrimaryStmt(List *stmts);
 static void AcquireExecutorLocks(List *stmt_list, bool acquire);
 static void AcquirePlannerLocks(List *stmt_list, bool acquire);
 static void ScanQueryForLocks(Query *parsetree, bool acquire);
@@ -119,6 +119,8 @@ InitPlanCache(void)
 	CacheRegisterSyscacheCallback(NAMESPACEOID, PlanCacheSysCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(OPEROID, PlanCacheSysCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(AMOPOPID, PlanCacheSysCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(FOREIGNSERVEROID, PlanCacheSysCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(FOREIGNDATAWRAPPEROID, PlanCacheSysCallback, (Datum) 0);
 }
 
 /*
@@ -146,7 +148,7 @@ InitPlanCache(void)
  * commandTag: compile-time-constant tag for query, or NULL if empty query
  */
 CachedPlanSource *
-CreateCachedPlan(Node *raw_parse_tree,
+CreateCachedPlan(RawStmt *raw_parse_tree,
 				 const char *query_string,
 				 const char *commandTag)
 {
@@ -229,7 +231,7 @@ CreateCachedPlan(Node *raw_parse_tree,
  * commandTag: compile-time-constant tag for query, or NULL if empty query
  */
 CachedPlanSource *
-CreateOneShotCachedPlan(Node *raw_parse_tree,
+CreateOneShotCachedPlan(RawStmt *raw_parse_tree,
 						const char *query_string,
 						const char *commandTag)
 {
@@ -554,7 +556,7 @@ static List *
 RevalidateCachedQuery(CachedPlanSource *plansource)
 {
 	bool		snapshot_set;
-	Node	   *rawtree;
+	RawStmt    *rawtree;
 	List	   *tlist;			/* transient query-tree list */
 	List	   *qlist;			/* permanent query-tree list */
 	TupleDesc	resultDesc;
@@ -619,7 +621,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource)
 			return NIL;
 		}
 
-		/* Ooops, the race case happened.  Release useless locks. */
+		/* Oops, the race case happened.  Release useless locks. */
 		AcquirePlannerLocks(plansource->query_list, false);
 	}
 
@@ -843,7 +845,7 @@ CheckCachedPlan(CachedPlanSource *plansource)
 			return true;
 		}
 
-		/* Ooops, the race case happened.  Release useless locks. */
+		/* Oops, the race case happened.  Release useless locks. */
 		AcquireExecutorLocks(plan->stmt_list, false);
 	}
 
@@ -878,7 +880,6 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	CachedPlan *plan;
 	List	   *plist;
 	bool		snapshot_set;
-	bool		spi_pushed;
 	bool		is_transient;
 	MemoryContext plan_context;
 	MemoryContext oldcxt = CurrentMemoryContext;
@@ -927,20 +928,9 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	}
 
 	/*
-	 * The planner may try to call SPI-using functions, which causes a problem
-	 * if we're already inside one.  Rather than expect all SPI-using code to
-	 * do SPI_push whenever a replan could happen, it seems best to take care
-	 * of the case here.
-	 */
-	spi_pushed = SPI_push_conditional();
-
-	/*
 	 * Generate the plan.
 	 */
 	plist = pg_plan_queries(qlist, plansource->cursor_options, boundParams);
-
-	/* Clean up SPI state */
-	SPI_pop_conditional(spi_pushed);
 
 	/* Release snapshot if we got one */
 	if (snapshot_set)
@@ -985,9 +975,9 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	is_transient = false;
 	foreach(lc, plist)
 	{
-		PlannedStmt *plannedstmt = (PlannedStmt *) lfirst(lc);
+		PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
 
-		if (!IsA(plannedstmt, PlannedStmt))
+		if (plannedstmt->commandType == CMD_UTILITY)
 			continue;			/* Ignore utility statements */
 
 		if (plannedstmt->transientPlan)
@@ -1080,9 +1070,9 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
 
 	foreach(lc, plan->stmt_list)
 	{
-		PlannedStmt *plannedstmt = (PlannedStmt *) lfirst(lc);
+		PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
 
-		if (!IsA(plannedstmt, PlannedStmt))
+		if (plannedstmt->commandType == CMD_UTILITY)
 			continue;			/* Ignore utility statements */
 
 		result += plannedstmt->planTree->total_cost;
@@ -1141,7 +1131,7 @@ CachedPlan *
 GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 			  bool useResOwner)
 {
-	CachedPlan *plan;
+	CachedPlan *plan = NULL;
 	List	   *qlist;
 	bool		customplan;
 
@@ -1222,6 +1212,8 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 			plansource->num_custom_plans++;
 		}
 	}
+
+	Assert(plan != NULL);
 
 	/* Flag the plan as in use by caller */
 	if (useResOwner)
@@ -1428,7 +1420,7 @@ CachedPlanIsValid(CachedPlanSource *plansource)
 List *
 CachedPlanGetTargetList(CachedPlanSource *plansource)
 {
-	Node	   *pstmt;
+	Query	   *pstmt;
 
 	/* Assert caller is doing things in a sane order */
 	Assert(plansource->magic == CACHEDPLANSOURCE_MAGIC);
@@ -1445,9 +1437,32 @@ CachedPlanGetTargetList(CachedPlanSource *plansource)
 	RevalidateCachedQuery(plansource);
 
 	/* Get the primary statement and find out what it returns */
-	pstmt = PortalListGetPrimaryStmt(plansource->query_list);
+	pstmt = QueryListGetPrimaryStmt(plansource->query_list);
 
-	return FetchStatementTargetList(pstmt);
+	return FetchStatementTargetList((Node *) pstmt);
+}
+
+/*
+ * QueryListGetPrimaryStmt
+ *		Get the "primary" stmt within a list, ie, the one marked canSetTag.
+ *
+ * Returns NULL if no such stmt.  If multiple queries within the list are
+ * marked canSetTag, returns the first one.  Neither of these cases should
+ * occur in present usages of this function.
+ */
+static Query *
+QueryListGetPrimaryStmt(List *stmts)
+{
+	ListCell   *lc;
+
+	foreach(lc, stmts)
+	{
+		Query	   *stmt = castNode(Query, lfirst(lc));
+
+		if (stmt->canSetTag)
+			return stmt;
+	}
+	return NULL;
 }
 
 /*
@@ -1461,12 +1476,11 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 
 	foreach(lc1, stmt_list)
 	{
-		PlannedStmt *plannedstmt = (PlannedStmt *) lfirst(lc1);
+		PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc1));
 		int			rt_index;
 		ListCell   *lc2;
 
-		Assert(!IsA(plannedstmt, Query));
-		if (!IsA(plannedstmt, PlannedStmt))
+		if (plannedstmt->commandType == CMD_UTILITY)
 		{
 			/*
 			 * Ignore utility statements, except those (such as EXPLAIN) that
@@ -1475,7 +1489,7 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 			 * rule rewriting, because rewriting doesn't change the query
 			 * representation.
 			 */
-			Query	   *query = UtilityContainsQuery((Node *) plannedstmt);
+			Query	   *query = UtilityContainsQuery(plannedstmt->utilityStmt);
 
 			if (query)
 				ScanQueryForLocks(query, acquire);
@@ -1500,7 +1514,8 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 			 * fail if it's been dropped entirely --- we'll just transiently
 			 * acquire a non-conflicting lock.
 			 */
-			if (list_member_int(plannedstmt->resultRelations, rt_index))
+			if (list_member_int(plannedstmt->resultRelations, rt_index) ||
+				list_member_int(plannedstmt->nonleafResultRelations, rt_index))
 				lockmode = RowExclusiveLock;
 			else if ((rc = get_plan_rowmark(plannedstmt->rowMarks, rt_index)) != NULL &&
 					 RowMarkRequiresRowShareLock(rc->markType))
@@ -1531,9 +1546,7 @@ AcquirePlannerLocks(List *stmt_list, bool acquire)
 
 	foreach(lc, stmt_list)
 	{
-		Query	   *query = (Query *) lfirst(lc);
-
-		Assert(IsA(query, Query));
+		Query	   *query = castNode(Query, lfirst(lc));
 
 		if (query->commandType == CMD_UTILITY)
 		{
@@ -1600,9 +1613,9 @@ ScanQueryForLocks(Query *parsetree, bool acquire)
 	/* Recurse into subquery-in-WITH */
 	foreach(lc, parsetree->cteList)
 	{
-		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+		CommonTableExpr *cte = castNode(CommonTableExpr, lfirst(lc));
 
-		ScanQueryForLocks((Query *) cte->ctequery, acquire);
+		ScanQueryForLocks(castNode(Query, cte->ctequery), acquire);
 	}
 
 	/*
@@ -1630,7 +1643,7 @@ ScanQueryWalker(Node *node, bool *acquire)
 		SubLink    *sub = (SubLink *) node;
 
 		/* Do what we came for */
-		ScanQueryForLocks((Query *) sub->subselect, *acquire);
+		ScanQueryForLocks(castNode(Query, sub->subselect), *acquire);
 		/* Fall through to process lefthand args of SubLink */
 	}
 
@@ -1658,19 +1671,16 @@ PlanCacheComputeResultDesc(List *stmt_list)
 	{
 		case PORTAL_ONE_SELECT:
 		case PORTAL_ONE_MOD_WITH:
-			query = (Query *) linitial(stmt_list);
-			Assert(IsA(query, Query));
+			query = castNode(Query, linitial(stmt_list));
 			return ExecCleanTypeFromTL(query->targetList, false);
 
 		case PORTAL_ONE_RETURNING:
-			query = (Query *) PortalListGetPrimaryStmt(stmt_list);
-			Assert(IsA(query, Query));
+			query = QueryListGetPrimaryStmt(stmt_list);
 			Assert(query->returningList);
 			return ExecCleanTypeFromTL(query->returningList, false);
 
 		case PORTAL_UTIL_SELECT:
-			query = (Query *) linitial(stmt_list);
-			Assert(IsA(query, Query));
+			query = castNode(Query, linitial(stmt_list));
 			Assert(query->utilityStmt);
 			return UtilityTupleDescriptor(query->utilityStmt);
 
@@ -1727,10 +1737,9 @@ PlanCacheRelCallback(Datum arg, Oid relid)
 
 			foreach(lc, plansource->gplan->stmt_list)
 			{
-				PlannedStmt *plannedstmt = (PlannedStmt *) lfirst(lc);
+				PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
 
-				Assert(!IsA(plannedstmt, Query));
-				if (!IsA(plannedstmt, PlannedStmt))
+				if (plannedstmt->commandType == CMD_UTILITY)
 					continue;	/* Ignore utility statements */
 				if ((relid == InvalidOid) ? plannedstmt->relationOids != NIL :
 					list_member_oid(plannedstmt->relationOids, relid))
@@ -1801,11 +1810,10 @@ PlanCacheFuncCallback(Datum arg, int cacheid, uint32 hashvalue)
 		{
 			foreach(lc, plansource->gplan->stmt_list)
 			{
-				PlannedStmt *plannedstmt = (PlannedStmt *) lfirst(lc);
+				PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
 				ListCell   *lc3;
 
-				Assert(!IsA(plannedstmt, Query));
-				if (!IsA(plannedstmt, PlannedStmt))
+				if (plannedstmt->commandType == CMD_UTILITY)
 					continue;	/* Ignore utility statements */
 				foreach(lc3, plannedstmt->invalItems)
 				{
@@ -1875,9 +1883,8 @@ ResetPlanCache(void)
 		 */
 		foreach(lc, plansource->query_list)
 		{
-			Query	   *query = (Query *) lfirst(lc);
+			Query	   *query = castNode(Query, lfirst(lc));
 
-			Assert(IsA(query, Query));
 			if (query->commandType != CMD_UTILITY ||
 				UtilityContainsQuery(query->utilityStmt))
 			{

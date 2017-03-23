@@ -3,7 +3,7 @@
  * heapam.c
  *	  heap access method code
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -38,6 +38,7 @@
  */
 #include "postgres.h"
 
+#include "access/bufmask.h"
 #include "access/heapam.h"
 #include "access/heapam_xlog.h"
 #include "access/hio.h"
@@ -1131,7 +1132,7 @@ relation_open(Oid relationId, LOCKMODE lockmode)
 
 	/* Make note that we've accessed a temporary relation */
 	if (RelationUsesLocalBuffers(r))
-		MyXactAccessedTempRel = true;
+		MyXactFlags |= XACT_FLAGS_ACCESSEDTEMPREL;
 
 	pgstat_initstats(r);
 
@@ -1177,7 +1178,7 @@ try_relation_open(Oid relationId, LOCKMODE lockmode)
 
 	/* Make note that we've accessed a temporary relation */
 	if (RelationUsesLocalBuffers(r))
-		MyXactAccessedTempRel = true;
+		MyXactFlags |= XACT_FLAGS_ACCESSEDTEMPREL;
 
 	pgstat_initstats(r);
 
@@ -1753,6 +1754,22 @@ retry:
 }
 
 /* ----------------
+ *		heap_update_snapshot
+ *
+ *		Update snapshot info in heap scan descriptor.
+ * ----------------
+ */
+void
+heap_update_snapshot(HeapScanDesc scan, Snapshot snapshot)
+{
+	Assert(IsMVCCSnapshot(snapshot));
+
+	RegisterSnapshot(snapshot);
+	scan->rs_snapshot = snapshot;
+	scan->rs_temp_snap = true;
+}
+
+/* ----------------
  *		heap_getnext	- retrieve next tuple in scan
  *
  *		Fix to work with index relations.
@@ -2324,6 +2341,17 @@ FreeBulkInsertState(BulkInsertState bistate)
 	pfree(bistate);
 }
 
+/*
+ * ReleaseBulkInsertStatePin - release a buffer currently held in bistate
+ */
+void
+ReleaseBulkInsertStatePin(BulkInsertState bistate)
+{
+	if (bistate->current_buf != InvalidBuffer)
+		ReleaseBuffer(bistate->current_buf);
+	bistate->current_buf = InvalidBuffer;
+}
+
 
 /*
  *	heap_insert		- insert tuple into a heap
@@ -2507,7 +2535,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 							heaptup->t_len - SizeofHeapTupleHeader);
 
 		/* filtering by origin on a row level is much more efficient */
-		XLogIncludeOrigin();
+		XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 		recptr = XLogInsert(RM_HEAP_ID, info);
 
@@ -2846,7 +2874,7 @@ heap_multi_insert(Relation relation, HeapTuple *tuples, int ntuples,
 			XLogRegisterBufData(0, tupledata, totaldatalen);
 
 			/* filtering by origin on a row level is much more efficient */
-			XLogIncludeOrigin();
+			XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 			recptr = XLogInsert(RM_HEAP2_ID, info);
 
@@ -3308,7 +3336,7 @@ l1:
 		}
 
 		/* filtering by origin on a row level is much more efficient */
-		XLogIncludeOrigin();
+		XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE);
 
@@ -6035,7 +6063,7 @@ heap_finish_speculative(Relation relation, HeapTuple tuple)
 		XLogBeginInsert();
 
 		/* We want the same filtering on this as on a plain insert */
-		XLogIncludeOrigin();
+		XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 		XLogRegisterData((char *) &xlrec, SizeOfHeapConfirm);
 		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
@@ -6762,8 +6790,8 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
  * Note: it might seem we could make the changes without exclusive lock, since
  * TransactionId read/write is assumed atomic anyway.  However there is a race
  * condition: someone who just fetched an old XID that we overwrite here could
- * conceivably not finish checking the XID against pg_clog before we finish
- * the VACUUM and perhaps truncate off the part of pg_clog he needs.  Getting
+ * conceivably not finish checking the XID against pg_xact before we finish
+ * the VACUUM and perhaps truncate off the part of pg_xact he needs.  Getting
  * exclusive lock ensures no other backend is in process of checking the
  * tuple status.  Also, getting exclusive lock makes it safe to adjust the
  * infomask bits.
@@ -7703,7 +7731,7 @@ log_heap_update(Relation reln, Buffer oldbuf,
 	}
 
 	/* filtering by origin on a row level is much more efficient */
-	XLogIncludeOrigin();
+	XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 	recptr = XLogInsert(RM_HEAP_ID, info);
 
@@ -9129,5 +9157,82 @@ heap_sync(Relation rel)
 		FlushRelationBuffers(toastrel);
 		smgrimmedsync(toastrel->rd_smgr, MAIN_FORKNUM);
 		heap_close(toastrel, AccessShareLock);
+	}
+}
+
+/*
+ * Mask a heap page before performing consistency checks on it.
+ */
+void
+heap_mask(char *pagedata, BlockNumber blkno)
+{
+	Page		page = (Page) pagedata;
+	OffsetNumber off;
+
+	mask_page_lsn(page);
+
+	mask_page_hint_bits(page);
+	mask_unused_space(page);
+
+	for (off = 1; off <= PageGetMaxOffsetNumber(page); off++)
+	{
+		ItemId		iid = PageGetItemId(page, off);
+		char	   *page_item;
+
+		page_item = (char *) (page + ItemIdGetOffset(iid));
+
+		if (ItemIdIsNormal(iid))
+		{
+			HeapTupleHeader page_htup = (HeapTupleHeader) page_item;
+
+			/*
+			 * If xmin of a tuple is not yet frozen, we should ignore
+			 * differences in hint bits, since they can be set without
+			 * emitting WAL.
+			 */
+			if (!HeapTupleHeaderXminFrozen(page_htup))
+				page_htup->t_infomask &= ~HEAP_XACT_MASK;
+			else
+			{
+				/* Still we need to mask xmax hint bits. */
+				page_htup->t_infomask &= ~HEAP_XMAX_INVALID;
+				page_htup->t_infomask &= ~HEAP_XMAX_COMMITTED;
+			}
+
+			/*
+			 * During replay, we set Command Id to FirstCommandId. Hence, mask
+			 * it. See heap_xlog_insert() for details.
+			 */
+			page_htup->t_choice.t_heap.t_field3.t_cid = MASK_MARKER;
+
+			/*
+			 * For a speculative tuple, heap_insert() does not set ctid in the
+			 * caller-passed heap tuple itself, leaving the ctid field to
+			 * contain a speculative token value - a per-backend monotonically
+			 * increasing identifier. Besides, it does not WAL-log ctid under
+			 * any circumstances.
+			 *
+			 * During redo, heap_xlog_insert() sets t_ctid to current block
+			 * number and self offset number. It doesn't care about any
+			 * speculative insertions in master. Hence, we set t_ctid to
+			 * current block number and self offset number to ignore any
+			 * inconsistency.
+			 */
+			if (HeapTupleHeaderIsSpeculative(page_htup))
+				ItemPointerSet(&page_htup->t_ctid, blkno, off);
+		}
+
+		/*
+		 * Ignore any padding bytes after the tuple, when the length of the
+		 * item is not MAXALIGNed.
+		 */
+		if (ItemIdHasStorage(iid))
+		{
+			int			len = ItemIdGetLength(iid);
+			int			padlen = MAXALIGN(len) - len;
+
+			if (padlen > 0)
+				memset(page_item + len, MASK_MARKER, padlen);
+		}
 	}
 }

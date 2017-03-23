@@ -128,6 +128,34 @@ where bar.f1 = ss.f1;
 
 select tableoid::regclass::text as relname, bar.* from bar order by 1,2;
 
+-- Check UPDATE with *partitioned* inherited target and an appendrel subquery
+create table some_tab (a int);
+insert into some_tab values (0);
+create table some_tab_child () inherits (some_tab);
+insert into some_tab_child values (1);
+create table parted_tab (a int, b char) partition by list (a);
+create table parted_tab_part1 partition of parted_tab for values in (1);
+create table parted_tab_part2 partition of parted_tab for values in (2);
+create table parted_tab_part3 partition of parted_tab for values in (3);
+insert into parted_tab values (1, 'a'), (2, 'a'), (3, 'a');
+
+update parted_tab set b = 'b'
+from
+  (select a from some_tab union all select a+1 from some_tab) ss (a)
+where parted_tab.a = ss.a;
+select tableoid::regclass::text as relname, parted_tab.* from parted_tab order by 1,2;
+
+truncate parted_tab;
+insert into parted_tab values (1, 'a'), (2, 'a'), (3, 'a');
+update parted_tab set b = 'b'
+from
+  (select 0 from parted_tab union all select 1 from parted_tab) ss (a)
+where parted_tab.a = ss.a;
+select tableoid::regclass::text as relname, parted_tab.* from parted_tab order by 1,2;
+
+drop table parted_tab;
+drop table some_tab cascade;
+
 /* Test multiple inheritance of column defaults */
 
 CREATE TABLE firstparent (tomorrow date default now()::date + 1);
@@ -144,6 +172,32 @@ DROP TABLE firstparent, secondparent, jointchild, thirdparent, otherchild;
 insert into d values('test','one','two','three');
 alter table a alter column aa type integer using bit_length(aa);
 select * from d;
+
+-- check that oid column is handled properly during alter table inherit
+create table oid_parent (a int) with oids;
+
+create table oid_child () inherits (oid_parent);
+select attinhcount, attislocal from pg_attribute
+  where attrelid = 'oid_child'::regclass and attname = 'oid';
+drop table oid_child;
+
+create table oid_child (a int) without oids;
+alter table oid_child inherit oid_parent;  -- fail
+alter table oid_child set with oids;
+select attinhcount, attislocal from pg_attribute
+  where attrelid = 'oid_child'::regclass and attname = 'oid';
+alter table oid_child inherit oid_parent;
+select attinhcount, attislocal from pg_attribute
+  where attrelid = 'oid_child'::regclass and attname = 'oid';
+alter table oid_child set without oids;  -- fail
+alter table oid_parent set without oids;
+select attinhcount, attislocal from pg_attribute
+  where attrelid = 'oid_child'::regclass and attname = 'oid';
+alter table oid_child set without oids;
+select attinhcount, attislocal from pg_attribute
+  where attrelid = 'oid_child'::regclass and attname = 'oid';
+
+drop table oid_parent cascade;
 
 -- Test non-inheritable parent constraints
 create table p1(ff1 int);
@@ -168,6 +222,7 @@ create table base (i integer);
 create table derived () inherits (base);
 insert into derived (i) values (0);
 select derived::base from derived;
+select NULL::derived::base;
 drop table derived;
 drop table base;
 
@@ -536,3 +591,55 @@ FROM generate_series(1, 3) g(i);
 reset enable_seqscan;
 reset enable_indexscan;
 reset enable_bitmapscan;
+
+--
+-- Check that constraint exclusion works correctly with partitions using
+-- implicit constraints generated from the partition bound information.
+--
+create table list_parted (
+	a	varchar
+) partition by list (a);
+create table part_ab_cd partition of list_parted for values in ('ab', 'cd');
+create table part_ef_gh partition of list_parted for values in ('ef', 'gh');
+create table part_null_xy partition of list_parted for values in (null, 'xy');
+
+explain (costs off) select * from list_parted;
+explain (costs off) select * from list_parted where a is null;
+explain (costs off) select * from list_parted where a is not null;
+explain (costs off) select * from list_parted where a in ('ab', 'cd', 'ef');
+explain (costs off) select * from list_parted where a = 'ab' or a in (null, 'cd');
+explain (costs off) select * from list_parted where a = 'ab';
+
+create table range_list_parted (
+	a	int,
+	b	char(2)
+) partition by range (a);
+create table part_1_10 partition of range_list_parted for values from (1) to (10) partition by list (b);
+create table part_1_10_ab partition of part_1_10 for values in ('ab');
+create table part_1_10_cd partition of part_1_10 for values in ('cd');
+create table part_10_20 partition of range_list_parted for values from (10) to (20) partition by list (b);
+create table part_10_20_ab partition of part_10_20 for values in ('ab');
+create table part_10_20_cd partition of part_10_20 for values in ('cd');
+create table part_21_30 partition of range_list_parted for values from (21) to (30) partition by list (b);
+create table part_21_30_ab partition of part_21_30 for values in ('ab');
+create table part_21_30_cd partition of part_21_30 for values in ('cd');
+create table part_40_inf partition of range_list_parted for values from (40) to (unbounded) partition by list (b);
+create table part_40_inf_ab partition of part_40_inf for values in ('ab');
+create table part_40_inf_cd partition of part_40_inf for values in ('cd');
+create table part_40_inf_null partition of part_40_inf for values in (null);
+
+explain (costs off) select * from range_list_parted;
+explain (costs off) select * from range_list_parted where a = 5;
+explain (costs off) select * from range_list_parted where b = 'ab';
+explain (costs off) select * from range_list_parted where a between 3 and 23 and b in ('ab');
+
+/* Should select no rows because range partition key cannot be null */
+explain (costs off) select * from range_list_parted where a is null;
+
+/* Should only select rows from the null-accepting partition */
+explain (costs off) select * from range_list_parted where b is null;
+explain (costs off) select * from range_list_parted where a is not null and a < 67;
+explain (costs off) select * from range_list_parted where a >= 30;
+
+drop table list_parted;
+drop table range_list_parted;

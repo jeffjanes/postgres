@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2017, PostgreSQL Global Development Group
  *
  * src/bin/psql/command.c
  */
@@ -14,11 +14,8 @@
 
 #include <ctype.h>
 #include <time.h>
-#ifdef HAVE_PWD_H
 #include <pwd.h>
-#endif
 #ifndef WIN32
-#include <sys/types.h>			/* for umask() */
 #include <sys/stat.h>			/* for stat() */
 #include <fcntl.h>				/* open() flags */
 #include <unistd.h>				/* for geteuid(), getpid(), stat() */
@@ -27,10 +24,10 @@
 #include <io.h>
 #include <fcntl.h>
 #include <direct.h>
-#include <sys/types.h>			/* for umask() */
 #include <sys/stat.h>			/* for stat() */
 #endif
 
+#include "catalog/pg_class.h"
 #include "portability/instr_time.h"
 
 #include "libpq-fe.h"
@@ -248,31 +245,37 @@ exec_command(const char *cmd,
 				   *opt2,
 				   *opt3,
 				   *opt4;
-		enum trivalue reuse_previous;
+		enum trivalue reuse_previous = TRI_DEFAULT;
 
 		opt1 = read_connect_arg(scan_state);
 		if (opt1 != NULL && strncmp(opt1, prefix, sizeof(prefix) - 1) == 0)
 		{
-			reuse_previous =
-				ParseVariableBool(opt1 + sizeof(prefix) - 1, prefix) ?
-				TRI_YES : TRI_NO;
+			bool		on_off;
 
-			free(opt1);
-			opt1 = read_connect_arg(scan_state);
+			success = ParseVariableBool(opt1 + sizeof(prefix) - 1,
+										"-reuse-previous",
+										&on_off);
+			if (success)
+			{
+				reuse_previous = on_off ? TRI_YES : TRI_NO;
+				free(opt1);
+				opt1 = read_connect_arg(scan_state);
+			}
 		}
-		else
-			reuse_previous = TRI_DEFAULT;
 
-		opt2 = read_connect_arg(scan_state);
-		opt3 = read_connect_arg(scan_state);
-		opt4 = read_connect_arg(scan_state);
+		if (success)			/* give up if reuse_previous was invalid */
+		{
+			opt2 = read_connect_arg(scan_state);
+			opt3 = read_connect_arg(scan_state);
+			opt4 = read_connect_arg(scan_state);
 
-		success = do_connect(reuse_previous, opt1, opt2, opt3, opt4);
+			success = do_connect(reuse_previous, opt1, opt2, opt3, opt4);
 
+			free(opt2);
+			free(opt3);
+			free(opt4);
+		}
 		free(opt1);
-		free(opt2);
-		free(opt3);
-		free(opt4);
 	}
 
 	/* \cd */
@@ -500,6 +503,22 @@ exec_command(const char *cmd,
 				}
 				else
 					success = PSQL_CMD_UNKNOWN;
+				break;
+			case 'R':
+				switch (cmd[2])
+				{
+					case 'p':
+						if (show_verbose)
+							success = describePublications(pattern);
+						else
+							success = listPublications(pattern);
+						break;
+					case 's':
+						success = describeSubscriptions(pattern, show_verbose);
+						break;
+					default:
+						status = PSQL_CMD_UNKNOWN;
+				}
 				break;
 			case 'u':
 				success = describeRoles(pattern, show_verbose, show_system);
@@ -888,8 +907,11 @@ exec_command(const char *cmd,
 		free(fname);
 	}
 
-	/* \g [filename] -- send query, optionally with output to file/pipe */
-	else if (strcmp(cmd, "g") == 0)
+	/*
+	 * \g [filename] -- send query, optionally with output to file/pipe
+	 * \gx [filename] -- same as \g, with expanded mode forced
+	 */
+	else if (strcmp(cmd, "g") == 0 || strcmp(cmd, "gx") == 0)
 	{
 		char	   *fname = psql_scan_slash_option(scan_state,
 												   OT_FILEPIPE, NULL, false);
@@ -902,6 +924,8 @@ exec_command(const char *cmd,
 			pset.gfname = pg_strdup(fname);
 		}
 		free(fname);
+		if (strcmp(cmd, "gx") == 0)
+			pset.g_expanded = true;
 		status = PSQL_CMD_SEND;
 	}
 
@@ -1192,10 +1216,7 @@ exec_command(const char *cmd,
 
 			if (result &&
 				!SetVariable(pset.vars, opt, result))
-			{
-				psql_error("\\%s: error while setting variable\n", cmd);
 				success = false;
-			}
 
 			if (result)
 				free(result);
@@ -1309,10 +1330,8 @@ exec_command(const char *cmd,
 			}
 
 			if (!SetVariable(pset.vars, opt0, newval))
-			{
-				psql_error("\\%s: error while setting variable\n", cmd);
 				success = false;
-			}
+
 			free(newval);
 		}
 		free(opt0);
@@ -1548,7 +1567,7 @@ exec_command(const char *cmd,
 												 OT_NORMAL, NULL, false);
 
 		if (opt)
-			pset.timing = ParseVariableBool(opt, "\\timing");
+			success = ParseVariableBool(opt, "\\timing", &pset.timing);
 		else
 			pset.timing = !pset.timing;
 		if (!pset.quiet)
@@ -1573,10 +1592,8 @@ exec_command(const char *cmd,
 			success = false;
 		}
 		else if (!SetVariable(pset.vars, opt, NULL))
-		{
-			psql_error("\\%s: error while setting variable\n", cmd);
 			success = false;
-		}
+
 		free(opt);
 	}
 
@@ -2577,7 +2594,6 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			psql_error("\\pset: allowed formats are unaligned, aligned, wrapped, html, asciidoc, latex, latex-longtable, troff-ms\n");
 			return false;
 		}
-
 	}
 
 	/* set table line style */
@@ -2596,7 +2612,6 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			psql_error("\\pset: allowed line styles are ascii, old-ascii, unicode\n");
 			return false;
 		}
-
 	}
 
 	/* set unicode border line style */
@@ -2649,7 +2664,6 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	{
 		if (value)
 			popt->topt.border = atoi(value);
-
 	}
 
 	/* set expanded/vertical mode */
@@ -2660,7 +2674,17 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 		if (value && pg_strcasecmp(value, "auto") == 0)
 			popt->topt.expanded = 2;
 		else if (value)
-			popt->topt.expanded = ParseVariableBool(value, param);
+		{
+			bool		on_off;
+
+			if (ParseVariableBool(value, NULL, &on_off))
+				popt->topt.expanded = on_off ? 1 : 0;
+			else
+			{
+				PsqlVarEnumError(param, value, "on, off, auto");
+				return false;
+			}
+		}
 		else
 			popt->topt.expanded = !popt->topt.expanded;
 	}
@@ -2669,7 +2693,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "numericlocale") == 0)
 	{
 		if (value)
-			popt->topt.numericLocale = ParseVariableBool(value, param);
+			return ParseVariableBool(value, param, &popt->topt.numericLocale);
 		else
 			popt->topt.numericLocale = !popt->topt.numericLocale;
 	}
@@ -2724,7 +2748,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "t") == 0 || strcmp(param, "tuples_only") == 0)
 	{
 		if (value)
-			popt->topt.tuples_only = ParseVariableBool(value, param);
+			return ParseVariableBool(value, param, &popt->topt.tuples_only);
 		else
 			popt->topt.tuples_only = !popt->topt.tuples_only;
 	}
@@ -2756,10 +2780,14 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			popt->topt.pager = 2;
 		else if (value)
 		{
-			if (ParseVariableBool(value, param))
-				popt->topt.pager = 1;
-			else
-				popt->topt.pager = 0;
+			bool		on_off;
+
+			if (!ParseVariableBool(value, NULL, &on_off))
+			{
+				PsqlVarEnumError(param, value, "on, off, always");
+				return false;
+			}
+			popt->topt.pager = on_off ? 1 : 0;
 		}
 		else if (popt->topt.pager == 1)
 			popt->topt.pager = 0;
@@ -2778,7 +2806,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "footer") == 0)
 	{
 		if (value)
-			popt->topt.default_footer = ParseVariableBool(value, param);
+			return ParseVariableBool(value, param, &popt->topt.default_footer);
 		else
 			popt->topt.default_footer = !popt->topt.default_footer;
 	}
@@ -3438,11 +3466,11 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 					switch (relkind[0])
 					{
 #ifdef NOT_USED
-						case 'm':
+						case RELKIND_MATVIEW:
 							appendPQExpBufferStr(buf, "CREATE OR REPLACE MATERIALIZED VIEW ");
 							break;
 #endif
-						case 'v':
+						case RELKIND_VIEW:
 							appendPQExpBufferStr(buf, "CREATE OR REPLACE VIEW ");
 							break;
 						default:

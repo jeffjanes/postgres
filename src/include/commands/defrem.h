@@ -4,7 +4,7 @@
  *	  POSTGRES define and remove utility definitions.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/defrem.h
@@ -42,6 +42,8 @@ extern bool CheckIndexCompatible(Oid oldId,
 					 List *attributeList,
 					 List *exclusionOpNames);
 extern Oid	GetDefaultOpClass(Oid type_id, Oid am_id);
+extern Oid ResolveOpClass(List *opclass, Oid attrType,
+			   char *accessMethodName, Oid accessMethodId);
 
 /* commands/functioncmds.c */
 extern ObjectAddress CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt);
@@ -152,5 +154,6 @@ extern int64 defGetInt64(DefElem *def);
 extern List *defGetQualifiedName(DefElem *def);
 extern TypeName *defGetTypeName(DefElem *def);
 extern int	defGetTypeLength(DefElem *def);
+extern List *defGetStringList(DefElem *def);
 
 #endif   /* DEFREM_H */

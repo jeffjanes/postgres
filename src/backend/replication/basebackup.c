@@ -3,7 +3,7 @@
  * basebackup.c
  *	  code for taking a base backup and streaming it to a standby
  *
- * Portions Copyright (c) 2010-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/basebackup.c
@@ -12,7 +12,6 @@
  */
 #include "postgres.h"
 
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
@@ -27,6 +26,7 @@
 #include "nodes/pg_list.h"
 #include "pgtar.h"
 #include "pgstat.h"
+#include "postmaster/syslogger.h"
 #include "replication/basebackup.h"
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
@@ -92,10 +92,10 @@ static uint64 throttling_sample;
 static int64 throttling_counter;
 
 /* The minimum time required to transfer throttling_sample bytes. */
-static int64 elapsed_min_unit;
+static TimeOffset elapsed_min_unit;
 
 /* The last check of the transfer rate. */
-static int64 throttled_last;
+static TimestampTz throttled_last;
 
 /*
  * The contents of these directories are removed or recreated during server
@@ -147,6 +147,9 @@ static const char *excludeFiles[] =
 {
 	/* Skip auto conf temporary file. */
 	PG_AUTOCONF_FILENAME ".tmp",
+
+	/* Skip current log file temporary file */
+	LOG_METAINFO_DATAFILE_TMP,
 
 	/*
 	 * If there's a backup_label or tablespace_map file, it belongs to a
@@ -254,7 +257,7 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 			throttling_counter = 0;
 
 			/* The 'real data' starts now (header was ignored). */
-			throttled_last = GetCurrentIntegerTimestamp();
+			throttled_last = GetCurrentTimestamp();
 		}
 		else
 		{
@@ -346,7 +349,7 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 		TimeLineID	tli;
 
 		/*
-		 * I'd rather not worry about timelines here, so scan pg_xlog and
+		 * I'd rather not worry about timelines here, so scan pg_wal and
 		 * include all WAL files in the range between 'startptr' and 'endptr',
 		 * regardless of the timeline the file is stamped with. If there are
 		 * some spurious WAL files belonging to timelines that don't belong in
@@ -359,11 +362,11 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 		XLByteToPrevSeg(endptr, endsegno);
 		XLogFileName(lastoff, ThisTimeLineID, endsegno);
 
-		dir = AllocateDir("pg_xlog");
+		dir = AllocateDir("pg_wal");
 		if (!dir)
 			ereport(ERROR,
-				 (errmsg("could not open directory \"%s\": %m", "pg_xlog")));
-		while ((de = ReadDir(dir, "pg_xlog")) != NULL)
+				 (errmsg("could not open directory \"%s\": %m", "pg_wal")));
+		while ((de = ReadDir(dir, "pg_wal")) != NULL)
 		{
 			/* Does it look like a WAL segment, and is it in the range? */
 			if (IsXLogFileName(de->d_name) &&
@@ -401,7 +404,7 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 		qsort(walFiles, nWalFiles, sizeof(char *), compareWalFileNames);
 
 		/*
-		 * There must be at least one xlog file in the pg_xlog directory,
+		 * There must be at least one xlog file in the pg_wal directory,
 		 * since we are doing backup-including-xlog.
 		 */
 		if (nWalFiles < 1)
@@ -1054,23 +1057,23 @@ sendDir(char *path, int basepathlen, bool sizeonly, List *tablespaces,
 		}
 
 		/*
-		 * We can skip pg_xlog, the WAL segments need to be fetched from the
+		 * We can skip pg_wal, the WAL segments need to be fetched from the
 		 * WAL archive anyway. But include it as an empty directory anyway, so
 		 * we get permissions right.
 		 */
-		if (strcmp(pathbuf, "./pg_xlog") == 0)
+		if (strcmp(pathbuf, "./pg_wal") == 0)
 		{
-			/* If pg_xlog is a symlink, write it as a directory anyway */
+			/* If pg_wal is a symlink, write it as a directory anyway */
 			size += _tarWriteDir(pathbuf, basepathlen, &statbuf, sizeonly);
 
 			/*
 			 * Also send archive_status directory (by hackishly reusing
 			 * statbuf from above ...).
 			 */
-			size += _tarWriteHeader("./pg_xlog/archive_status", NULL, &statbuf,
+			size += _tarWriteHeader("./pg_wal/archive_status", NULL, &statbuf,
 									sizeonly);
 
-			continue;			/* don't recurse into pg_xlog */
+			continue;			/* don't recurse into pg_wal */
 		}
 
 		/* Allow symbolic links in pg_tblspc only */
@@ -1333,7 +1336,7 @@ _tarWriteDir(const char *pathbuf, int basepathlen, struct stat *statbuf,
 static void
 throttle(size_t increment)
 {
-	int64		elapsed,
+	TimeOffset	elapsed,
 				elapsed_min,
 				sleep;
 	int			wait_result;
@@ -1346,7 +1349,7 @@ throttle(size_t increment)
 		return;
 
 	/* Time elapsed since the last measurement (and possible wake up). */
-	elapsed = GetCurrentIntegerTimestamp() - throttled_last;
+	elapsed = GetCurrentTimestamp() - throttled_last;
 	/* How much should have elapsed at minimum? */
 	elapsed_min = elapsed_min_unit * (throttling_counter / throttling_sample);
 	sleep = elapsed_min - elapsed;
@@ -1370,26 +1373,16 @@ throttle(size_t increment)
 		if (wait_result & WL_LATCH_SET)
 			CHECK_FOR_INTERRUPTS();
 	}
-	else
-	{
-		/*
-		 * The actual transfer rate is below the limit.  A negative value
-		 * would distort the adjustment of throttled_last.
-		 */
-		wait_result = 0;
-		sleep = 0;
-	}
 
 	/*
-	 * Only a whole multiple of throttling_sample was processed. The rest will
-	 * be done during the next call of this function.
+	 * As we work with integers, only whole multiple of throttling_sample was
+	 * processed. The rest will be done during the next call of this function.
 	 */
 	throttling_counter %= throttling_sample;
 
-	/* Once the (possible) sleep has ended, new period starts. */
-	if (wait_result & WL_TIMEOUT)
-		throttled_last += elapsed + sleep;
-	else if (sleep > 0)
-		/* Sleep was necessary but might have been interrupted. */
-		throttled_last = GetCurrentIntegerTimestamp();
+	/*
+	 * Time interval for the remaining amount and possible next increments
+	 * starts now.
+	 */
+	throttled_last = GetCurrentTimestamp();
 }

@@ -3,7 +3,7 @@
  * relnode.c
  *	  Relation-node lookup/construction routines
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -13,6 +13,8 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <limits.h>
 
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
@@ -47,6 +49,9 @@ static List *subbuild_joinrel_restrictlist(RelOptInfo *joinrel,
 static List *subbuild_joinrel_joinlist(RelOptInfo *joinrel,
 						  List *joininfo_list,
 						  List *new_joininfo);
+static void set_foreign_rel_properties(RelOptInfo *joinrel,
+						   RelOptInfo *outer_rel, RelOptInfo *inner_rel);
+static void add_join_rel(PlannerInfo *root, RelOptInfo *joinrel);
 
 
 /*
@@ -126,7 +131,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 	rel->allvisfrac = 0;
 	rel->subroot = NULL;
 	rel->subplan_params = NIL;
-	rel->rel_parallel_workers = -1;		/* set up in GetRelationInfo */
+	rel->rel_parallel_workers = -1;		/* set up in get_relation_info */
 	rel->serverid = InvalidOid;
 	rel->userid = rte->checkAsUser;
 	rel->useridiscurrent = false;
@@ -135,6 +140,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 	rel->baserestrictinfo = NIL;
 	rel->baserestrictcost.startup = 0;
 	rel->baserestrictcost.per_tuple = 0;
+	rel->baserestrict_min_security = UINT_MAX;
 	rel->joininfo = NIL;
 	rel->has_eclass_joins = false;
 
@@ -147,12 +153,13 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 			break;
 		case RTE_SUBQUERY:
 		case RTE_FUNCTION:
+		case RTE_TABLEFUNC:
 		case RTE_VALUES:
 		case RTE_CTE:
 
 			/*
-			 * Subquery, function, or values list --- set up attr range and
-			 * arrays
+			 * Subquery, function, tablefunc, or values list --- set up attr
+			 * range and arrays
 			 *
 			 * Note: 0 is included in range to support whole-row Vars
 			 */
@@ -171,6 +178,16 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 
 	/* Save the finished struct in the query's simple_rel_array */
 	root->simple_rel_array[relid] = rel;
+
+	/*
+	 * This is a convenient spot at which to note whether rels participating
+	 * in the query have any securityQuals attached.  If so, increase
+	 * root->qual_security_level to ensure it's larger than the maximum
+	 * security level needed for securityQuals.
+	 */
+	if (rte->securityQuals)
+		root->qual_security_level = Max(root->qual_security_level,
+										list_length(rte->securityQuals));
 
 	/*
 	 * If this rel is an appendrel parent, recurse to build "other rel"
@@ -314,6 +331,82 @@ find_join_rel(PlannerInfo *root, Relids relids)
 }
 
 /*
+ * set_foreign_rel_properties
+ *		Set up foreign-join fields if outer and inner relation are foreign
+ *		tables (or joins) belonging to the same server and assigned to the same
+ *		user to check access permissions as.
+ *
+ * In addition to an exact match of userid, we allow the case where one side
+ * has zero userid (implying current user) and the other side has explicit
+ * userid that happens to equal the current user; but in that case, pushdown of
+ * the join is only valid for the current user.  The useridiscurrent field
+ * records whether we had to make such an assumption for this join or any
+ * sub-join.
+ *
+ * Otherwise these fields are left invalid, so GetForeignJoinPaths will not be
+ * called for the join relation.
+ *
+ */
+static void
+set_foreign_rel_properties(RelOptInfo *joinrel, RelOptInfo *outer_rel,
+						   RelOptInfo *inner_rel)
+{
+	if (OidIsValid(outer_rel->serverid) &&
+		inner_rel->serverid == outer_rel->serverid)
+	{
+		if (inner_rel->userid == outer_rel->userid)
+		{
+			joinrel->serverid = outer_rel->serverid;
+			joinrel->userid = outer_rel->userid;
+			joinrel->useridiscurrent = outer_rel->useridiscurrent || inner_rel->useridiscurrent;
+			joinrel->fdwroutine = outer_rel->fdwroutine;
+		}
+		else if (!OidIsValid(inner_rel->userid) &&
+				 outer_rel->userid == GetUserId())
+		{
+			joinrel->serverid = outer_rel->serverid;
+			joinrel->userid = outer_rel->userid;
+			joinrel->useridiscurrent = true;
+			joinrel->fdwroutine = outer_rel->fdwroutine;
+		}
+		else if (!OidIsValid(outer_rel->userid) &&
+				 inner_rel->userid == GetUserId())
+		{
+			joinrel->serverid = outer_rel->serverid;
+			joinrel->userid = inner_rel->userid;
+			joinrel->useridiscurrent = true;
+			joinrel->fdwroutine = outer_rel->fdwroutine;
+		}
+	}
+}
+
+/*
+ * add_join_rel
+ *		Add given join relation to the list of join relations in the given
+ *		PlannerInfo. Also add it to the auxiliary hashtable if there is one.
+ */
+static void
+add_join_rel(PlannerInfo *root, RelOptInfo *joinrel)
+{
+	/* GEQO requires us to append the new joinrel to the end of the list! */
+	root->join_rel_list = lappend(root->join_rel_list, joinrel);
+
+	/* store it into the auxiliary hashtable if there is one. */
+	if (root->join_rel_hash)
+	{
+		JoinHashEntry *hentry;
+		bool		found;
+
+		hentry = (JoinHashEntry *) hash_search(root->join_rel_hash,
+											   &(joinrel->relids),
+											   HASH_ENTER,
+											   &found);
+		Assert(!found);
+		hentry->join_rel = joinrel;
+	}
+}
+
+/*
  * build_join_rel
  *	  Returns relation entry corresponding to the union of two given rels,
  *	  creating a new relation entry if none already exists.
@@ -407,49 +500,12 @@ build_join_rel(PlannerInfo *root,
 	joinrel->baserestrictinfo = NIL;
 	joinrel->baserestrictcost.startup = 0;
 	joinrel->baserestrictcost.per_tuple = 0;
+	joinrel->baserestrict_min_security = UINT_MAX;
 	joinrel->joininfo = NIL;
 	joinrel->has_eclass_joins = false;
 
-	/*
-	 * Set up foreign-join fields if outer and inner relation are foreign
-	 * tables (or joins) belonging to the same server and assigned to the same
-	 * user to check access permissions as.  In addition to an exact match of
-	 * userid, we allow the case where one side has zero userid (implying
-	 * current user) and the other side has explicit userid that happens to
-	 * equal the current user; but in that case, pushdown of the join is only
-	 * valid for the current user.  The useridiscurrent field records whether
-	 * we had to make such an assumption for this join or any sub-join.
-	 *
-	 * Otherwise these fields are left invalid, so GetForeignJoinPaths will
-	 * not be called for the join relation.
-	 */
-	if (OidIsValid(outer_rel->serverid) &&
-		inner_rel->serverid == outer_rel->serverid)
-	{
-		if (inner_rel->userid == outer_rel->userid)
-		{
-			joinrel->serverid = outer_rel->serverid;
-			joinrel->userid = outer_rel->userid;
-			joinrel->useridiscurrent = outer_rel->useridiscurrent || inner_rel->useridiscurrent;
-			joinrel->fdwroutine = outer_rel->fdwroutine;
-		}
-		else if (!OidIsValid(inner_rel->userid) &&
-				 outer_rel->userid == GetUserId())
-		{
-			joinrel->serverid = outer_rel->serverid;
-			joinrel->userid = outer_rel->userid;
-			joinrel->useridiscurrent = true;
-			joinrel->fdwroutine = outer_rel->fdwroutine;
-		}
-		else if (!OidIsValid(outer_rel->userid) &&
-				 inner_rel->userid == GetUserId())
-		{
-			joinrel->serverid = outer_rel->serverid;
-			joinrel->userid = inner_rel->userid;
-			joinrel->useridiscurrent = true;
-			joinrel->fdwroutine = outer_rel->fdwroutine;
-		}
-	}
+	/* Compute information relevant to the foreign relations. */
+	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
 
 	/*
 	 * Create a new tlist containing just the vars that need to be output from
@@ -517,25 +573,8 @@ build_join_rel(PlannerInfo *root,
 		is_parallel_safe(root, (Node *) joinrel->reltarget->exprs))
 		joinrel->consider_parallel = true;
 
-	/*
-	 * Add the joinrel to the query's joinrel list, and store it into the
-	 * auxiliary hashtable if there is one.  NB: GEQO requires us to append
-	 * the new joinrel to the end of the list!
-	 */
-	root->join_rel_list = lappend(root->join_rel_list, joinrel);
-
-	if (root->join_rel_hash)
-	{
-		JoinHashEntry *hentry;
-		bool		found;
-
-		hentry = (JoinHashEntry *) hash_search(root->join_rel_hash,
-											   &(joinrel->relids),
-											   HASH_ENTER,
-											   &found);
-		Assert(!found);
-		hentry->join_rel = joinrel;
-	}
+	/* Add the joinrel to the PlannerInfo. */
+	add_join_rel(root, joinrel);
 
 	/*
 	 * Also, if dynamic-programming join search is active, add the new joinrel

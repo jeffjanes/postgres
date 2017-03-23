@@ -4,7 +4,7 @@
  *	  per-process shared memory data structures
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/proc.h
@@ -39,7 +39,12 @@ struct XidCache
 	TransactionId xids[PGPROC_MAX_CACHED_SUBXIDS];
 };
 
-/* Flags for PGXACT->vacuumFlags */
+/*
+ * Flags for PGXACT->vacuumFlags
+ *
+ * Note: If you modify these flags, you need to modify PROCARRAY_XXX flags
+ * in src/include/storage/procarray.h.
+ */
 #define		PROC_IS_AUTOVACUUM	0x01	/* is it an autovac worker? */
 #define		PROC_IN_VACUUM		0x02	/* currently running lazy vacuum */
 #define		PROC_IN_ANALYZE		0x04	/* currently running analyze */
@@ -87,7 +92,7 @@ struct PGPROC
 	SHM_QUEUE	links;			/* list link if process is in a list */
 	PGPROC	  **procgloballist; /* procglobal list that owns this PGPROC */
 
-	PGSemaphoreData sem;		/* ONE semaphore to sleep on */
+	PGSemaphore sem;			/* ONE semaphore to sleep on */
 	int			waitStatus;		/* STATUS_WAITING, STATUS_OK or STATUS_ERROR */
 
 	Latch		procLatch;		/* generic latch for process */
@@ -103,6 +108,8 @@ struct PGPROC
 	Oid			databaseId;		/* OID of database this backend is using */
 	Oid			roleId;			/* OID of role using this backend */
 
+	bool		isBackgroundWorker; /* true if background worker. */
+
 	/*
 	 * While in hot standby mode, shows that a conflict signal has been sent
 	 * for the current transaction. Set/cleared while holding ProcArrayLock,
@@ -114,6 +121,9 @@ struct PGPROC
 	bool		lwWaiting;		/* true if waiting for an LW lock */
 	uint8		lwWaitMode;		/* lwlock mode being waited for */
 	proclist_node lwWaitLink;	/* position in LW lock wait list */
+
+	/* Support for condition variables. */
+	proclist_node cvWaitLink;	/* position in CV wait list */
 
 	/* Info about lock the process is currently waiting for, if any. */
 	/* waitLock and waitProcLock are NULL if not currently waiting. */

@@ -464,9 +464,9 @@ su - postgres -c "/usr/local/pgsql/bin/pg_ctl start -l logfile -D /usr/local/pgs
 
     <para>
 <screen>
-LOG:  could not bind IPv4 socket: Address already in use
+LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
 HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
-FATAL:  could not create TCP/IP listen socket
+FATAL:  could not create any TCP/IP sockets
 </screen>
      This usually means just what it suggests: you tried to start
      another server on the same port where one is already running.
@@ -476,9 +476,9 @@ FATAL:  could not create TCP/IP listen socket
      on a reserved port number might draw something like:
 <screen>
 $ <userinput>postgres -p 666</userinput>
-LOG:  could not bind IPv4 socket: Permission denied
+LOG:  could not bind IPv4 address "127.0.0.1": Permission denied
 HINT:  Is another postmaster already running on port 666? If not, wait a few seconds and retry.
-FATAL:  could not create TCP/IP listen socket
+FATAL:  could not create any TCP/IP sockets
 </screen>
     </para>
 
@@ -1165,6 +1165,85 @@ project.max-msg-ids=(priv,4096,deny)
 
   </sect2>
 
+  <sect2 id="systemd-removeipc">
+   <title>systemd RemoveIPC</title>
+
+   <indexterm>
+    <primary>systemd</primary>
+    <secondary>RemoveIPC</secondary>
+   </indexterm>
+
+   <para>
+    If <productname>systemd</productname> is in use, some care must be taken
+    that IPC resources (shared memory and semaphores) are not prematurely
+    removed by the operating system.  This is especially of concern when
+    installing PostgreSQL from source.  Users of distribution packages of
+    PostgreSQL are less likely to be affected, as
+    the <literal>postgres</literal> user is then normally created as a system
+    user.
+   </para>
+
+   <para>
+    The setting <literal>RemoveIPC</literal>
+    in <filename>logind.conf</filename> controls whether IPC objects are
+    removed when a user fully logs out.  System users are exempt.  This
+    setting defaults to on in stock <productname>systemd</productname>, but
+    some operating system distributions default it to off.
+   </para>
+
+   <para>
+    A typical observed effect when this setting is on is that the semaphore
+    objects used by a PostgreSQL server are removed at apparently random
+    times, leading to the server crashing with log messages like
+<screen>
+LOG: semctl(1234567890, 0, IPC_RMID, ...) failed: Invalid argument
+</screen>
+    Different types of IPC objects (shared memory vs. semaphores, System V
+    vs. POSIX) are treated slightly differently
+    by <productname>systemd</productname>, so one might observe that some IPC
+    resources are not removed in the same way as others.  But it is not
+    advisable to rely on these subtle differences.
+   </para>
+
+   <para>
+    A <quote>user logging out</quote> might happen as part of a maintenance
+    job or manually when an administrator logs in as
+    the <literal>postgres</literal> user or something similar, so it is hard
+    to prevent in general.
+   </para>
+
+   <para>
+    What is a <quote>system user</quote> is determined
+    at <productname>systemd</productname> compile time from
+    the <symbol>SYS_UID_MAX</symbol> setting
+    in <filename>/etc/login.defs</filename>.
+   </para>
+
+   <para>
+    Packaging and deployment scripts should be careful to create
+    the <literal>postgres</literal> user as a system user by
+    using <literal>useradd -r</literal>, <literal>adduser --system</literal>,
+    or equivalent.
+   </para>
+
+   <para>
+    Alternatively, if the user account was created incorrectly or cannot be
+    changed, it is recommended to set
+<programlisting>
+RemoveIPC=no
+</programlisting>
+    in <filename>/etc/systemd/logind.conf</filename> or another appropriate
+    configuration file.
+   </para>
+
+   <caution>
+    <para>
+     At least one of these two things has to be ensured, or the PostgreSQL
+     server will be very unreliable.
+    </para>
+   </caution>
+  </sect2>
+
   <sect2>
    <title>Resource Limits</title>
 
@@ -1381,53 +1460,67 @@ export PG_OOM_ADJUST_VALUE=0
   </sect2>
 
   <sect2 id="linux-huge-pages">
-   <title>Linux huge pages</title>
+   <title>Linux Huge Pages</title>
 
    <para>
     Using huge pages reduces overhead when using large contiguous chunks of
-    memory, like <productname>PostgreSQL</productname> does. To enable this
+    memory, as <productname>PostgreSQL</productname> does, particularly when
+    using large values of <xref linkend="guc-shared-buffers">.  To use this
     feature in <productname>PostgreSQL</productname> you need a kernel
     with <varname>CONFIG_HUGETLBFS=y</varname> and
-    <varname>CONFIG_HUGETLB_PAGE=y</varname>. You also have to tune the system
-    setting <varname>vm.nr_hugepages</varname>. To estimate the number of
-    necessary huge pages start <productname>PostgreSQL</productname> without
-    huge pages enabled and check the <varname>VmPeak</varname> value from the
-    proc file system:
+    <varname>CONFIG_HUGETLB_PAGE=y</varname>. You will also have to adjust
+    the kernel setting <varname>vm.nr_hugepages</varname>. To estimate the
+    number of huge pages needed, start <productname>PostgreSQL</productname>
+    without huge pages enabled and check the
+    postmaster's <varname>VmPeak</varname> value, as well as the system's
+    huge page size, using the <filename>/proc</> file system.  This might
+    look like:
 <programlisting>
-$ <userinput>head -1 /path/to/data/directory/postmaster.pid</userinput>
+$ <userinput>head -1 $PGDATA/postmaster.pid</userinput>
 4170
 $ <userinput>grep ^VmPeak /proc/4170/status</userinput>
 VmPeak:  6490428 kB
+$ <userinput>grep ^Hugepagesize /proc/meminfo</userinput>
+Hugepagesize:       2048 kB
 </programlisting>
-     <literal>6490428</literal> / <literal>2048</literal>
-     (<varname>PAGE_SIZE</varname> is <literal>2MB</literal> in this case) are
-     roughly <literal>3169.154</literal> huge pages, so you will need at
-     least <literal>3170</literal> huge pages:
+     <literal>6490428</literal> / <literal>2048</literal> gives approximately
+     <literal>3169.154</literal>, so in this example we need at
+     least <literal>3170</literal> huge pages, which we can set with:
 <programlisting>
 $ <userinput>sysctl -w vm.nr_hugepages=3170</userinput>
 </programlisting>
-    Sometimes the kernel is not able to allocate the desired number of huge
-    pages, so it might be necessary to repeat that command or to reboot. Don't
-    forget to add an entry to <filename>/etc/sysctl.conf</filename> to persist
-    this setting through reboots.
+    A larger setting would be appropriate if other programs on the machine
+    also need huge pages.  Don't forget to add this setting
+    to <filename>/etc/sysctl.conf</filename> so that it will be reapplied
+    after reboots.
    </para>
 
    <para>
-    It is also necessary to give the database server operating system
+    Sometimes the kernel is not able to allocate the desired number of huge
+    pages immediately, so it might be necessary to repeat the command or to
+    reboot.  (Immediately after a reboot, most of the machine's memory
+    should be available to convert into huge pages.)  To verify the huge
+    page allocation situation, use:
+<programlisting>
+$ <userinput>grep Huge /proc/meminfo</userinput>
+</programlisting>
+   </para>
+
+   <para>
+    It may also be necessary to give the database server's operating system
     user permission to use huge pages by setting
-    <varname>vm.hugetlb_shm_group</> via <application>sysctl</>, and
-    permission to lock memory with <command>ulimit -l</>.
+    <varname>vm.hugetlb_shm_group</> via <application>sysctl</>, and/or
+    give permission to lock memory with <command>ulimit -l</>.
    </para>
 
    <para>
     The default behavior for huge pages in
     <productname>PostgreSQL</productname> is to use them when possible and
-    to fallback to normal pages when failing. To enforce the use of huge
-    pages, you can set
-    <link linkend="guc-huge-pages"><varname>huge_pages</varname></link>
-    to <literal>on</literal>. Note that in this case
-    <productname>PostgreSQL</productname> will fail to start if not enough huge
-    pages are available.
+    to fall back to normal pages when failing. To enforce the use of huge
+    pages, you can set <xref linkend="guc-huge-pages">
+    to <literal>on</literal> in <filename>postgresql.conf</>.
+    Note that with this setting <productname>PostgreSQL</> will fail to
+    start if not enough huge pages are available.
    </para>
 
    <para>
@@ -2148,6 +2241,10 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
    If the private key is protected with a passphrase, the
    server will prompt for the passphrase and will not start until it has
    been entered.
+   Using a passphrase also disables the ability to change the server's SSL
+   configuration without a server restart.
+   Furthermore, passphrase-protected private keys cannot be used at all
+   on Windows.
   </para>
 
   <para>
@@ -2271,11 +2368,20 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
   </table>
 
    <para>
-    The files <filename>server.key</>, <filename>server.crt</>,
-    <filename>root.crt</filename>, and <filename>root.crl</filename>
-    (or their configured alternative names)
-    are only examined during server start; so you must restart
-    the server for changes in them to take effect.
+    The server reads these files at server start and whenever the server
+    configuration is reloaded.  On <systemitem class="osname">Windows</>
+    systems, they are also re-read whenever a new backend process is spawned
+    for a new client connection.
+   </para>
+
+   <para>
+    If an error in these files is detected at server start, the server will
+    refuse to start.  But if an error is detected during a configuration
+    reload, the files are ignored and the old SSL configuration continues to
+    be used.  On <systemitem class="osname">Windows</> systems, if an error in
+    these files is detected at backend start, that backend will be unable to
+    establish an SSL connection.  In all these cases, the error condition is
+    reported in the server log.
    </para>
   </sect2>
 
@@ -2292,8 +2398,8 @@ openssl req -new -text -out server.req
     you enter the local host name as <quote>Common Name</>; the challenge
     password can be left blank. The program will generate a key that is
     passphrase protected; it will not accept a passphrase that is less
-    than four characters long. To remove the passphrase (as you must if
-    you want automatic start-up of the server), run the commands:
+    than four characters long.  To remove the passphrase again (as you must
+    if you want automatic start-up of the server), next run the commands:
 <programlisting>
 openssl rsa -in privkey.pem -out server.key
 rm privkey.pem

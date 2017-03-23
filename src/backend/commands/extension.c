@@ -12,7 +12,7 @@
  * postgresql.conf and recovery.conf.  An extension also has an installation
  * script file, containing SQL commands to create the extension's objects.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -52,6 +52,7 @@
 #include "nodes/makefuncs.h"
 #include "storage/fd.h"
 #include "tcop/utility.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -59,6 +60,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/tqual.h"
+#include "utils/varlena.h"
 
 
 /* Globally visible state variables */
@@ -712,7 +714,7 @@ execute_sql_string(const char *sql, const char *filename)
 	 */
 	foreach(lc1, raw_parsetree_list)
 	{
-		Node	   *parsetree = (Node *) lfirst(lc1);
+		RawStmt    *parsetree = castNode(RawStmt, lfirst(lc1));
 		List	   *stmt_list;
 		ListCell   *lc2;
 
@@ -724,29 +726,23 @@ execute_sql_string(const char *sql, const char *filename)
 
 		foreach(lc2, stmt_list)
 		{
-			Node	   *stmt = (Node *) lfirst(lc2);
-
-			if (IsA(stmt, TransactionStmt))
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("transaction control statements are not allowed within an extension script")));
+			PlannedStmt *stmt = castNode(PlannedStmt, lfirst(lc2));
 
 			CommandCounterIncrement();
 
 			PushActiveSnapshot(GetTransactionSnapshot());
 
-			if (IsA(stmt, PlannedStmt) &&
-				((PlannedStmt *) stmt)->utilityStmt == NULL)
+			if (stmt->utilityStmt == NULL)
 			{
 				QueryDesc  *qdesc;
 
-				qdesc = CreateQueryDesc((PlannedStmt *) stmt,
+				qdesc = CreateQueryDesc(stmt,
 										sql,
 										GetActiveSnapshot(), NULL,
 										dest, NULL, 0);
 
 				ExecutorStart(qdesc, 0);
-				ExecutorRun(qdesc, ForwardScanDirection, 0);
+				ExecutorRun(qdesc, ForwardScanDirection, 0, true);
 				ExecutorFinish(qdesc);
 				ExecutorEnd(qdesc);
 
@@ -754,6 +750,11 @@ execute_sql_string(const char *sql, const char *filename)
 			}
 			else
 			{
+				if (IsA(stmt->utilityStmt, TransactionStmt))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("transaction control statements are not allowed within an extension script")));
+
 				ProcessUtility(stmt,
 							   sql,
 							   PROCESS_UTILITY_QUERY,
@@ -1434,7 +1435,8 @@ CreateExtensionInternal(char *extensionName,
 			csstmt->authrole = NULL;	/* will be created by current user */
 			csstmt->schemaElts = NIL;
 			csstmt->if_not_exists = false;
-			CreateSchemaCommand(csstmt, NULL);
+			CreateSchemaCommand(csstmt, "(generated CREATE SCHEMA command)",
+								-1, -1);
 
 			/*
 			 * CreateSchemaCommand includes CommandCounterIncrement, so new
@@ -1771,8 +1773,7 @@ InsertExtensionTuple(const char *extName, Oid extOwner,
 
 	tuple = heap_form_tuple(rel->rd_att, values, nulls);
 
-	extensionOid = simple_heap_insert(rel, tuple);
-	CatalogUpdateIndexes(rel, tuple);
+	extensionOid = CatalogTupleInsert(rel, tuple);
 
 	heap_freetuple(tuple);
 	heap_close(rel, RowExclusiveLock);
@@ -1853,7 +1854,7 @@ RemoveExtensionById(Oid extId)
 
 	/* We assume that there can be at most one matching tuple */
 	if (HeapTupleIsValid(tuple))
-		simple_heap_delete(rel, &tuple->t_self);
+		CatalogTupleDelete(rel, &tuple->t_self);
 
 	systable_endscan(scandesc);
 
@@ -2316,7 +2317,7 @@ Datum
 pg_extension_config_dump(PG_FUNCTION_ARGS)
 {
 	Oid			tableoid = PG_GETARG_OID(0);
-	text	   *wherecond = PG_GETARG_TEXT_P(1);
+	text	   *wherecond = PG_GETARG_TEXT_PP(1);
 	char	   *tablename;
 	Relation	extRel;
 	ScanKeyData key[1];
@@ -2483,8 +2484,7 @@ pg_extension_config_dump(PG_FUNCTION_ARGS)
 	extTup = heap_modify_tuple(extTup, RelationGetDescr(extRel),
 							   repl_val, repl_null, repl_repl);
 
-	simple_heap_update(extRel, &extTup->t_self, extTup);
-	CatalogUpdateIndexes(extRel, extTup);
+	CatalogTupleUpdate(extRel, &extTup->t_self, extTup);
 
 	systable_endscan(extScan);
 
@@ -2661,8 +2661,7 @@ extension_config_remove(Oid extensionoid, Oid tableoid)
 	extTup = heap_modify_tuple(extTup, RelationGetDescr(extRel),
 							   repl_val, repl_null, repl_repl);
 
-	simple_heap_update(extRel, &extTup->t_self, extTup);
-	CatalogUpdateIndexes(extRel, extTup);
+	CatalogTupleUpdate(extRel, &extTup->t_self, extTup);
 
 	systable_endscan(extScan);
 
@@ -2673,9 +2672,8 @@ extension_config_remove(Oid extensionoid, Oid tableoid)
  * Execute ALTER EXTENSION SET SCHEMA
  */
 ObjectAddress
-AlterExtensionNamespace(List *names, const char *newschema, Oid *oldschema)
+AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *oldschema)
 {
-	char	   *extensionName;
 	Oid			extensionOid;
 	Oid			nspOid;
 	Oid			oldNspOid = InvalidOid;
@@ -2690,12 +2688,6 @@ AlterExtensionNamespace(List *names, const char *newschema, Oid *oldschema)
 	HeapTuple	depTup;
 	ObjectAddresses *objsMoved;
 	ObjectAddress extAddr;
-
-	if (list_length(names) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("extension name cannot be qualified")));
-	extensionName = strVal(linitial(names));
 
 	extensionOid = get_extension_oid(extensionName, false);
 
@@ -2842,8 +2834,7 @@ AlterExtensionNamespace(List *names, const char *newschema, Oid *oldschema)
 	/* Now adjust pg_extension.extnamespace */
 	extForm->extnamespace = nspOid;
 
-	simple_heap_update(extRel, &extTup->t_self, extTup);
-	CatalogUpdateIndexes(extRel, extTup);
+	CatalogTupleUpdate(extRel, &extTup->t_self, extTup);
 
 	heap_close(extRel, RowExclusiveLock);
 
@@ -3089,8 +3080,7 @@ ApplyExtensionUpdates(Oid extensionOid,
 		extTup = heap_modify_tuple(extTup, RelationGetDescr(extRel),
 								   values, nulls, repl);
 
-		simple_heap_update(extRel, &extTup->t_self, extTup);
-		CatalogUpdateIndexes(extRel, extTup);
+		CatalogTupleUpdate(extRel, &extTup->t_self, extTup);
 
 		systable_endscan(extScan);
 
@@ -3194,7 +3184,7 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt,
 	 * does not exist, and will also acquire a lock on the object to guard
 	 * against concurrent DROP and ALTER EXTENSION ADD/DROP operations.
 	 */
-	object = get_object_address(stmt->objtype, stmt->objname, stmt->objargs,
+	object = get_object_address(stmt->objtype, stmt->object,
 								&relation, ShareUpdateExclusiveLock, false);
 
 	Assert(object.objectSubId == 0);
@@ -3203,7 +3193,7 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt,
 
 	/* Permission check: must own target object, too */
 	check_object_ownership(GetUserId(), stmt->objtype, object,
-						   stmt->objname, stmt->objargs, relation);
+						   stmt->object, relation);
 
 	/*
 	 * Check existing extension membership.
@@ -3239,6 +3229,16 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt,
 		 * OK, add the dependency.
 		 */
 		recordDependencyOn(&object, &extension, DEPENDENCY_EXTENSION);
+
+		/*
+		 * Also record the initial ACL on the object, if any.
+		 *
+		 * Note that this will handle the object's ACLs, as well as any ACLs
+		 * on object subIds.  (In other words, when the object is a table,
+		 * this will record the table's ACL and the ACLs for the columns on
+		 * the table, if any).
+		 */
+		recordExtObjInitPriv(object.objectId, object.classId);
 	}
 	else
 	{
@@ -3266,6 +3266,16 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt,
 		 */
 		if (object.classId == RelationRelationId)
 			extension_config_remove(extension.objectId, object.objectId);
+
+		/*
+		 * Remove all the initial ACLs, if any.
+		 *
+		 * Note that this will remove the object's ACLs, as well as any ACLs
+		 * on object subIds.  (In other words, when the object is a table,
+		 * this will remove the table's ACL and the ACLs for the columns on
+		 * the table, if any).
+		 */
+		removeExtObjInitPriv(object.objectId, object.classId);
 	}
 
 	InvokeObjectPostAlterHook(ExtensionRelationId, extension.objectId, 0);

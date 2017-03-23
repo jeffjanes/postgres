@@ -394,8 +394,8 @@ SELECT name, double_salary(emp.*) AS dream
     <para>
      Notice the use of the syntax <literal>$1.salary</literal>
      to select one field of the argument row value.  Also notice
-     how the calling <command>SELECT</> command uses <literal>*</>
-     to select
+     how the calling <command>SELECT</> command
+     uses <replaceable>table_name</><literal>.*</> to select
      the entire current row of a table as a composite value.  The table
      row can alternatively be referenced using just the table name,
      like this:
@@ -405,6 +405,8 @@ SELECT name, double_salary(emp) AS dream
     WHERE emp.cubicle ~= point '(2,1)';
 </screen>
      but this usage is deprecated since it's easy to get confused.
+     (See <xref linkend="rowtypes-usage"> for details about these
+     two notations for the composite value of a table row.)
     </para>
 
     <para>
@@ -479,7 +481,8 @@ $$ LANGUAGE SQL;
     </para>
 
     <para>
-     We could call this function directly in either of two ways:
+     We could call this function directly either by using it in
+     a value expression:
 
 <screen>
 SELECT new_emp();
@@ -487,7 +490,11 @@ SELECT new_emp();
          new_emp
 --------------------------
  (None,1000.0,25,"(2,2)")
+</screen>
 
+     or by calling it as a table function:
+
+<screen>
 SELECT * FROM new_emp();
 
  name | salary | age | cubicle
@@ -524,12 +531,7 @@ LINE 1: SELECT new_emp().name;
     </para>
 
     <para>
-     Another option is to use
-     functional notation for extracting an attribute.  The  simple  way
-     to explain this is that we can use the
-     notations <literal><replaceable>attribute</>(<replaceable>table</>)</>
-     and  <literal><replaceable>table</>.<replaceable>attribute</></>
-     interchangeably.
+     Another option is to use functional notation for extracting an attribute:
 
 <screen>
 SELECT name(new_emp());
@@ -539,49 +541,9 @@ SELECT name(new_emp());
  None
 </screen>
 
-<screen>
--- This is the same as:
--- SELECT emp.name AS youngster FROM emp WHERE emp.age &lt; 30;
-
-SELECT name(emp) AS youngster FROM emp WHERE age(emp) &lt; 30;
-
- youngster
------------
- Sam
- Andy
-</screen>
+     As explained in <xref linkend="rowtypes-usage">, the field notation and
+     functional notation are equivalent.
     </para>
-
-    <tip>
-     <para>
-      The equivalence between functional notation and attribute notation
-      makes it possible to use functions on composite types to emulate
-      <quote>computed fields</>.
-      <indexterm>
-       <primary>computed field</primary>
-      </indexterm>
-      <indexterm>
-       <primary>field</primary>
-       <secondary>computed</secondary>
-      </indexterm>
-      For example, using the previous definition
-      for <literal>double_salary(emp)</>, we can write
-
-<screen>
-SELECT emp.name, emp.double_salary FROM emp;
-</screen>
-
-      An application using this wouldn't need to be directly aware that
-      <literal>double_salary</> isn't a real column of the table.
-      (You can also emulate computed fields with views.)
-     </para>
-
-     <para>
-      Because of this behavior, it's unwise to give a function that takes
-      a single composite-type argument the same name as any of the fields of
-      that composite type.
-     </para>
-    </tip>
 
     <para>
      Another way to use a function returning a composite type is to pass the
@@ -598,12 +560,6 @@ SELECT getname(new_emp());
  None
 (1 row)
 </screen>
-    </para>
-
-    <para>
-     Still another way to use a function that returns a composite type is to
-     call it as a table function, as described in <xref
-     linkend="xfunc-sql-table-functions">.
     </para>
    </sect2>
 
@@ -1006,12 +962,11 @@ SELECT name, child FROM nodes, LATERAL listchildren(name) AS child;
     </para>
 
     <para>
-     Currently, functions returning sets can also be called in the select list
+     Functions returning sets can also be called in the select list
      of a query.  For each row that the query
-     generates by itself, the function returning set is invoked, and an output
-     row is generated for each element of the function's result set. Note,
-     however, that this capability is deprecated and might be removed in future
-     releases. The previous example could also be done with queries like
+     generates by itself, the set-returning function is invoked, and an output
+     row is generated for each element of the function's result set.
+     The previous example could also be done with queries like
      these:
 
 <screen>
@@ -1042,6 +997,65 @@ SELECT name, listchildren(name) FROM nodes;
      the <literal>LATERAL</> syntax.
     </para>
 
+    <para>
+     If there is more than one set-returning function in the query's select
+     list, the behavior is similar to what you get from putting the functions
+     into a single <literal>LATERAL ROWS FROM( ... )</> <literal>FROM</>-clause
+     item.  For each row from the underlying query, there is an output row
+     using the first result from each function, then an output row using the
+     second result, and so on.  If some of the set-returning functions
+     produce fewer outputs than others, null values are substituted for the
+     missing data, so that the total number of rows emitted for one
+     underlying row is the same as for the set-returning function that
+     produced the most outputs.  Thus the set-returning functions
+     run <quote>in lockstep</> until they are all exhausted, and then
+     execution continues with the next underlying row.
+    </para>
+
+    <para>
+     Set-returning functions can be nested in a select list, although that is
+     not allowed in <literal>FROM</>-clause items.  In such cases, each level
+     of nesting is treated separately, as though it were
+     a separate <literal>LATERAL ROWS FROM( ... )</> item.  For example, in
+<programlisting>
+SELECT srf1(srf2(x), srf3(y)), srf4(srf5(z)) FROM tab;
+</programlisting>
+     the set-returning functions <function>srf2</>, <function>srf3</>,
+     and <function>srf5</> would be run in lockstep for each row
+     of <structname>tab</>, and then <function>srf1</> and <function>srf4</>
+     would be applied in lockstep to each row produced by the lower
+     functions.
+    </para>
+
+    <para>
+     This behavior also means that set-returning functions will be evaluated
+     even when it might appear that they should be skipped because of a
+     conditional-evaluation construct, such as <literal>CASE</>
+     or <literal>COALESCE</>.  For example, consider
+<programlisting>
+SELECT x, CASE WHEN x &gt; 0 THEN generate_series(1, 5) ELSE 0 END FROM tab;
+</programlisting>
+     It might seem that this should produce five repetitions of input
+     rows that have <literal>x &gt; 0</>, and a single repetition of those
+     that do not; but actually it will produce five repetitions of every
+     input row.  This is because <function>generate_series()</> is run first,
+     and then the <literal>CASE</> expression is applied to its result rows.
+     The behavior is thus comparable to
+<programlisting>
+SELECT x, CASE WHEN x &gt; 0 THEN g ELSE 0 END
+  FROM tab, LATERAL generate_series(1,5) AS g;
+</programlisting>
+     It would be exactly the same, except that in this specific example,
+     the planner could choose to put <structname>g</> on the outside of the
+     nestloop join, since <structname>g</> has no actual lateral dependency
+     on <structname>tab</>.  That would result in a different output row
+     order.  Set-returning functions in the select list are always evaluated
+     as though they are on the inside of a nestloop join with the rest of
+     the <literal>FROM</> clause, so that the function(s) are run to
+     completion before the next row from the <literal>FROM</> clause is
+     considered.
+    </para>
+
     <note>
      <para>
       If a function's last command is <command>INSERT</>, <command>UPDATE</>,
@@ -1056,14 +1070,19 @@ SELECT name, listchildren(name) FROM nodes;
 
     <note>
      <para>
-      The key problem with using set-returning functions in the select list,
-      rather than the <literal>FROM</> clause, is that putting more than one
-      set-returning function in the same select list does not behave very
-      sensibly.  (What you actually get if you do so is a number of output
-      rows equal to the least common multiple of the numbers of rows produced
-      by each set-returning function.)  The <literal>LATERAL</> syntax
-      produces less surprising results when calling multiple set-returning
-      functions, and should usually be used instead.
+      Before <productname>PostgreSQL</> 10, putting more than one
+      set-returning function in the same select list did not behave very
+      sensibly unless they always produced equal numbers of rows.  Otherwise,
+      what you got was a number of output rows equal to the least common
+      multiple of the numbers of rows produced by the set-returning
+      functions.  Also, nested set-returning functions did not work as
+      described above; instead, a set-returning function could have at most
+      one set-returning argument, and each nest of set-returning functions
+      was run independently.  The behavior for conditional execution
+      (set-returning functions inside <literal>CASE</> etc) was different too.
+      Use of the <literal>LATERAL</> syntax is recommended when writing
+      queries that need to work in older <productname>PostgreSQL</> versions,
+      because that will give consistent results across different versions.
      </para>
     </note>
    </sect2>
@@ -2369,18 +2388,23 @@ PG_FUNCTION_INFO_V1(copytext);
 Datum
 copytext(PG_FUNCTION_ARGS)
 {
-    text     *t = PG_GETARG_TEXT_P(0);
+    text     *t = PG_GETARG_TEXT_PP(0);
+
     /*
-     * VARSIZE is the total size of the struct in bytes.
+     * VARSIZE_ANY_EXHDR is the size of the struct in bytes, minus the
+     * VARHDRSZ or VARHDRSZ_SHORT of its header.  Construct the copy with a
+     * full-length header.
      */
-    text     *new_t = (text *) palloc(VARSIZE(t));
-    SET_VARSIZE(new_t, VARSIZE(t));
+    text     *new_t = (text *) palloc(VARSIZE_ANY_EXHDR(t) + VARHDRSZ);
+    SET_VARSIZE(new_t, VARSIZE_ANY_EXHDR(t) + VARHDRSZ);
+
     /*
-     * VARDATA is a pointer to the data region of the struct.
+     * VARDATA is a pointer to the data region of the new struct.  The source
+     * could be a short datum, so retrieve its data through VARDATA_ANY.
      */
     memcpy((void *) VARDATA(new_t), /* destination */
-           (void *) VARDATA(t),     /* source */
-           VARSIZE(t) - VARHDRSZ);  /* how many bytes */
+           (void *) VARDATA_ANY(t), /* source */
+           VARSIZE_ANY_EXHDR(t));   /* how many bytes */
     PG_RETURN_TEXT_P(new_t);
 }
 
@@ -2389,15 +2413,16 @@ PG_FUNCTION_INFO_V1(concat_text);
 Datum
 concat_text(PG_FUNCTION_ARGS)
 {
-    text  *arg1 = PG_GETARG_TEXT_P(0);
-    text  *arg2 = PG_GETARG_TEXT_P(1);
-    int32 new_text_size = VARSIZE(arg1) + VARSIZE(arg2) - VARHDRSZ;
+    text  *arg1 = PG_GETARG_TEXT_PP(0);
+    text  *arg2 = PG_GETARG_TEXT_PP(1);
+    int32 arg1_size = VARSIZE_ANY_EXHDR(arg1);
+    int32 arg2_size = VARSIZE_ANY_EXHDR(arg2);
+    int32 new_text_size = arg1_size + arg2_size + VARHDRSZ;
     text *new_text = (text *) palloc(new_text_size);
 
     SET_VARSIZE(new_text, new_text_size);
-    memcpy(VARDATA(new_text), VARDATA(arg1), VARSIZE(arg1) - VARHDRSZ);
-    memcpy(VARDATA(new_text) + (VARSIZE(arg1) - VARHDRSZ),
-           VARDATA(arg2), VARSIZE(arg2) - VARHDRSZ);
+    memcpy(VARDATA(new_text), VARDATA_ANY(arg1), arg1_size);
+    memcpy(VARDATA(new_text) + arg1_size, VARDATA_ANY(arg2), arg2_size);
     PG_RETURN_TEXT_P(new_text);
 }
 ]]>
@@ -2870,7 +2895,7 @@ HeapTupleGetDatum(HeapTuple tuple)
      is used to hold a pointer to <structname>FuncCallContext</>
      across calls.
 <programlisting>
-typedef struct
+typedef struct FuncCallContext
 {
     /*
      * Number of times we've been called before
@@ -2878,7 +2903,7 @@ typedef struct
      * call_cntr is initialized to 0 for you by SRF_FIRSTCALL_INIT(), and
      * incremented for you every time SRF_RETURN_NEXT() is called.
      */
-    uint32 call_cntr;
+    uint64 call_cntr;
 
     /*
      * OPTIONAL maximum number of calls
@@ -2887,7 +2912,7 @@ typedef struct
      * If not set, you must provide alternative means to know when the
      * function is done.
      */
-    uint32 max_calls;
+    uint64 max_calls;
 
     /*
      * OPTIONAL pointer to result slot

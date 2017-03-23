@@ -4,7 +4,7 @@
  *	  fetch tuples from a GIN scan.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -120,7 +120,7 @@ collectMatchBitmap(GinBtreeData *btree, GinBtreeStack *stack,
 	Form_pg_attribute attr;
 
 	/* Initialize empty bitmap result */
-	scanEntry->matchBitmap = tbm_create(work_mem * 1024L);
+	scanEntry->matchBitmap = tbm_create(work_mem * 1024L, NULL);
 
 	/* Null query cannot partial-match anything */
 	if (scanEntry->isPartialMatch &&

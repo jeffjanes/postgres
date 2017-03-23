@@ -14,7 +14,7 @@
  * plenty of locality of access.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -101,18 +101,16 @@ _h_spool(HSpool *hspool, ItemPointer self, Datum *values, bool *isnull)
  * create an entire index.
  */
 void
-_h_indexbuild(HSpool *hspool)
+_h_indexbuild(HSpool *hspool, Relation heapRel)
 {
 	IndexTuple	itup;
-	bool		should_free;
 #ifdef USE_ASSERT_CHECKING
 	uint32		hashkey = 0;
 #endif
 
 	tuplesort_performsort(hspool->sortstate);
 
-	while ((itup = tuplesort_getindextuple(hspool->sortstate,
-										   true, &should_free)) != NULL)
+	while ((itup = tuplesort_getindextuple(hspool->sortstate, true)) != NULL)
 	{
 		/*
 		 * Technically, it isn't critical that hash keys be found in sorted
@@ -128,8 +126,6 @@ _h_indexbuild(HSpool *hspool)
 		Assert(hashkey >= lasthashkey);
 #endif
 
-		_hash_doinsert(hspool->index, itup);
-		if (should_free)
-			pfree(itup);
+		_hash_doinsert(hspool->index, itup, heapRel);
 	}
 }

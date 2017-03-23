@@ -6,7 +6,7 @@
  * and interpreting backend output.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/string_utils.c
@@ -173,7 +173,7 @@ fmtQualifiedId(int remoteVersion, const char *schema, const char *id)
  * returned by PQserverVersion()) as a string.  This exists mainly to
  * encapsulate knowledge about two-part vs. three-part version numbers.
  *
- * For re-entrancy, caller must supply the buffer the string is put in.
+ * For reentrancy, caller must supply the buffer the string is put in.
  * Recommended size of the buffer is 32 bytes.
  *
  * Returns address of 'buf', as a notational convenience.

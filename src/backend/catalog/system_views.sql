@@ -1,7 +1,7 @@
 /*
  * PostgreSQL System Views
  *
- * Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  * src/backend/catalog/system_views.sql
  *
@@ -76,6 +76,12 @@ CREATE VIEW pg_policies AS
         C.relname AS tablename,
         pol.polname AS policyname,
         CASE
+            WHEN pol.polpermissive THEN
+                'PERMISSIVE'
+            ELSE
+                'RESTRICTIVE'
+        END AS permissive,
+        CASE
             WHEN pol.polroles = '{0}' THEN
                 string_to_array('public', '')
             ELSE
@@ -130,7 +136,7 @@ CREATE VIEW pg_tables AS
         C.relrowsecurity AS rowsecurity
     FROM pg_class C LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
          LEFT JOIN pg_tablespace T ON (T.oid = C.reltablespace)
-    WHERE C.relkind = 'r';
+    WHERE C.relkind IN ('r', 'p');
 
 CREATE VIEW pg_matviews AS
     SELECT
@@ -157,6 +163,28 @@ CREATE VIEW pg_indexes AS
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
          LEFT JOIN pg_tablespace T ON (T.oid = I.reltablespace)
     WHERE C.relkind IN ('r', 'm') AND I.relkind = 'i';
+
+CREATE OR REPLACE VIEW pg_sequences AS
+    SELECT
+        N.nspname AS schemaname,
+        C.relname AS sequencename,
+        pg_get_userbyid(C.relowner) AS sequenceowner,
+        S.seqtypid::regtype AS data_type,
+        S.seqstart AS start_value,
+        S.seqmin AS min_value,
+        S.seqmax AS max_value,
+        S.seqincrement AS increment_by,
+        S.seqcycle AS cycle,
+        S.seqcache AS cache_size,
+        CASE
+            WHEN has_sequence_privilege(C.oid, 'SELECT,USAGE'::text)
+                THEN pg_sequence_last_value(C.oid)
+            ELSE NULL
+        END AS last_value
+    FROM pg_sequence S JOIN pg_class C ON (C.oid = S.seqrelid)
+         LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+    WHERE NOT pg_is_other_temp_schema(N.oid)
+          AND relkind = 'S';
 
 CREATE VIEW pg_stats WITH (security_barrier) AS
     SELECT
@@ -225,6 +253,15 @@ CREATE VIEW pg_stats WITH (security_barrier) AS
 
 REVOKE ALL on pg_statistic FROM public;
 
+CREATE VIEW pg_publication_tables AS
+    SELECT
+        P.pubname AS pubname,
+        N.nspname AS schemaname,
+        C.relname AS tablename
+    FROM pg_publication P, pg_class C
+         JOIN pg_namespace N ON (N.oid = C.relnamespace)
+    WHERE C.oid IN (SELECT relid FROM pg_get_publication_tables(P.pubname));
+
 CREATE VIEW pg_locks AS
     SELECT * FROM pg_lock_status() AS L;
 
@@ -257,7 +294,7 @@ CREATE VIEW pg_prepared_statements AS
 CREATE VIEW pg_seclabels AS
 SELECT
 	l.objoid, l.classoid, l.objsubid,
-	CASE WHEN rel.relkind = 'r' THEN 'table'::text
+	CASE WHEN rel.relkind IN ('r', 'p') THEN 'table'::text
 		 WHEN rel.relkind = 'v' THEN 'view'::text
 		 WHEN rel.relkind = 'm' THEN 'materialized view'::text
 		 WHEN rel.relkind = 'S' THEN 'sequence'::text
@@ -426,6 +463,12 @@ CREATE VIEW pg_file_settings AS
 
 REVOKE ALL on pg_file_settings FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_show_all_file_settings() FROM PUBLIC;
+
+CREATE VIEW pg_hba_file_rules AS
+   SELECT * FROM pg_hba_file_rules() AS A;
+
+REVOKE ALL on pg_hba_file_rules FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_hba_file_rules() FROM PUBLIC;
 
 CREATE VIEW pg_timezone_abbrevs AS
     SELECT * FROM pg_timezone_abbrevs();
@@ -662,6 +705,9 @@ CREATE VIEW pg_stat_replication AS
             W.write_location,
             W.flush_location,
             W.replay_location,
+            W.write_lag,
+            W.flush_lag,
+            W.replay_lag,
             W.sync_priority,
             W.sync_state
     FROM pg_stat_get_activity(NULL) AS S
@@ -685,6 +731,21 @@ CREATE VIEW pg_stat_wal_receiver AS
     FROM pg_stat_get_wal_receiver() s
     WHERE s.pid IS NOT NULL;
 
+CREATE VIEW pg_stat_subscription AS
+    SELECT
+            su.oid AS subid,
+            su.subname,
+            st.pid,
+            st.relid,
+            st.received_lsn,
+            st.last_msg_send_time,
+            st.last_msg_receipt_time,
+            st.latest_end_lsn,
+            st.latest_end_time
+    FROM pg_subscription su
+            LEFT JOIN pg_stat_get_subscription(NULL) st
+                      ON (st.subid = su.oid);
+
 CREATE VIEW pg_stat_ssl AS
     SELECT
             S.pid,
@@ -703,6 +764,7 @@ CREATE VIEW pg_replication_slots AS
             L.slot_type,
             L.datoid,
             D.datname AS database,
+            L.temporary,
             L.active,
             L.active_pid,
             L.xmin,
@@ -842,6 +904,12 @@ CREATE VIEW pg_replication_origin_status AS
 
 REVOKE ALL ON pg_replication_origin_status FROM public;
 
+-- All columns of pg_subscription except subconninfo are readable.
+REVOKE ALL ON pg_subscription FROM public;
+GRANT SELECT (subdbid, subname, subowner, subenabled, subslotname, subpublications)
+    ON pg_subscription TO public;
+
+
 --
 -- We have a few function definitions in here, too.
 -- At some point there might be enough to justify breaking them out into
@@ -924,6 +992,12 @@ CREATE OR REPLACE FUNCTION
   RETURNS pg_lsn STRICT VOLATILE LANGUAGE internal AS 'pg_start_backup'
   PARALLEL RESTRICTED;
 
+CREATE OR REPLACE FUNCTION pg_stop_backup (
+        exclusive boolean, wait_for_archive boolean DEFAULT true,
+        OUT lsn pg_lsn, OUT labelfile text, OUT spcmapfile text)
+  RETURNS SETOF record STRICT VOLATILE LANGUAGE internal as 'pg_stop_backup_v2'
+  PARALLEL RESTRICTED;
+
 -- legacy definition for compatibility with 9.3
 CREATE OR REPLACE FUNCTION
   json_populate_record(base anyelement, from_json json, use_json_as_text boolean DEFAULT false)
@@ -968,11 +1042,21 @@ AS 'pg_logical_slot_peek_binary_changes';
 
 CREATE OR REPLACE FUNCTION pg_create_physical_replication_slot(
     IN slot_name name, IN immediately_reserve boolean DEFAULT false,
-    OUT slot_name name, OUT xlog_position pg_lsn)
+    IN temporary boolean DEFAULT false,
+    OUT slot_name name, OUT wal_position pg_lsn)
 RETURNS RECORD
 LANGUAGE INTERNAL
 STRICT VOLATILE
 AS 'pg_create_physical_replication_slot';
+
+CREATE OR REPLACE FUNCTION pg_create_logical_replication_slot(
+    IN slot_name name, IN plugin name,
+    IN temporary boolean DEFAULT false,
+    OUT slot_name text, OUT wal_position pg_lsn)
+RETURNS RECORD
+LANGUAGE INTERNAL
+STRICT VOLATILE
+AS 'pg_create_logical_replication_slot';
 
 CREATE OR REPLACE FUNCTION
   make_interval(years int4 DEFAULT 0, months int4 DEFAULT 0, weeks int4 DEFAULT 0,
@@ -1014,15 +1098,20 @@ AS 'jsonb_insert';
 -- available to superuser / cluster owner, if they choose.
 REVOKE EXECUTE ON FUNCTION pg_start_backup(text, boolean, boolean) FROM public;
 REVOKE EXECUTE ON FUNCTION pg_stop_backup() FROM public;
-REVOKE EXECUTE ON FUNCTION pg_stop_backup(boolean) FROM public;
+REVOKE EXECUTE ON FUNCTION pg_stop_backup(boolean, boolean) FROM public;
 REVOKE EXECUTE ON FUNCTION pg_create_restore_point(text) FROM public;
-REVOKE EXECUTE ON FUNCTION pg_switch_xlog() FROM public;
-REVOKE EXECUTE ON FUNCTION pg_xlog_replay_pause() FROM public;
-REVOKE EXECUTE ON FUNCTION pg_xlog_replay_resume() FROM public;
+REVOKE EXECUTE ON FUNCTION pg_switch_wal() FROM public;
+REVOKE EXECUTE ON FUNCTION pg_wal_replay_pause() FROM public;
+REVOKE EXECUTE ON FUNCTION pg_wal_replay_resume() FROM public;
 REVOKE EXECUTE ON FUNCTION pg_rotate_logfile() FROM public;
 REVOKE EXECUTE ON FUNCTION pg_reload_conf() FROM public;
+REVOKE EXECUTE ON FUNCTION pg_current_logfile() FROM public;
+REVOKE EXECUTE ON FUNCTION pg_current_logfile(text) FROM public;
 
 REVOKE EXECUTE ON FUNCTION pg_stat_reset() FROM public;
 REVOKE EXECUTE ON FUNCTION pg_stat_reset_shared(text) FROM public;
 REVOKE EXECUTE ON FUNCTION pg_stat_reset_single_table_counters(oid) FROM public;
 REVOKE EXECUTE ON FUNCTION pg_stat_reset_single_function_counters(oid) FROM public;
+
+REVOKE EXECUTE ON FUNCTION pg_ls_logdir() FROM public;
+REVOKE EXECUTE ON FUNCTION pg_ls_waldir() FROM public;

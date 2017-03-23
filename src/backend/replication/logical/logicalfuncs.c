@@ -6,7 +6,7 @@
  *	   logical replication slots via SQL.
  *
  *
- * Copyright (c) 2012-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logicalfuncs.c
@@ -37,6 +37,7 @@
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/pg_lsn.h"
+#include "utils/regproc.h"
 #include "utils/resowner.h"
 #include "utils/lsyscache.h"
 
@@ -234,11 +235,14 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 	rsinfo->setResult = p->tupstore;
 	rsinfo->setDesc = p->tupdesc;
 
-	/* compute the current end-of-wal */
+	/*
+	 * Compute the current end-of-wal and maintain ThisTimeLineID.
+	 * RecoveryInProgress() will update ThisTimeLineID on promotion.
+	 */
 	if (!RecoveryInProgress())
 		end_of_wal = GetFlushRecPtr();
 	else
-		end_of_wal = GetXLogReplayRecPtr(NULL);
+		end_of_wal = GetXLogReplayRecPtr(&ThisTimeLineID);
 
 	ReplicationSlotAcquire(NameStr(*name));
 
@@ -279,6 +283,7 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 		/* invalidate non-timetravel entries */
 		InvalidateSystemCaches();
 
+		/* Decode until we run out of records */
 		while ((startptr != InvalidXLogRecPtr && startptr < end_of_wal) ||
 			   (ctx->reader->EndRecPtr != InvalidXLogRecPtr && ctx->reader->EndRecPtr < end_of_wal))
 		{

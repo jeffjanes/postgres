@@ -11,7 +11,7 @@
  *			- Add a pgstat config column to pg_database, so this
  *			  entire thing can be enabled/disabled on a per db basis.
  *
- *	Copyright (c) 2001-2016, PostgreSQL Global Development Group
+ *	Copyright (c) 2001-2017, PostgreSQL Global Development Group
  *
  *	src/backend/postmaster/pgstat.c
  * ----------
@@ -280,6 +280,7 @@ static const char *pgstat_get_wait_activity(WaitEventActivity w);
 static const char *pgstat_get_wait_client(WaitEventClient w);
 static const char *pgstat_get_wait_ipc(WaitEventIPC w);
 static const char *pgstat_get_wait_timeout(WaitEventTimeout w);
+static const char *pgstat_get_wait_io(WaitEventIO w);
 
 static void pgstat_setheader(PgStat_MsgHdr *hdr, StatMsgType mtype);
 static void pgstat_send(void *msg, int len);
@@ -1802,7 +1803,7 @@ add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level)
  * pgstat_count_heap_insert - count a tuple insertion of n tuples
  */
 void
-pgstat_count_heap_insert(Relation rel, int n)
+pgstat_count_heap_insert(Relation rel, PgStat_Counter n)
 {
 	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 
@@ -2411,7 +2412,7 @@ pgstat_fetch_stat_beentry(int beid)
 /* ----------
  * pgstat_fetch_stat_local_beentry() -
  *
- *	Like pgstat_fetch_stat_beentry() but with locally computed addtions (like
+ *	Like pgstat_fetch_stat_beentry() but with locally computed additions (like
  *	xid and xmin values of the backend)
  *
  *	NB: caller is responsible for a check if the user is permitted to see
@@ -3152,11 +3153,8 @@ pgstat_get_wait_event_type(uint32 wait_event_info)
 
 	switch (classId)
 	{
-		case PG_WAIT_LWLOCK_NAMED:
-			event_type = "LWLockNamed";
-			break;
-		case PG_WAIT_LWLOCK_TRANCHE:
-			event_type = "LWLockTranche";
+		case PG_WAIT_LWLOCK:
+			event_type = "LWLock";
 			break;
 		case PG_WAIT_LOCK:
 			event_type = "Lock";
@@ -3178,6 +3176,9 @@ pgstat_get_wait_event_type(uint32 wait_event_info)
 			break;
 		case PG_WAIT_TIMEOUT:
 			event_type = "Timeout";
+			break;
+		case PG_WAIT_IO:
+			event_type = "IO";
 			break;
 		default:
 			event_type = "???";
@@ -3209,8 +3210,7 @@ pgstat_get_wait_event(uint32 wait_event_info)
 
 	switch (classId)
 	{
-		case PG_WAIT_LWLOCK_NAMED:
-		case PG_WAIT_LWLOCK_TRANCHE:
+		case PG_WAIT_LWLOCK:
 			event_name = GetLWLockIdentifier(classId, eventId);
 			break;
 		case PG_WAIT_LOCK:
@@ -3248,6 +3248,13 @@ pgstat_get_wait_event(uint32 wait_event_info)
 				WaitEventTimeout	w = (WaitEventTimeout) wait_event_info;
 
 				event_name = pgstat_get_wait_timeout(w);
+				break;
+			}
+		case PG_WAIT_IO:
+			{
+				WaitEventIO w = (WaitEventIO) wait_event_info;
+
+				event_name = pgstat_get_wait_io(w);
 				break;
 			}
 		default:
@@ -3307,6 +3314,12 @@ pgstat_get_wait_activity(WaitEventActivity w)
 		case WAIT_EVENT_WAL_WRITER_MAIN:
 			event_name = "WalWriterMain";
 			break;
+		case WAIT_EVENT_LOGICAL_LAUNCHER_MAIN:
+			event_name = "LogicalLauncherMain";
+			break;
+		case WAIT_EVENT_LOGICAL_APPLY_MAIN:
+			event_name = "LogicalApplyMain";
+			break;
 		/* no default case, so that compiler will warn */
 	}
 
@@ -3337,6 +3350,9 @@ pgstat_get_wait_client(WaitEventClient w)
 			break;
 		case WAIT_EVENT_WAL_RECEIVER_WAIT_START:
 			event_name = "WalReceiverWaitStart";
+			break;
+		case WAIT_EVENT_LIBPQWALRECEIVER:
+			event_name = "LibPQWalReceiver";
 			break;
 		case WAIT_EVENT_WAL_SENDER_WAIT_WAL:
 			event_name = "WalSenderWaitForWAL";
@@ -3369,6 +3385,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_BGWORKER_STARTUP:
 			event_name = "BgWorkerStartup";
 			break;
+		case WAIT_EVENT_BTREE_PAGE:
+			event_name = "BtreePage";
+			break;
 		case WAIT_EVENT_EXECUTE_GATHER:
 			event_name = "ExecuteGather";
 			break;
@@ -3387,11 +3406,20 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_PARALLEL_FINISH:
 			event_name = "ParallelFinish";
 			break;
+		case WAIT_EVENT_PARALLEL_BITMAP_SCAN:
+			event_name = "ParallelBitmapScan";
+			break;
 		case WAIT_EVENT_SAFE_SNAPSHOT:
 			event_name = "SafeSnapshot";
 			break;
 		case WAIT_EVENT_SYNC_REP:
 			event_name = "SyncRep";
+			break;
+		case WAIT_EVENT_LOGICAL_SYNC_DATA:
+			event_name = "LogicalSyncData";
+			break;
+		case WAIT_EVENT_LOGICAL_SYNC_STATE_CHANGE:
+			event_name = "LogicalSyncStateChange";
 			break;
 		/* no default case, so that compiler will warn */
 	}
@@ -3426,6 +3454,228 @@ pgstat_get_wait_timeout(WaitEventTimeout w)
 
 	return event_name;
 }
+
+/* ----------
+ * pgstat_get_wait_io() -
+ *
+ * Convert WaitEventIO to string.
+ * ----------
+ */
+static const char *
+pgstat_get_wait_io(WaitEventIO w)
+{
+	const char *event_name = "unknown wait event";
+
+	switch (w)
+	{
+		case WAIT_EVENT_BUFFILE_READ:
+			event_name = "BufFileRead";
+			break;
+		case WAIT_EVENT_BUFFILE_WRITE:
+			event_name = "BufFileWrite";
+			break;
+		case WAIT_EVENT_CONTROL_FILE_READ:
+			event_name = "ControlFileRead";
+			break;
+		case WAIT_EVENT_CONTROL_FILE_SYNC:
+			event_name = "ControlFileSync";
+			break;
+		case WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE:
+			event_name = "ControlFileSyncUpdate";
+			break;
+		case WAIT_EVENT_CONTROL_FILE_WRITE:
+			event_name = "ControlFileWrite";
+			break;
+		case WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE:
+			event_name = "ControlFileWriteUpdate";
+			break;
+		case WAIT_EVENT_COPY_FILE_READ:
+			event_name = "CopyFileRead";
+			break;
+		case WAIT_EVENT_COPY_FILE_WRITE:
+			event_name = "CopyFileWrite";
+			break;
+		case WAIT_EVENT_DATA_FILE_EXTEND:
+			event_name = "DataFileExtend";
+			break;
+		case WAIT_EVENT_DATA_FILE_FLUSH:
+			event_name = "DataFileFlush";
+			break;
+		case WAIT_EVENT_DATA_FILE_IMMEDIATE_SYNC:
+			event_name = "DataFileImmediateSync";
+			break;
+		case WAIT_EVENT_DATA_FILE_PREFETCH:
+			event_name = "DataFilePrefetch";
+			break;
+		case WAIT_EVENT_DATA_FILE_READ:
+			event_name = "DataFileRead";
+			break;
+		case WAIT_EVENT_DATA_FILE_SYNC:
+			event_name = "DataFileSync";
+			break;
+		case WAIT_EVENT_DATA_FILE_TRUNCATE:
+			event_name = "DataFileTruncate";
+			break;
+		case WAIT_EVENT_DATA_FILE_WRITE:
+			event_name = "DataFileWrite";
+			break;
+		case WAIT_EVENT_DSM_FILL_ZERO_WRITE:
+			event_name = "DSMFillZeroWrite";
+			break;
+		case WAIT_EVENT_LOCK_FILE_ADDTODATADIR_READ:
+			event_name = "LockFileAddToDataDirRead";
+			break;
+		case WAIT_EVENT_LOCK_FILE_ADDTODATADIR_SYNC:
+			event_name = "LockFileAddToDataDirSync";
+			break;
+		case WAIT_EVENT_LOCK_FILE_ADDTODATADIR_WRITE:
+			event_name = "LockFileAddToDataDirWrite";
+			break;
+		case WAIT_EVENT_LOCK_FILE_CREATE_READ:
+			event_name = "LockFileCreateRead";
+			break;
+		case WAIT_EVENT_LOCK_FILE_CREATE_SYNC:
+			event_name = "LockFileCreateSync";
+			break;
+		case WAIT_EVENT_LOCK_FILE_CREATE_WRITE:
+			event_name = "LockFileCreateWRITE";
+			break;
+		case WAIT_EVENT_LOCK_FILE_RECHECKDATADIR_READ:
+			event_name = "LockFileReCheckDataDirRead";
+			break;
+		case WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC:
+			event_name = "LogicalRewriteCheckpointSync";
+			break;
+		case WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC:
+			event_name = "LogicalRewriteMappingSync";
+			break;
+		case WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE:
+			event_name = "LogicalRewriteMappingWrite";
+			break;
+		case WAIT_EVENT_LOGICAL_REWRITE_SYNC:
+			event_name = "LogicalRewriteSync";
+			break;
+		case WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE:
+			event_name = "LogicalRewriteTruncate";
+			break;
+		case WAIT_EVENT_LOGICAL_REWRITE_WRITE:
+			event_name = "LogicalRewriteWrite";
+			break;
+		case WAIT_EVENT_RELATION_MAP_READ:
+			event_name = "RelationMapRead";
+			break;
+		case WAIT_EVENT_RELATION_MAP_SYNC:
+			event_name = "RelationMapSync";
+			break;
+		case WAIT_EVENT_RELATION_MAP_WRITE:
+			event_name = "RelationMapWrite";
+			break;
+		case WAIT_EVENT_REORDER_BUFFER_READ:
+			event_name = "ReorderBufferRead";
+			break;
+		case WAIT_EVENT_REORDER_BUFFER_WRITE:
+			event_name = "ReorderBufferWrite";
+			break;
+		case WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ:
+			event_name = "ReorderLogicalMappingRead";
+			break;
+		case WAIT_EVENT_REPLICATION_SLOT_READ:
+			event_name = "ReplicationSlotRead";
+			break;
+		case WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC:
+			event_name = "ReplicationSlotRestoreSync";
+			break;
+		case WAIT_EVENT_REPLICATION_SLOT_SYNC:
+			event_name = "ReplicationSlotSync";
+			break;
+		case WAIT_EVENT_REPLICATION_SLOT_WRITE:
+			event_name = "ReplicationSlotWrite";
+			break;
+		case WAIT_EVENT_SLRU_FLUSH_SYNC:
+			event_name = "SLRUFlushSync";
+			break;
+		case WAIT_EVENT_SLRU_READ:
+			event_name = "SLRURead";
+			break;
+		case WAIT_EVENT_SLRU_SYNC:
+			event_name = "SLRUSync";
+			break;
+		case WAIT_EVENT_SLRU_WRITE:
+			event_name = "SLRUWrite";
+			break;
+		case WAIT_EVENT_SNAPBUILD_READ:
+			event_name = "SnapbuildRead";
+			break;
+		case WAIT_EVENT_SNAPBUILD_SYNC:
+			event_name = "SnapbuildSync";
+			break;
+		case WAIT_EVENT_SNAPBUILD_WRITE:
+			event_name = "SnapbuildWrite";
+			break;
+		case WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC:
+			event_name = "TimelineHistoryFileSync";
+			break;
+		case WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE:
+			event_name = "TimelineHistoryFileWrite";
+			break;
+		case WAIT_EVENT_TIMELINE_HISTORY_READ:
+			event_name = "TimelineHistoryRead";
+			break;
+		case WAIT_EVENT_TIMELINE_HISTORY_SYNC:
+			event_name = "TimelineHistorySync";
+			break;
+		case WAIT_EVENT_TIMELINE_HISTORY_WRITE:
+			event_name = "TimelineHistoryWrite";
+			break;
+		case WAIT_EVENT_TWOPHASE_FILE_READ:
+			event_name = "TwophaseFileRead";
+			break;
+		case WAIT_EVENT_TWOPHASE_FILE_SYNC:
+			event_name = "TwophaseFileSync";
+			break;
+		case WAIT_EVENT_TWOPHASE_FILE_WRITE:
+			event_name = "TwophaseFileWrite";
+			break;
+		case WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ:
+			event_name = "WALSenderTimelineHistoryRead";
+			break;
+		case WAIT_EVENT_WAL_BOOTSTRAP_SYNC:
+			event_name = "WALBootstrapSync";
+			break;
+		case WAIT_EVENT_WAL_BOOTSTRAP_WRITE:
+			event_name = "WALBootstrapWrite";
+			break;
+		case WAIT_EVENT_WAL_COPY_READ:
+			event_name = "WALCopyRead";
+			break;
+		case WAIT_EVENT_WAL_COPY_SYNC:
+			event_name = "WALCopySync";
+			break;
+		case WAIT_EVENT_WAL_COPY_WRITE:
+			event_name = "WALCopyWrite";
+			break;
+		case WAIT_EVENT_WAL_INIT_SYNC:
+			event_name = "WALInitSync";
+			break;
+		case WAIT_EVENT_WAL_INIT_WRITE:
+			event_name = "WALInitWrite";
+			break;
+		case WAIT_EVENT_WAL_READ:
+			event_name = "WALRead";
+			break;
+		case WAIT_EVENT_WAL_SYNC_METHOD_ASSIGN:
+			event_name = "WALSyncMethodAssign";
+			break;
+		case WAIT_EVENT_WAL_WRITE:
+			event_name = "WALWrite";
+			break;
+
+			/* no default case, so that compiler will warn */
+	}
+
+	return event_name;
+}
+
 
 /* ----------
  * pgstat_get_backend_current_activity() -

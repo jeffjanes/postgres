@@ -4,7 +4,7 @@
  *	  Sort the items of a dump into a safe order for dumping
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,12 +19,17 @@
 #include "pg_backup_utils.h"
 #include "pg_dump.h"
 
+#include "catalog/pg_class.h"
+
 /* translator: this is a module name */
 static const char *modulename = gettext_noop("sorter");
 
 /*
  * Sort priority for database object types.
  * Objects are sorted by type, and within a type by name.
+ *
+ * Because materialized views can potentially reference system views,
+ * DO_REFRESH_MATVIEW should always be the last thing on the list.
  *
  * NOTE: object-type priorities must match the section assignments made in
  * pg_dump.c; that is, PRE_DATA objects must sort before DO_PRE_DATA_BOUNDARY,
@@ -47,14 +52,15 @@ static const int dbObjectTypePriority[] =
 	11,							/* DO_CONVERSION */
 	18,							/* DO_TABLE */
 	20,							/* DO_ATTRDEF */
-	27,							/* DO_INDEX */
-	28,							/* DO_RULE */
-	29,							/* DO_TRIGGER */
-	26,							/* DO_CONSTRAINT */
-	30,							/* DO_FK_CONSTRAINT */
+	28,							/* DO_INDEX */
+	29,							/* DO_RULE */
+	30,							/* DO_TRIGGER */
+	27,							/* DO_CONSTRAINT */
+	31,							/* DO_FK_CONSTRAINT */
 	2,							/* DO_PROCLANG */
 	10,							/* DO_CAST */
 	23,							/* DO_TABLE_DATA */
+	24,							/* DO_SEQUENCE_SET */
 	19,							/* DO_DUMMY_TYPE */
 	12,							/* DO_TSPARSER */
 	14,							/* DO_TSDICT */
@@ -62,15 +68,18 @@ static const int dbObjectTypePriority[] =
 	15,							/* DO_TSCONFIG */
 	16,							/* DO_FDW */
 	17,							/* DO_FOREIGN_SERVER */
-	31,							/* DO_DEFAULT_ACL */
+	32,							/* DO_DEFAULT_ACL */
 	3,							/* DO_TRANSFORM */
 	21,							/* DO_BLOB */
-	24,							/* DO_BLOB_DATA */
+	25,							/* DO_BLOB_DATA */
 	22,							/* DO_PRE_DATA_BOUNDARY */
-	25,							/* DO_POST_DATA_BOUNDARY */
-	32,							/* DO_EVENT_TRIGGER */
-	33,							/* DO_REFRESH_MATVIEW */
-	34							/* DO_POLICY */
+	26,							/* DO_POST_DATA_BOUNDARY */
+	33,							/* DO_EVENT_TRIGGER */
+	38,							/* DO_REFRESH_MATVIEW */
+	34,							/* DO_POLICY */
+	35,							/* DO_PUBLICATION */
+	36,							/* DO_PUBLICATION_REL */
+	37							/* DO_SUBSCRIPTION */
 };
 
 static DumpId preDataBoundId;
@@ -785,6 +794,7 @@ repairViewRuleLoop(DumpableObject *viewobj,
 {
 	/* remove rule's dependency on view */
 	removeObjectDependency(ruleobj, viewobj->dumpId);
+	/* flags on the two objects are already set correctly for this case */
 }
 
 /*
@@ -804,27 +814,17 @@ repairViewRuleMultiLoop(DumpableObject *viewobj,
 {
 	TableInfo  *viewinfo = (TableInfo *) viewobj;
 	RuleInfo   *ruleinfo = (RuleInfo *) ruleobj;
-	int			i;
 
 	/* remove view's dependency on rule */
 	removeObjectDependency(viewobj, ruleobj->dumpId);
-	/* pretend view is a plain table and dump it that way */
-	viewinfo->relkind = 'r';	/* RELKIND_RELATION */
+	/* mark view to be printed with a dummy definition */
+	viewinfo->dummy_view = true;
 	/* mark rule as needing its own dump */
 	ruleinfo->separate = true;
-	/* move any reloptions from view to rule */
-	if (viewinfo->reloptions)
-	{
-		ruleinfo->reloptions = viewinfo->reloptions;
-		viewinfo->reloptions = NULL;
-	}
 	/* put back rule's dependency on view */
 	addObjectDependency(ruleobj, viewobj->dumpId);
 	/* now that rule is separate, it must be post-data */
 	addObjectDependency(ruleobj, postDataBoundId);
-	/* also, any triggers on the view must be dumped after the rule */
-	for (i = 0; i < viewinfo->numTriggers; i++)
-		addObjectDependency(&(viewinfo->triggers[i].dobj), ruleobj->dumpId);
 }
 
 /*
@@ -970,8 +970,8 @@ repairDependencyLoop(DumpableObject **loop,
 	if (nLoop == 2 &&
 		loop[0]->objType == DO_TABLE &&
 		loop[1]->objType == DO_RULE &&
-		(((TableInfo *) loop[0])->relkind == 'v' ||		/* RELKIND_VIEW */
-		 ((TableInfo *) loop[0])->relkind == 'm') &&	/* RELKIND_MATVIEW */
+		(((TableInfo *) loop[0])->relkind == RELKIND_VIEW ||
+		 ((TableInfo *) loop[0])->relkind == RELKIND_MATVIEW) &&
 		((RuleInfo *) loop[1])->ev_type == '1' &&
 		((RuleInfo *) loop[1])->is_instead &&
 		((RuleInfo *) loop[1])->ruletable == (TableInfo *) loop[0])
@@ -982,8 +982,8 @@ repairDependencyLoop(DumpableObject **loop,
 	if (nLoop == 2 &&
 		loop[1]->objType == DO_TABLE &&
 		loop[0]->objType == DO_RULE &&
-		(((TableInfo *) loop[1])->relkind == 'v' ||		/* RELKIND_VIEW */
-		 ((TableInfo *) loop[1])->relkind == 'm') &&	/* RELKIND_MATVIEW */
+		(((TableInfo *) loop[1])->relkind == RELKIND_VIEW ||
+		 ((TableInfo *) loop[1])->relkind == RELKIND_MATVIEW) &&
 		((RuleInfo *) loop[0])->ev_type == '1' &&
 		((RuleInfo *) loop[0])->is_instead &&
 		((RuleInfo *) loop[0])->ruletable == (TableInfo *) loop[1])
@@ -998,7 +998,7 @@ repairDependencyLoop(DumpableObject **loop,
 		for (i = 0; i < nLoop; i++)
 		{
 			if (loop[i]->objType == DO_TABLE &&
-				((TableInfo *) loop[i])->relkind == 'v')		/* RELKIND_VIEW */
+				((TableInfo *) loop[i])->relkind == RELKIND_VIEW)
 			{
 				for (j = 0; j < nLoop; j++)
 				{
@@ -1021,7 +1021,7 @@ repairDependencyLoop(DumpableObject **loop,
 		for (i = 0; i < nLoop; i++)
 		{
 			if (loop[i]->objType == DO_TABLE &&
-				((TableInfo *) loop[i])->relkind == 'm')		/* RELKIND_MATVIEW */
+				((TableInfo *) loop[i])->relkind == RELKIND_MATVIEW)
 			{
 				for (j = 0; j < nLoop; j++)
 				{
@@ -1345,6 +1345,11 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
 					 "TABLE DATA %s  (ID %d OID %u)",
 					 obj->name, obj->dumpId, obj->catId.oid);
 			return;
+		case DO_SEQUENCE_SET:
+			snprintf(buf, bufsize,
+					 "SEQUENCE SET %s  (ID %d OID %u)",
+					 obj->name, obj->dumpId, obj->catId.oid);
+			return;
 		case DO_DUMMY_TYPE:
 			snprintf(buf, bufsize,
 					 "DUMMY TYPE %s  (ID %d OID %u)",
@@ -1398,6 +1403,21 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
 		case DO_POLICY:
 			snprintf(buf, bufsize,
 					 "POLICY (ID %d OID %u)",
+					 obj->dumpId, obj->catId.oid);
+			return;
+		case DO_PUBLICATION:
+			snprintf(buf, bufsize,
+					 "PUBLICATION (ID %d OID %u)",
+					 obj->dumpId, obj->catId.oid);
+			return;
+		case DO_PUBLICATION_REL:
+			snprintf(buf, bufsize,
+					 "PUBLICATION TABLE (ID %d OID %u)",
+					 obj->dumpId, obj->catId.oid);
+			return;
+		case DO_SUBSCRIPTION:
+			snprintf(buf, bufsize,
+					 "SUBSCRIPTION (ID %d OID %u)",
 					 obj->dumpId, obj->catId.oid);
 			return;
 		case DO_PRE_DATA_BOUNDARY:

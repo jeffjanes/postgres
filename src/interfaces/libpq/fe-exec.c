@@ -3,7 +3,7 @@
  * fe-exec.c
  *	  functions related to sending a query down to the backend
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -2334,7 +2334,7 @@ PQputCopyEnd(PGconn *conn, const char *errormsg)
 	{
 		if (errormsg)
 		{
-			/* Ooops, no way to do this in 2.0 */
+			/* Oops, no way to do this in 2.0 */
 			printfPQExpBuffer(&conn->errorMessage,
 							  libpq_gettext("function requires at least protocol version 3.0\n"));
 			return -1;

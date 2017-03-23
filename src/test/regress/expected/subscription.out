@@ -1,0 +1,86 @@
+--
+-- SUBSCRIPTION
+--
+CREATE ROLE regress_subscription_user LOGIN SUPERUSER;
+CREATE ROLE regress_subscription_user_dummy LOGIN NOSUPERUSER;
+SET SESSION AUTHORIZATION 'regress_subscription_user';
+-- fail - no publications
+CREATE SUBSCRIPTION testsub CONNECTION 'foo';
+ERROR:  syntax error at or near ";"
+LINE 1: CREATE SUBSCRIPTION testsub CONNECTION 'foo';
+                                                    ^
+-- fail - no connection
+CREATE SUBSCRIPTION testsub PUBLICATION foo;
+ERROR:  syntax error at or near "PUBLICATION"
+LINE 1: CREATE SUBSCRIPTION testsub PUBLICATION foo;
+                                    ^
+-- fail - cannot do CREATE SUBSCRIPTION CREATE SLOT inside transaction block
+BEGIN;
+CREATE SUBSCRIPTION testsub CONNECTION 'testconn' PUBLICATION testpub WITH (CREATE SLOT);
+ERROR:  CREATE SUBSCRIPTION ... CREATE SLOT cannot run inside a transaction block
+COMMIT;
+CREATE SUBSCRIPTION testsub CONNECTION 'testconn' PUBLICATION testpub;
+ERROR:  invalid connection string syntax: missing "=" after "testconn" in connection info string
+
+CREATE SUBSCRIPTION testsub CONNECTION 'dbname=doesnotexist' PUBLICATION testpub WITH (NOCONNECT);
+WARNING:  tables were not subscribed, you will have to run ALTER SUBSCRIPTION ... REFRESH PUBLICATION to subscribe the tables
+\dRs+
+                               List of subscriptions
+  Name   |           Owner           | Enabled | Publication |      Conninfo       
+---------+---------------------------+---------+-------------+---------------------
+ testsub | regress_subscription_user | f       | {testpub}   | dbname=doesnotexist
+(1 row)
+
+ALTER SUBSCRIPTION testsub SET PUBLICATION testpub2, testpub3 NOREFRESH;
+ALTER SUBSCRIPTION testsub CONNECTION 'dbname=doesnotexist2';
+\dRs+
+                                   List of subscriptions
+  Name   |           Owner           | Enabled |     Publication     |       Conninfo       
+---------+---------------------------+---------+---------------------+----------------------
+ testsub | regress_subscription_user | f       | {testpub2,testpub3} | dbname=doesnotexist2
+(1 row)
+
+BEGIN;
+ALTER SUBSCRIPTION testsub ENABLE;
+\dRs
+                        List of subscriptions
+  Name   |           Owner           | Enabled |     Publication     
+---------+---------------------------+---------+---------------------
+ testsub | regress_subscription_user | t       | {testpub2,testpub3}
+(1 row)
+
+ALTER SUBSCRIPTION testsub DISABLE;
+\dRs
+                        List of subscriptions
+  Name   |           Owner           | Enabled |     Publication     
+---------+---------------------------+---------+---------------------
+ testsub | regress_subscription_user | f       | {testpub2,testpub3}
+(1 row)
+
+COMMIT;
+-- fail - must be owner of subscription
+SET ROLE regress_subscription_user_dummy;
+ALTER SUBSCRIPTION testsub RENAME TO testsub_dummy;
+ERROR:  must be owner of subscription testsub
+RESET ROLE;
+ALTER SUBSCRIPTION testsub RENAME TO testsub_foo;
+\dRs
+                          List of subscriptions
+    Name     |           Owner           | Enabled |     Publication     
+-------------+---------------------------+---------+---------------------
+ testsub_foo | regress_subscription_user | f       | {testpub2,testpub3}
+(1 row)
+
+-- rename back to keep the rest simple
+ALTER SUBSCRIPTION testsub_foo RENAME TO testsub;
+-- fail - cannot do DROP SUBSCRIPTION DROP SLOT inside transaction block
+BEGIN;
+DROP SUBSCRIPTION testsub DROP SLOT;
+ERROR:  DROP SUBSCRIPTION ... DROP SLOT cannot run inside a transaction block
+COMMIT;
+BEGIN;
+DROP SUBSCRIPTION testsub NODROP SLOT;
+COMMIT;
+RESET SESSION AUTHORIZATION;
+DROP ROLE regress_subscription_user;
+DROP ROLE regress_subscription_user_dummy;

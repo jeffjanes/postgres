@@ -3,7 +3,7 @@
  * atomics.c
  *	   Non-Inline parts of the atomics implementation
  *
- * Portions Copyright (c) 2013-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -21,7 +21,6 @@
 #ifdef WIN32
 #error "barriers are required (and provided) on WIN32 platforms"
 #endif
-#include <sys/types.h>
 #include <signal.h>
 #endif
 
