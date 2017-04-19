@@ -9,7 +9,7 @@
  * and implementing search-path-controlled searches.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -56,6 +56,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
+#include "utils/varlena.h"
 
 
 /*
@@ -197,22 +198,6 @@ static void RemoveTempRelationsCallback(int code, Datum arg);
 static void NamespaceCallback(Datum arg, int cacheid, uint32 hashvalue);
 static bool MatchNamedCall(HeapTuple proctup, int nargs, List *argnames,
 			   int **argnumbers);
-
-/* These don't really need to appear in any header file */
-Datum		pg_table_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_type_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_function_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_operator_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_opclass_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_opfamily_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_collation_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_conversion_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_ts_parser_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_ts_dict_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_ts_template_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_ts_config_is_visible(PG_FUNCTION_ARGS);
-Datum		pg_my_temp_schema(PG_FUNCTION_ARGS);
-Datum		pg_is_other_temp_schema(PG_FUNCTION_ARGS);
 
 
 /*
@@ -2098,6 +2083,62 @@ ConversionIsVisible(Oid conid)
 	ReleaseSysCache(contup);
 
 	return visible;
+}
+
+/*
+ * get_statistics_oid - find a statistics by possibly qualified name
+ *
+ * If not found, returns InvalidOid if missing_ok, else throws error
+ */
+Oid
+get_statistics_oid(List *names, bool missing_ok)
+{
+	char	   *schemaname;
+	char	   *stats_name;
+	Oid			namespaceId;
+	Oid			stats_oid = InvalidOid;
+	ListCell   *l;
+
+	/* deconstruct the name list */
+	DeconstructQualifiedName(names, &schemaname, &stats_name);
+
+	if (schemaname)
+	{
+		/* use exact schema given */
+		namespaceId = LookupExplicitNamespace(schemaname, missing_ok);
+		if (missing_ok && !OidIsValid(namespaceId))
+			stats_oid = InvalidOid;
+		else
+			stats_oid = GetSysCacheOid2(STATEXTNAMENSP,
+										PointerGetDatum(stats_name),
+										ObjectIdGetDatum(namespaceId));
+	}
+	else
+	{
+		/* search for it in search path */
+		recomputeNamespacePath();
+
+		foreach(l, activeSearchPath)
+		{
+			namespaceId = lfirst_oid(l);
+
+			if (namespaceId == myTempNamespace)
+				continue;		/* do not look in temp namespace */
+			stats_oid = GetSysCacheOid2(STATEXTNAMENSP,
+										PointerGetDatum(stats_name),
+										ObjectIdGetDatum(namespaceId));
+			if (OidIsValid(stats_oid))
+				break;
+		}
+	}
+
+	if (!OidIsValid(stats_oid) && !missing_ok)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("statistics \"%s\" do not exist",
+						NameListToString(names))));
+
+	return stats_oid;
 }
 
 /*

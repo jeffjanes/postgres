@@ -5,7 +5,7 @@
  * Assorted utility functions to work on files.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/common/file_utils.c
@@ -116,6 +116,25 @@ fsync_pgdata(const char *pg_data,
 }
 
 /*
+ * Issue fsync recursively on the given directory and all its contents.
+ *
+ * This is a convenient wrapper on top of walkdir().
+ */
+void
+fsync_dir_recurse(const char *dir, const char *progname)
+{
+	/*
+	 * If possible, hint to the kernel that we're soon going to fsync the data
+	 * directory and its contents.
+	 */
+#ifdef PG_FLUSH_DATA_WORKS
+	walkdir(dir, pre_sync_fname, false, progname);
+#endif
+
+	walkdir(dir, fsync_fname, false, progname);
+}
+
+/*
  * walkdir: recursively walk a directory, applying the action to each
  * regular file and directory (including the named directory itself).
  *
@@ -147,7 +166,7 @@ walkdir(const char *path,
 
 	while (errno = 0, (de = readdir(dir)) != NULL)
 	{
-		char		subpath[MAXPGPATH];
+		char		subpath[MAXPGPATH * 2];
 		struct stat fst;
 		int			sret;
 
@@ -155,7 +174,7 @@ walkdir(const char *path,
 			strcmp(de->d_name, "..") == 0)
 			continue;
 
-		snprintf(subpath, MAXPGPATH, "%s/%s", path, de->d_name);
+		snprintf(subpath, sizeof(subpath), "%s/%s", path, de->d_name);
 
 		if (process_symlinks)
 			sret = stat(subpath, &fst);

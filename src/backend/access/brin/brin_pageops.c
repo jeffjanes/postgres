@@ -2,7 +2,7 @@
  * brin_pageops.c
  *		Page-handling routines for BRIN indexes
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -287,7 +287,7 @@ brin_doupdate(Relation idxrel, BlockNumber pagesPerRange,
 			XLogRegisterBufData(0, (char *) newtup, newsz);
 
 			/* revmap page */
-			XLogRegisterBuffer(1, revmapbuf, REGBUF_STANDARD);
+			XLogRegisterBuffer(1, revmapbuf, 0);
 
 			/* old page */
 			XLogRegisterBuffer(2, oldbuf, REGBUF_STANDARD);
@@ -548,6 +548,8 @@ brin_evacuate_page(Relation idxRel, BlockNumber pagesPerRange,
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	Page		page;
+	BrinTuple  *btup = NULL;
+	Size		btupsz = 0;
 
 	page = BufferGetPage(buf);
 
@@ -567,7 +569,7 @@ brin_evacuate_page(Relation idxRel, BlockNumber pagesPerRange,
 		{
 			sz = ItemIdGetLength(lp);
 			tup = (BrinTuple *) PageGetItem(page, lp);
-			tup = brin_copy_tuple(tup, sz);
+			tup = brin_copy_tuple(tup, sz, btup, &btupsz);
 
 			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 

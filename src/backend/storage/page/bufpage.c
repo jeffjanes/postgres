@@ -3,7 +3,7 @@
  * bufpage.c
  *	  POSTGRES standard buffer page code.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -593,6 +593,33 @@ PageGetFreeSpace(Page page)
 	if (space < (int) sizeof(ItemIdData))
 		return 0;
 	space -= sizeof(ItemIdData);
+
+	return (Size) space;
+}
+
+/*
+ * PageGetFreeSpaceForMultipleTuples
+ *		Returns the size of the free (allocatable) space on a page,
+ *		reduced by the space needed for multiple new line pointers.
+ *
+ * Note: this should usually only be used on index pages.  Use
+ * PageGetHeapFreeSpace on heap pages.
+ */
+Size
+PageGetFreeSpaceForMultipleTuples(Page page, int ntups)
+{
+	int			space;
+
+	/*
+	 * Use signed arithmetic here so that we behave sensibly if pd_lower >
+	 * pd_upper.
+	 */
+	space = (int) ((PageHeader) page)->pd_upper -
+		(int) ((PageHeader) page)->pd_lower;
+
+	if (space < (int) (ntups * sizeof(ItemIdData)))
+		return 0;
+	space -= ntups * sizeof(ItemIdData);
 
 	return (Size) space;
 }

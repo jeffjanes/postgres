@@ -3,7 +3,7 @@
  * ifaddr.c
  *	  IP netmask calculations, and enumerating network interfaces.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,7 +20,6 @@
 #include "postgres.h"
 
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -323,9 +322,7 @@ pg_foreach_ifaddr(PgIfAddrCallback callback, void *cb_data)
 }
 #else							/* !HAVE_GETIFADDRS && !WIN32 */
 
-#ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
-#endif
 
 #ifdef HAVE_NET_IF_H
 #include <net/if.h>

@@ -3,7 +3,7 @@
  * array_userfuncs.c
  *	  Misc user-visible array support functions
  *
- * Copyright (c) 2003-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/array_userfuncs.c
@@ -795,7 +795,8 @@ array_position_common(FunctionCallInfo fcinfo)
 					   format_type_be(element_type))));
 
 		my_extra->element_type = element_type;
-		fmgr_info(typentry->eq_opr_finfo.fn_oid, &my_extra->proc);
+		fmgr_info_cxt(typentry->eq_opr_finfo.fn_oid, &my_extra->proc,
+					  fcinfo->flinfo->fn_mcxt);
 	}
 
 	/* Examine each array element until we find a match. */
@@ -933,7 +934,8 @@ array_positions(PG_FUNCTION_ARGS)
 					   format_type_be(element_type))));
 
 		my_extra->element_type = element_type;
-		fmgr_info(typentry->eq_opr_finfo.fn_oid, &my_extra->proc);
+		fmgr_info_cxt(typentry->eq_opr_finfo.fn_oid, &my_extra->proc,
+					  fcinfo->flinfo->fn_mcxt);
 	}
 
 	/*

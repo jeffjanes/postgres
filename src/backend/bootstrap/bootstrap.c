@@ -4,7 +4,7 @@
  *	  routines to support running postgres in 'bootstrap' mode
  *	bootstrap mode is used to create the initial template database
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -18,6 +18,7 @@
 #include <signal.h>
 
 #include "access/htup_details.h"
+#include "access/xact.h"
 #include "bootstrap/bootstrap.h"
 #include "catalog/index.h"
 #include "catalog/pg_collation.h"
@@ -387,6 +388,10 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		/* finish setting up bufmgr.c */
 		InitBufferPoolBackend();
 
+		/* Initialize backend status information */
+		pgstat_initialize();
+		pgstat_bestart();
+
 		/* register a before-shutdown callback for LWLock cleanup */
 		before_shmem_exit(ShutdownAuxiliaryProcess, 0);
 	}
@@ -492,7 +497,9 @@ BootstrapModeMain(void)
 	/*
 	 * Process bootstrap input.
 	 */
+	StartTransactionCommand();
 	boot_yyparse();
+	CommitTransactionCommand();
 
 	/*
 	 * We should now know about all mapped relations, so it's okay to write
@@ -1078,13 +1085,13 @@ index_register(Oid heap,
 
 	memcpy(newind->il_info, indexInfo, sizeof(IndexInfo));
 	/* expressions will likely be null, but may as well copy it */
-	newind->il_info->ii_Expressions = (List *)
+	newind->il_info->ii_Expressions =
 		copyObject(indexInfo->ii_Expressions);
 	newind->il_info->ii_ExpressionsState = NIL;
 	/* predicate will likely be null, but may as well copy it */
-	newind->il_info->ii_Predicate = (List *)
+	newind->il_info->ii_Predicate =
 		copyObject(indexInfo->ii_Predicate);
-	newind->il_info->ii_PredicateState = NIL;
+	newind->il_info->ii_PredicateState = NULL;
 	/* no exclusion constraints at bootstrap time, so no need to copy */
 	Assert(indexInfo->ii_ExclusionOps == NULL);
 	Assert(indexInfo->ii_ExclusionProcs == NULL);

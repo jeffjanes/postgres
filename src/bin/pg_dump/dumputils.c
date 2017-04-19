@@ -5,7 +5,7 @@
  * Basically this is stuff that is useful in both pg_dump and pg_dumpall.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_dump/dumputils.c
@@ -364,11 +364,12 @@ buildACLCommands(const char *name, const char *subname,
  */
 bool
 buildDefaultACLCommands(const char *type, const char *nspname,
-						const char *acls, const char *owner,
+						const char *acls, const char *racls,
+						const char *initacls, const char *initracls,
+						const char *owner,
 						int remoteVersion,
 						PQExpBuffer sql)
 {
-	bool		result;
 	PQExpBuffer prefix;
 
 	prefix = createPQExpBuffer();
@@ -384,14 +385,22 @@ buildDefaultACLCommands(const char *type, const char *nspname,
 	if (nspname)
 		appendPQExpBuffer(prefix, "IN SCHEMA %s ", fmtId(nspname));
 
-	result = buildACLCommands("", NULL,
-							  type, acls, "", owner,
-							  prefix->data, remoteVersion,
-							  sql);
+	if (strlen(initacls) != 0 || strlen(initracls) != 0)
+	{
+		appendPQExpBuffer(sql, "SELECT pg_catalog.binary_upgrade_set_record_init_privs(true);\n");
+		if (!buildACLCommands("", NULL, type, initacls, initracls, owner,
+							  prefix->data, remoteVersion, sql))
+			return false;
+		appendPQExpBuffer(sql, "SELECT pg_catalog.binary_upgrade_set_record_init_privs(false);\n");
+	}
+
+	if (!buildACLCommands("", NULL, type, acls, racls, owner,
+						  prefix->data, remoteVersion, sql))
+		return false;
 
 	destroyPQExpBuffer(prefix);
 
-	return result;
+	return true;
 }
 
 /*
@@ -511,7 +520,9 @@ do { \
 		CONVERT_PRIV('X', "EXECUTE");
 	else if (strcmp(type, "LANGUAGE") == 0)
 		CONVERT_PRIV('U', "USAGE");
-	else if (strcmp(type, "SCHEMA") == 0)
+	else if (strcmp(type, "SCHEMA") == 0 ||
+			 strcmp(type, "SCHEMAS") == 0
+			)
 	{
 		CONVERT_PRIV('C', "CREATE");
 		CONVERT_PRIV('U', "USAGE");

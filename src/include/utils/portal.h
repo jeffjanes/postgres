@@ -36,7 +36,7 @@
  * to look like NO SCROLL cursors.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/portal.h
@@ -133,14 +133,16 @@ typedef struct PortalData
 	/* The query or queries the portal will execute */
 	const char *sourceText;		/* text of query (as of 8.4, never NULL) */
 	const char *commandTag;		/* command tag for original query */
-	List	   *stmts;			/* PlannedStmts and/or utility statements */
+	List	   *stmts;			/* list of PlannedStmts */
 	CachedPlan *cplan;			/* CachedPlan, if stmts are from one */
 
 	ParamListInfo portalParams; /* params to pass to query */
+	QueryEnvironment *queryEnv; /* environment for query */
 
 	/* Features/options */
 	PortalStrategy strategy;	/* see above */
 	int			cursorOptions;	/* DECLARE CURSOR option bits */
+	bool		run_once;		/* portal will only be run once */
 
 	/* Status data */
 	PortalStatus status;		/* see above */
@@ -201,7 +203,6 @@ typedef struct PortalData
  */
 #define PortalGetQueryDesc(portal)	((portal)->queryDesc)
 #define PortalGetHeapMemory(portal) ((portal)->heap)
-#define PortalGetPrimaryStmt(portal) PortalListGetPrimaryStmt((portal)->stmts)
 
 
 /* Prototypes for functions in utils/mmgr/portalmem.c */
@@ -232,7 +233,7 @@ extern void PortalDefineQuery(Portal portal,
 				  const char *commandTag,
 				  List *stmts,
 				  CachedPlan *cplan);
-extern Node *PortalListGetPrimaryStmt(List *stmts);
+extern PlannedStmt *PortalGetPrimaryStmt(Portal portal);
 extern void PortalCreateHoldStore(Portal portal);
 extern void PortalHashTableDeleteAll(void);
 extern bool ThereAreNoReadyPortals(void);

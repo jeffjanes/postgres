@@ -4,7 +4,7 @@
  *	  creator functions for primitive nodes. The functions here are for
  *	  the most frequently created nodes.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -210,10 +210,10 @@ makeWholeRowVar(RangeTblEntry *rte,
 		default:
 
 			/*
-			 * RTE is a join, subselect, or VALUES.  We represent this as a
-			 * whole-row Var of RECORD type. (Note that in most cases the Var
-			 * will be expanded to a RowExpr during planning, but that is not
-			 * our concern here.)
+			 * RTE is a join, subselect, tablefunc, or VALUES.  We represent
+			 * this as a whole-row Var of RECORD type. (Note that in most
+			 * cases the Var will be expanded to a RowExpr during planning,
+			 * but that is not our concern here.)
 			 */
 			result = makeVar(varno,
 							 InvalidAttrNumber,
@@ -423,7 +423,7 @@ makeRangeVar(char *schemaname, char *relname, int location)
 	r->catalogname = NULL;
 	r->schemaname = schemaname;
 	r->relname = relname;
-	r->inhOpt = INH_DEFAULT;
+	r->inh = true;
 	r->relpersistence = RELPERSISTENCE_PERMANENT;
 	r->alias = NULL;
 	r->location = location;

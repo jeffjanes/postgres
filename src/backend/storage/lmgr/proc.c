@@ -3,7 +3,7 @@
  * proc.c
  *	  routines to manage per-process shared memory data structure
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -224,7 +224,7 @@ InitProcGlobal(void)
 		 */
 		if (i < MaxBackends + NUM_AUXILIARY_PROCS)
 		{
-			PGSemaphoreCreate(&(procs[i].sem));
+			procs[i].sem = PGSemaphoreCreate();
 			InitSharedLatch(&(procs[i].procLatch));
 			LWLockInitialize(&(procs[i].backendLock), LWTRANCHE_PROC);
 		}
@@ -370,6 +370,7 @@ InitProcess(void)
 	MyProc->backendId = InvalidBackendId;
 	MyProc->databaseId = InvalidOid;
 	MyProc->roleId = InvalidOid;
+	MyProc->isBackgroundWorker = IsBackgroundWorker;
 	MyPgXact->delayChkpt = false;
 	MyPgXact->vacuumFlags = 0;
 	/* NB -- autovac launcher intentionally does not set IS_AUTOVACUUM */
@@ -420,7 +421,7 @@ InitProcess(void)
 	 * be careful and reinitialize its value here.  (This is not strictly
 	 * necessary anymore, but seems like a good idea for cleanliness.)
 	 */
-	PGSemaphoreReset(&MyProc->sem);
+	PGSemaphoreReset(MyProc->sem);
 
 	/*
 	 * Arrange to clean up at backend exit.
@@ -542,6 +543,7 @@ InitAuxiliaryProcess(void)
 	MyProc->backendId = InvalidBackendId;
 	MyProc->databaseId = InvalidOid;
 	MyProc->roleId = InvalidOid;
+	MyProc->isBackgroundWorker = IsBackgroundWorker;
 	MyPgXact->delayChkpt = false;
 	MyPgXact->vacuumFlags = 0;
 	MyProc->lwWaiting = false;
@@ -575,7 +577,7 @@ InitAuxiliaryProcess(void)
 	 * be careful and reinitialize its value here.  (This is not strictly
 	 * necessary anymore, but seems like a good idea for cleanliness.)
 	 */
-	PGSemaphoreReset(&MyProc->sem);
+	PGSemaphoreReset(MyProc->sem);
 
 	/*
 	 * Arrange to clean up at process exit.
@@ -810,6 +812,9 @@ ProcKill(int code, Datum arg)
 	if (MyReplicationSlot != NULL)
 		ReplicationSlotRelease();
 
+	/* Also cleanup all the temporary slots. */
+	ReplicationSlotCleanup();
+
 	/*
 	 * Detach from any lock group of which we are a member.  If the leader
 	 * exist before all other group members, it's PGPROC will remain allocated
@@ -936,6 +941,33 @@ AuxiliaryProcKill(int code, Datum arg)
 	SpinLockRelease(ProcStructLock);
 }
 
+/*
+ * AuxiliaryPidGetProc -- get PGPROC for an auxiliary process
+ * given its PID
+ *
+ * Returns NULL if not found.
+ */
+PGPROC *
+AuxiliaryPidGetProc(int pid)
+{
+	PGPROC	   *result = NULL;
+	int			index;
+
+	if (pid == 0)				/* never match dummy PGPROCs */
+		return NULL;
+
+	for (index = 0; index < NUM_AUXILIARY_PROCS; index++)
+	{
+		PGPROC	   *proc = &AuxiliaryProcs[index];
+
+		if (proc->pid == pid)
+		{
+			result = proc;
+			break;
+		}
+	}
+	return result;
+}
 
 /*
  * ProcQueue package: routines for putting processes to sleep

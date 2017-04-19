@@ -3,7 +3,7 @@
  * nodeHash.c
  *	  Routines to hash relations for hashjoin
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -190,12 +190,8 @@ ExecInitHash(Hash *node, EState *estate, int eflags)
 	/*
 	 * initialize child expressions
 	 */
-	hashstate->ps.targetlist = (List *)
-		ExecInitExpr((Expr *) node->plan.targetlist,
-					 (PlanState *) hashstate);
-	hashstate->ps.qual = (List *)
-		ExecInitExpr((Expr *) node->plan.qual,
-					 (PlanState *) hashstate);
+	hashstate->ps.qual =
+		ExecInitQual(node->plan.qual, (PlanState *) hashstate);
 
 	/*
 	 * initialize child nodes
@@ -720,6 +716,9 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 			/* next tuple in this chunk */
 			idx += MAXALIGN(hashTupleSize);
+
+			/* allow this loop to be cancellable */
+			CHECK_FOR_INTERRUPTS();
 		}
 
 		/* we're done with this chunk - free it and proceed to the next one */
@@ -959,7 +958,7 @@ ExecHashGetHashValue(HashJoinTable hashtable,
 		/*
 		 * Get the join attribute value of the tuple
 		 */
-		keyval = ExecEvalExpr(keyexpr, econtext, &isNull, NULL);
+		keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
 
 		/*
 		 * If the attribute is NULL, and the join operator is strict, then
@@ -1060,7 +1059,7 @@ bool
 ExecScanHashBucket(HashJoinState *hjstate,
 				   ExprContext *econtext)
 {
-	List	   *hjclauses = hjstate->hashclauses;
+	ExprState  *hjclauses = hjstate->hashclauses;
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
@@ -1094,7 +1093,7 @@ ExecScanHashBucket(HashJoinState *hjstate,
 			/* reset temp memory each time to avoid leaks from qual expr */
 			ResetExprContext(econtext);
 
-			if (ExecQual(hjclauses, econtext, false))
+			if (ExecQual(hjclauses, econtext))
 			{
 				hjstate->hj_CurTuple = hashTuple;
 				return true;
@@ -1599,6 +1598,9 @@ ExecHashRemoveNextSkewBucket(HashJoinTable hashtable)
 		}
 
 		hashTuple = nextHashTuple;
+
+		/* allow this loop to be cancellable */
+		CHECK_FOR_INTERRUPTS();
 	}
 
 	/*

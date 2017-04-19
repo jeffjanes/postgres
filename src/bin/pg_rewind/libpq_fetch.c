@@ -3,13 +3,12 @@
  * libpq_fetch.c
  *	  Functions for fetching files from a remote server.
  *
- * Copyright (c) 2013-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres_fe.h"
 
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -121,7 +120,7 @@ run_simple_query(const char *sql)
 }
 
 /*
- * Calls pg_current_xlog_insert_location() function
+ * Calls pg_current_wal_insert_location() function
  */
 XLogRecPtr
 libpqGetCurrentXlogInsertLocation(void)
@@ -131,7 +130,7 @@ libpqGetCurrentXlogInsertLocation(void)
 	uint32		lo;
 	char	   *val;
 
-	val = run_simple_query("SELECT pg_current_xlog_insert_location()");
+	val = run_simple_query("SELECT pg_current_wal_insert_location()");
 
 	if (sscanf(val, "%X/%X", &hi, &lo) != 2)
 		pg_fatal("unrecognized result \"%s\" for current WAL insert location\n", val);
@@ -490,7 +489,7 @@ libpq_executeFileMap(filemap_t *map)
 	 * temporary table. Now, actually fetch all of those ranges.
 	 */
 	sql =
-		"SELECT path, begin, \n"
+		"SELECT path, begin,\n"
 		"  pg_read_binary_file(path, begin, len, true) AS chunk\n"
 		"FROM fetchchunks\n";
 

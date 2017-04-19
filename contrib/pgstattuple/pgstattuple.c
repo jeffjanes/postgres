@@ -36,6 +36,7 @@
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/tqual.h"
+#include "utils/varlena.h"
 
 PG_MODULE_MAGIC;
 
@@ -164,7 +165,7 @@ build_pgstattuple_type(pgstattuple_type *stat, FunctionCallInfo fcinfo)
 Datum
 pgstattuple(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	RangeVar   *relrv;
 	Relation	rel;
 
@@ -190,7 +191,7 @@ pgstattuple(PG_FUNCTION_ARGS)
 Datum
 pgstattuple_v1_5(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	RangeVar   *relrv;
 	Relation	rel;
 
@@ -292,6 +293,9 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 		case RELKIND_FOREIGN_TABLE:
 			err = "foreign table";
 			break;
+		case RELKIND_PARTITIONED_TABLE:
+			err = "partitioned table";
+			break;
 		default:
 			err = "unknown";
 			break;
@@ -352,7 +356,7 @@ pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 		 * heap_getnext may find no tuples on a given page, so we cannot
 		 * simply examine the pages returned by the heap scan.
 		 */
-		tupblock = BlockIdGetBlockNumber(&tuple->t_self.ip_blkid);
+		tupblock = ItemPointerGetBlockNumber(&tuple->t_self);
 
 		while (block <= tupblock)
 		{
@@ -449,7 +453,7 @@ pgstat_hash_page(pgstattuple_type *stat, Relation rel, BlockNumber blkno,
 		HashPageOpaque opaque;
 
 		opaque = (HashPageOpaque) PageGetSpecialPointer(page);
-		switch (opaque->hasho_flag)
+		switch (opaque->hasho_flag & LH_PAGE_TYPE)
 		{
 			case LH_UNUSED_PAGE:
 				stat->free_space += BLCKSZ;

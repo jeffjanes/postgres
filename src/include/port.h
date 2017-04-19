@@ -3,7 +3,7 @@
  * port.h
  *	  Header for src/port/ compatibility functions.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/port.h
@@ -231,7 +231,7 @@ extern int	pgrename(const char *from, const char *to);
 extern int	pgunlink(const char *path);
 
 /* Include this first so later includes don't see these defines */
-#ifdef WIN32_ONLY_COMPILER
+#ifdef _MSC_VER
 #include <io.h>
 #endif
 
@@ -403,7 +403,7 @@ extern size_t strlcat(char *dst, const char *src, size_t siz);
 extern size_t strlcpy(char *dst, const char *src, size_t siz);
 #endif
 
-#if !defined(HAVE_RANDOM) && !defined(__BORLANDC__)
+#if !defined(HAVE_RANDOM)
 extern long random(void);
 #endif
 

@@ -95,7 +95,7 @@
  * with the higher XID backs out.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -327,23 +327,21 @@ ExecInsertIndexTuples(TupleTableSlot *slot,
 		/* Check for partial index */
 		if (indexInfo->ii_Predicate != NIL)
 		{
-			List	   *predicate;
+			ExprState  *predicate;
 
 			/*
 			 * If predicate state not set up yet, create it (in the estate's
 			 * per-query context)
 			 */
 			predicate = indexInfo->ii_PredicateState;
-			if (predicate == NIL)
+			if (predicate == NULL)
 			{
-				predicate = (List *)
-					ExecPrepareExpr((Expr *) indexInfo->ii_Predicate,
-									estate);
+				predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 				indexInfo->ii_PredicateState = predicate;
 			}
 
 			/* Skip this index-update if the predicate isn't satisfied */
-			if (!ExecQual(predicate, econtext, false))
+			if (!ExecQual(predicate, econtext))
 				continue;
 		}
 
@@ -391,7 +389,8 @@ ExecInsertIndexTuples(TupleTableSlot *slot,
 						 isnull,	/* null flags */
 						 tupleid,		/* tid of heap tuple */
 						 heapRelation,	/* heap relation */
-						 checkUnique);	/* type of uniqueness check to do */
+						 checkUnique,	/* type of uniqueness check to do */
+						 indexInfo);	/* index AM may need this */
 
 		/*
 		 * If the index has an associated exclusion constraint, check that.
@@ -550,23 +549,21 @@ ExecCheckIndexConstraints(TupleTableSlot *slot,
 		/* Check for partial index */
 		if (indexInfo->ii_Predicate != NIL)
 		{
-			List	   *predicate;
+			ExprState  *predicate;
 
 			/*
 			 * If predicate state not set up yet, create it (in the estate's
 			 * per-query context)
 			 */
 			predicate = indexInfo->ii_PredicateState;
-			if (predicate == NIL)
+			if (predicate == NULL)
 			{
-				predicate = (List *)
-					ExecPrepareExpr((Expr *) indexInfo->ii_Predicate,
-									estate);
+				predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 				indexInfo->ii_PredicateState = predicate;
 			}
 
 			/* Skip this index-update if the predicate isn't satisfied */
-			if (!ExecQual(predicate, econtext, false))
+			if (!ExecQual(predicate, econtext))
 				continue;
 		}
 

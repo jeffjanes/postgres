@@ -13,7 +13,7 @@
  * "delta" type.  Delta rows will be deleted by this worker and their values
  * aggregated into the total.
  *
- * Copyright (c) 2013-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/test/modules/worker_spi/worker_spi.c
@@ -343,11 +343,13 @@ _PG_init(void)
 							NULL);
 
 	/* set up common data for all our workers */
+	memset(&worker, 0, sizeof(worker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = worker_spi_main;
+	sprintf(worker.bgw_library_name, "worker_spi");
+	sprintf(worker.bgw_function_name, "worker_spi_main");
 	worker.bgw_notify_pid = 0;
 
 	/*
@@ -374,11 +376,11 @@ worker_spi_launch(PG_FUNCTION_ARGS)
 	BgwHandleStatus status;
 	pid_t		pid;
 
+	memset(&worker, 0, sizeof(worker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = NULL;		/* new worker might not have library loaded */
 	sprintf(worker.bgw_library_name, "worker_spi");
 	sprintf(worker.bgw_function_name, "worker_spi_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN, "worker %d", i);

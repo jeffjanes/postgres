@@ -3,7 +3,7 @@
  * basebackup.c
  *	  code for taking a base backup and streaming it to a standby
  *
- * Portions Copyright (c) 2010-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/basebackup.c
@@ -12,7 +12,6 @@
  */
 #include "postgres.h"
 
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
@@ -27,6 +26,7 @@
 #include "nodes/pg_list.h"
 #include "pgtar.h"
 #include "pgstat.h"
+#include "postmaster/syslogger.h"
 #include "replication/basebackup.h"
 #include "replication/walsender.h"
 #include "replication/walsender_private.h"
@@ -92,10 +92,10 @@ static uint64 throttling_sample;
 static int64 throttling_counter;
 
 /* The minimum time required to transfer throttling_sample bytes. */
-static int64 elapsed_min_unit;
+static TimeOffset elapsed_min_unit;
 
 /* The last check of the transfer rate. */
-static int64 throttled_last;
+static TimestampTz throttled_last;
 
 /*
  * The contents of these directories are removed or recreated during server
@@ -147,6 +147,9 @@ static const char *excludeFiles[] =
 {
 	/* Skip auto conf temporary file. */
 	PG_AUTOCONF_FILENAME ".tmp",
+
+	/* Skip current log file temporary file */
+	LOG_METAINFO_DATAFILE_TMP,
 
 	/*
 	 * If there's a backup_label or tablespace_map file, it belongs to a
@@ -254,7 +257,7 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 			throttling_counter = 0;
 
 			/* The 'real data' starts now (header was ignored). */
-			throttled_last = GetCurrentIntegerTimestamp();
+			throttled_last = GetCurrentTimestamp();
 		}
 		else
 		{
@@ -956,7 +959,7 @@ sendDir(char *path, int basepathlen, bool sizeonly, List *tablespaces,
 {
 	DIR		   *dir;
 	struct dirent *de;
-	char		pathbuf[MAXPGPATH];
+	char		pathbuf[MAXPGPATH * 2];
 	struct stat statbuf;
 	int64		size = 0;
 
@@ -1008,7 +1011,7 @@ sendDir(char *path, int basepathlen, bool sizeonly, List *tablespaces,
 		if (excludeFound)
 			continue;
 
-		snprintf(pathbuf, MAXPGPATH, "%s/%s", path, de->d_name);
+		snprintf(pathbuf, sizeof(pathbuf), "%s/%s", path, de->d_name);
 
 		/* Skip pg_control here to back up it last */
 		if (strcmp(pathbuf, "./global/pg_control") == 0)
@@ -1333,7 +1336,7 @@ _tarWriteDir(const char *pathbuf, int basepathlen, struct stat *statbuf,
 static void
 throttle(size_t increment)
 {
-	int64		elapsed,
+	TimeOffset	elapsed,
 				elapsed_min,
 				sleep;
 	int			wait_result;
@@ -1346,7 +1349,7 @@ throttle(size_t increment)
 		return;
 
 	/* Time elapsed since the last measurement (and possible wake up). */
-	elapsed = GetCurrentIntegerTimestamp() - throttled_last;
+	elapsed = GetCurrentTimestamp() - throttled_last;
 	/* How much should have elapsed at minimum? */
 	elapsed_min = elapsed_min_unit * (throttling_counter / throttling_sample);
 	sleep = elapsed_min - elapsed;
@@ -1370,26 +1373,16 @@ throttle(size_t increment)
 		if (wait_result & WL_LATCH_SET)
 			CHECK_FOR_INTERRUPTS();
 	}
-	else
-	{
-		/*
-		 * The actual transfer rate is below the limit.  A negative value
-		 * would distort the adjustment of throttled_last.
-		 */
-		wait_result = 0;
-		sleep = 0;
-	}
 
 	/*
-	 * Only a whole multiple of throttling_sample was processed. The rest will
-	 * be done during the next call of this function.
+	 * As we work with integers, only whole multiple of throttling_sample was
+	 * processed. The rest will be done during the next call of this function.
 	 */
 	throttling_counter %= throttling_sample;
 
-	/* Once the (possible) sleep has ended, new period starts. */
-	if (wait_result & WL_TIMEOUT)
-		throttled_last += elapsed + sleep;
-	else if (sleep > 0)
-		/* Sleep was necessary but might have been interrupted. */
-		throttled_last = GetCurrentIntegerTimestamp();
+	/*
+	 * Time interval for the remaining amount and possible next increments
+	 * starts now.
+	 */
+	throttled_last = GetCurrentTimestamp();
 }

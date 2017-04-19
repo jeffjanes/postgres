@@ -3,7 +3,7 @@
  * pl_exec.c		- Executor for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -13,7 +13,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "plpgsql.h"
+#include "postgres.h"
 
 #include <ctype.h>
 
@@ -40,6 +40,8 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+
+#include "plpgsql.h"
 
 
 typedef struct
@@ -143,7 +145,7 @@ typedef struct					/* cast_hash table entry */
 {
 	plpgsql_CastHashKey key;	/* hash key --- MUST BE FIRST */
 	Expr	   *cast_expr;		/* cast expression, or NULL if no-op cast */
-	/* The ExprState tree is valid only when cast_lxid matches current LXID */
+	/* ExprState is valid only when cast_lxid matches current LXID */
 	ExprState  *cast_exprstate; /* expression's eval tree */
 	bool		cast_in_use;	/* true while we're executing eval tree */
 	LocalTransactionId cast_lxid;
@@ -262,8 +264,7 @@ static Datum exec_eval_expr(PLpgSQL_execstate *estate,
 			   Oid *rettype,
 			   int32 *rettypmod);
 static int exec_run_select(PLpgSQL_execstate *estate,
-				PLpgSQL_expr *expr, long maxtuples, Portal *portalP,
-				bool parallelOK);
+				PLpgSQL_expr *expr, long maxtuples, Portal *portalP);
 static int exec_for_query(PLpgSQL_execstate *estate, PLpgSQL_stmt_forq *stmt,
 			   Portal portal, bool prefetch_ok);
 static ParamListInfo setup_param_list(PLpgSQL_execstate *estate,
@@ -687,6 +688,10 @@ plpgsql_exec_trigger(PLpgSQL_function *func,
 	}
 	else
 		elog(ERROR, "unrecognized trigger action: not INSERT, DELETE, or UPDATE");
+
+	/* Make transition tables visible to this SPI connection */
+	rc = SPI_register_trigger_data(trigdata);
+	Assert(rc >= 0);
 
 	/*
 	 * Assign the special tg_ variables
@@ -1683,7 +1688,7 @@ exec_stmt_perform(PLpgSQL_execstate *estate, PLpgSQL_stmt_perform *stmt)
 {
 	PLpgSQL_expr *expr = stmt->expr;
 
-	(void) exec_run_select(estate, expr, 0, NULL, true);
+	(void) exec_run_select(estate, expr, 0, NULL);
 	exec_set_found(estate, (estate->eval_processed != 0));
 	exec_eval_cleanup(estate);
 
@@ -2236,7 +2241,7 @@ exec_stmt_fors(PLpgSQL_execstate *estate, PLpgSQL_stmt_fors *stmt)
 	/*
 	 * Open the implicit cursor for the statement using exec_run_select
 	 */
-	exec_run_select(estate, stmt->query, 0, &portal, false);
+	exec_run_select(estate, stmt->query, 0, &portal);
 
 	/*
 	 * Execute the loop
@@ -3021,7 +3026,7 @@ exec_stmt_return_query(PLpgSQL_execstate *estate,
 	if (stmt->query != NULL)
 	{
 		/* static query */
-		exec_run_select(estate, stmt->query, 0, &portal, true);
+		exec_run_select(estate, stmt->query, 0, &portal);
 	}
 	else
 	{
@@ -3029,7 +3034,7 @@ exec_stmt_return_query(PLpgSQL_execstate *estate,
 		Assert(stmt->dynquery != NULL);
 		portal = exec_dynquery_with_params(estate, stmt->dynquery,
 										   stmt->params, NULL,
-										   CURSOR_OPT_PARALLEL_OK);
+										   0);
 	}
 
 	/* Use eval_mcontext for tuple conversion work */
@@ -3625,7 +3630,7 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 	{
 		ListCell   *l;
 
-		exec_prepare_plan(estate, expr, 0);
+		exec_prepare_plan(estate, expr, CURSOR_OPT_PARALLEL_OK);
 		stmt->mod_stmt = false;
 		foreach(l, SPI_plan_get_plan_sources(expr->plan))
 		{
@@ -3634,9 +3639,8 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 
 			foreach(l2, plansource->query_list)
 			{
-				Query	   *q = (Query *) lfirst(l2);
+				Query	   *q = lfirst_node(Query, l2);
 
-				Assert(IsA(q, Query));
 				if (q->canSetTag)
 				{
 					if (q->commandType == CMD_INSERT ||
@@ -4710,7 +4714,8 @@ exec_assign_value(PLpgSQL_execstate *estate,
 
 				/*
 				 * Evaluate the subscripts, switch into left-to-right order.
-				 * Like ExecEvalArrayRef(), complain if any subscript is null.
+				 * Like the expression built by ExecInitArrayRef(), complain
+				 * if any subscript is null.
 				 */
 				for (i = 0; i < nsubscripts; i++)
 				{
@@ -4758,7 +4763,7 @@ exec_assign_value(PLpgSQL_execstate *estate,
 				 * fixed-length array types we skip the assignment.  We can't
 				 * support assignment of a null entry into a fixed-length
 				 * array, either, so that's a no-op too.  This is all ugly but
-				 * corresponds to the current behavior of ExecEvalArrayRef().
+				 * corresponds to the current behavior of execExpr*.c.
 				 */
 				if (arrayelem->arraytyplen > 0 &&		/* fixed-length array? */
 					(oldarrayisnull || isNull))
@@ -5173,7 +5178,7 @@ exec_eval_expr(PLpgSQL_execstate *estate,
 	 * If first time through, create a plan for this expression.
 	 */
 	if (expr->plan == NULL)
-		exec_prepare_plan(estate, expr, 0);
+		exec_prepare_plan(estate, expr, CURSOR_OPT_PARALLEL_OK);
 
 	/*
 	 * If this is a simple expression, bypass SPI and use the executor
@@ -5186,7 +5191,7 @@ exec_eval_expr(PLpgSQL_execstate *estate,
 	/*
 	 * Else do it the hard way via exec_run_select
 	 */
-	rc = exec_run_select(estate, expr, 2, NULL, false);
+	rc = exec_run_select(estate, expr, 2, NULL);
 	if (rc != SPI_OK_SELECT)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -5242,18 +5247,23 @@ exec_eval_expr(PLpgSQL_execstate *estate,
  */
 static int
 exec_run_select(PLpgSQL_execstate *estate,
-				PLpgSQL_expr *expr, long maxtuples, Portal *portalP,
-				bool parallelOK)
+				PLpgSQL_expr *expr, long maxtuples, Portal *portalP)
 {
 	ParamListInfo paramLI;
 	int			rc;
 
 	/*
-	 * On the first call for this expression generate the plan
+	 * On the first call for this expression generate the plan.
+	 *
+	 * If we don't need to return a portal, then we're just going to execute
+	 * the query once, which means it's OK to use a parallel plan, even if the
+	 * number of rows being fetched is limited.  If we do need to return a
+	 * portal, the caller might do cursor operations, which parallel query
+	 * can't support.
 	 */
 	if (expr->plan == NULL)
-		exec_prepare_plan(estate, expr, parallelOK ?
-						  CURSOR_OPT_PARALLEL_OK : 0);
+		exec_prepare_plan(estate, expr,
+						  portalP == NULL ? CURSOR_OPT_PARALLEL_OK : 0);
 
 	/*
 	 * If a portal was requested, put the query into the portal
@@ -5542,7 +5552,7 @@ exec_eval_simple_expr(PLpgSQL_execstate *estate,
 			exec_check_rw_parameter(expr, expr->rwparam);
 		if (expr->expr_simple_expr == NULL)
 		{
-			/* Ooops, release refcount and fail */
+			/* Oops, release refcount and fail */
 			ReleaseCachedPlan(cplan, true);
 			return false;
 		}
@@ -5606,8 +5616,7 @@ exec_eval_simple_expr(PLpgSQL_execstate *estate,
 	 */
 	*result = ExecEvalExpr(expr->expr_simple_state,
 						   econtext,
-						   isNull,
-						   NULL);
+						   isNull);
 
 	/* Assorted cleanup */
 	expr->expr_simple_in_use = false;
@@ -6272,7 +6281,7 @@ exec_cast_value(PLpgSQL_execstate *estate,
 			cast_entry->cast_in_use = true;
 
 			value = ExecEvalExpr(cast_entry->cast_exprstate, econtext,
-								 isnull, NULL);
+								 isnull);
 
 			cast_entry->cast_in_use = false;
 
@@ -6826,13 +6835,11 @@ exec_simple_recheck_plan(PLpgSQL_expr *expr, CachedPlan *cplan)
 	 */
 	if (list_length(cplan->stmt_list) != 1)
 		return;
-	stmt = (PlannedStmt *) linitial(cplan->stmt_list);
+	stmt = linitial_node(PlannedStmt, cplan->stmt_list);
 
 	/*
 	 * 2. It must be a RESULT plan --> no scan's required
 	 */
-	if (!IsA(stmt, PlannedStmt))
-		return;
 	if (stmt->commandType != CMD_SELECT)
 		return;
 	plan = stmt->planTree;

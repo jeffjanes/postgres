@@ -33,7 +33,7 @@
  * specific parts are in the libpqwalreceiver module. It's loaded
  * dynamically to avoid linking the server with libpq.
  *
- * Portions Copyright (c) 2010-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -50,6 +50,7 @@
 #include "access/timeline.h"
 #include "access/transam.h"
 #include "access/xlog_internal.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
@@ -196,6 +197,7 @@ WalReceiverMain(void)
 	WalRcvData *walrcv = WalRcv;
 	TimestampTz last_recv_timestamp;
 	bool		ping_sent;
+	char	   *err;
 
 	/*
 	 * WalRcv should be set up already (if we are a backend, we inherit this
@@ -293,7 +295,10 @@ WalReceiverMain(void)
 
 	/* Establish the connection to the primary for XLOG streaming */
 	EnableWalRcvImmediateExit();
-	wrconn = walrcv_connect(conninfo, false, "walreceiver");
+	wrconn = walrcv_connect(conninfo, false, "walreceiver", &err);
+	if (!wrconn)
+		ereport(ERROR,
+				(errmsg("could not connect to the primary server: %s", err)));
 	DisableWalRcvImmediateExit();
 
 	/*
@@ -316,13 +321,16 @@ WalReceiverMain(void)
 	{
 		char	   *primary_sysid;
 		char		standby_sysid[32];
+		int			server_version;
+		WalRcvStreamOptions options;
 
 		/*
 		 * Check that we're connected to a valid server using the
-		 * IDENTIFY_SYSTEM replication command,
+		 * IDENTIFY_SYSTEM replication command.
 		 */
 		EnableWalRcvImmediateExit();
-		primary_sysid = walrcv_identify_system(wrconn, &primaryTLI);
+		primary_sysid = walrcv_identify_system(wrconn, &primaryTLI,
+											   &server_version);
 
 		snprintf(standby_sysid, sizeof(standby_sysid), UINT64_FORMAT,
 				 GetSystemIdentifier());
@@ -368,9 +376,12 @@ WalReceiverMain(void)
 		 * history file, bump recovery target timeline, and ask us to restart
 		 * on the new timeline.
 		 */
+		options.logical = false;
+		options.startpoint = startpoint;
+		options.slotname = slotname[0] != '\0' ? slotname : NULL;
+		options.proto.physical.startpointTLI = startpointTLI;
 		ThisTimeLineID = startpointTLI;
-		if (walrcv_startstreaming(wrconn, startpointTLI, startpoint,
-								  slotname[0] != '\0' ? slotname : NULL))
+		if (walrcv_startstreaming(wrconn, &options))
 		{
 			if (first_stream)
 				ereport(LOG,
@@ -882,8 +893,7 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 				/* read the fields */
 				dataStart = pq_getmsgint64(&incoming_message);
 				walEnd = pq_getmsgint64(&incoming_message);
-				sendTime = IntegerTimestampToTimestampTz(
-										  pq_getmsgint64(&incoming_message));
+				sendTime = pq_getmsgint64(&incoming_message);
 				ProcessWalSndrMessage(walEnd, sendTime);
 
 				buf += hdrlen;
@@ -903,8 +913,7 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 
 				/* read the fields */
 				walEnd = pq_getmsgint64(&incoming_message);
-				sendTime = IntegerTimestampToTimestampTz(
-										  pq_getmsgint64(&incoming_message));
+				sendTime = pq_getmsgint64(&incoming_message);
 				replyRequested = pq_getmsgbyte(&incoming_message);
 
 				ProcessWalSndrMessage(walEnd, sendTime);
@@ -1139,7 +1148,7 @@ XLogWalRcvSendReply(bool force, bool requestReply)
 	pq_sendint64(&reply_message, writePtr);
 	pq_sendint64(&reply_message, flushPtr);
 	pq_sendint64(&reply_message, applyPtr);
-	pq_sendint64(&reply_message, GetCurrentIntegerTimestamp());
+	pq_sendint64(&reply_message, GetCurrentTimestamp());
 	pq_sendbyte(&reply_message, requestReply ? 1 : 0);
 
 	/* Send it */
@@ -1157,17 +1166,21 @@ XLogWalRcvSendReply(bool force, bool requestReply)
  * in case they don't have a watch.
  *
  * If the user disables feedback, send one final message to tell sender
- * to forget about the xmin on this standby.
+ * to forget about the xmin on this standby. We also send this message
+ * on first connect because a previous connection might have set xmin
+ * on a replication slot. (If we're not using a slot it's harmless to
+ * send a feedback message explicitly setting InvalidTransactionId).
  */
 static void
 XLogWalRcvSendHSFeedback(bool immed)
 {
 	TimestampTz now;
 	TransactionId nextXid;
-	uint32		nextEpoch;
-	TransactionId xmin;
+	uint32		xmin_epoch, catalog_xmin_epoch;
+	TransactionId xmin, catalog_xmin;
 	static TimestampTz sendTime = 0;
-	static bool master_has_standby_xmin = false;
+	/* initially true so we always send at least one feedback message */
+	static bool master_has_standby_xmin = true;
 
 	/*
 	 * If the user doesn't want status to be reported to the master, be sure
@@ -1192,43 +1205,71 @@ XLogWalRcvSendHSFeedback(bool immed)
 	}
 
 	/*
-	 * If Hot Standby is not yet active there is nothing to send. Check this
-	 * after the interval has expired to reduce number of calls.
+	 * If Hot Standby is not yet accepting connections there is nothing to
+	 * send. Check this after the interval has expired to reduce number of
+	 * calls.
+	 *
+	 * Bailing out here also ensures that we don't send feedback until we've
+	 * read our own replication slot state, so we don't tell the master to
+	 * discard needed xmin or catalog_xmin from any slots that may exist
+	 * on this replica.
 	 */
 	if (!HotStandbyActive())
-	{
-		Assert(!master_has_standby_xmin);
 		return;
-	}
 
 	/*
 	 * Make the expensive call to get the oldest xmin once we are certain
 	 * everything else has been checked.
 	 */
 	if (hot_standby_feedback)
-		xmin = GetOldestXmin(NULL, false);
+	{
+		TransactionId slot_xmin;
+
+		/*
+		 * Usually GetOldestXmin() would include both global replication slot
+		 * xmin and catalog_xmin in its calculations, but we want to derive
+		 * separate values for each of those. So we ask for an xmin that
+		 * excludes the catalog_xmin.
+		 */
+		xmin = GetOldestXmin(NULL,
+							 PROCARRAY_FLAGS_DEFAULT|PROCARRAY_SLOTS_XMIN);
+
+		ProcArrayGetReplicationSlotXmin(&slot_xmin, &catalog_xmin);
+
+		if (TransactionIdIsValid(slot_xmin) &&
+			TransactionIdPrecedes(slot_xmin, xmin))
+			xmin = slot_xmin;
+	}
 	else
+	{
 		xmin = InvalidTransactionId;
+		catalog_xmin = InvalidTransactionId;
+	}
 
 	/*
 	 * Get epoch and adjust if nextXid and oldestXmin are different sides of
 	 * the epoch boundary.
 	 */
-	GetNextXidAndEpoch(&nextXid, &nextEpoch);
+	GetNextXidAndEpoch(&nextXid, &xmin_epoch);
+	catalog_xmin_epoch = xmin_epoch;
 	if (nextXid < xmin)
-		nextEpoch--;
+		xmin_epoch --;
+	if (nextXid < catalog_xmin)
+		catalog_xmin_epoch --;
 
-	elog(DEBUG2, "sending hot standby feedback xmin %u epoch %u",
-		 xmin, nextEpoch);
+	elog(DEBUG2, "sending hot standby feedback xmin %u epoch %u catalog_xmin %u catalog_xmin_epoch %u",
+		 xmin, xmin_epoch, catalog_xmin, catalog_xmin_epoch);
 
 	/* Construct the message and send it. */
 	resetStringInfo(&reply_message);
 	pq_sendbyte(&reply_message, 'h');
-	pq_sendint64(&reply_message, GetCurrentIntegerTimestamp());
+	pq_sendint64(&reply_message, GetCurrentTimestamp());
 	pq_sendint(&reply_message, xmin, 4);
-	pq_sendint(&reply_message, nextEpoch, 4);
+	pq_sendint(&reply_message, xmin_epoch, 4);
+	pq_sendint(&reply_message, catalog_xmin, 4);
+	pq_sendint(&reply_message, catalog_xmin_epoch, 4);
 	walrcv_send(wrconn, reply_message.data, reply_message.len);
-	if (TransactionIdIsValid(xmin))
+	if (TransactionIdIsValid(xmin) || TransactionIdIsValid(catalog_xmin))
 		master_has_standby_xmin = true;
 	else
 		master_has_standby_xmin = false;
@@ -1381,7 +1422,7 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 	/* Fetch values */
 	values[0] = Int32GetDatum(walrcv->pid);
 
-	if (!superuser())
+	if (!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_STATS))
 	{
 		/*
 		 * Only superusers can see details. Other users only get the pid value

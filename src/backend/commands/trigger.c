@@ -3,7 +3,7 @@
  * trigger.c
  *	  PostgreSQL TRIGGERs support code.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -176,7 +176,8 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	 * Triggers must be on tables or views, and there are additional
 	 * relation-type-specific restrictions.
 	 */
-	if (rel->rd_rel->relkind == RELKIND_RELATION)
+	if (rel->rd_rel->relkind == RELKIND_RELATION ||
+		rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		/* Tables can't have INSTEAD OF triggers */
 		if (stmt->timing != TRIGGER_TYPE_BEFORE &&
@@ -186,6 +187,13 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 					 errmsg("\"%s\" is a table",
 							RelationGetRelationName(rel)),
 					 errdetail("Tables cannot have INSTEAD OF triggers.")));
+		/* Disallow ROW triggers on partitioned tables */
+		if (stmt->row && rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is a partitioned table",
+							RelationGetRelationName(rel)),
+				 errdetail("Partitioned tables cannot have ROW triggers.")));
 	}
 	else if (rel->rd_rel->relkind == RELKIND_VIEW)
 	{
@@ -332,9 +340,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 
 		foreach(lc, varList)
 		{
-			TriggerTransition   *tt = (TriggerTransition *) lfirst(lc);
-
-			Assert(IsA(tt, TriggerTransition));
+			TriggerTransition   *tt = lfirst_node(TriggerTransition, lc);
 
 			if (!(tt->isTable))
 				ereport(ERROR,
@@ -347,6 +353,13 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 			 * below.  If we later allow naming OLD and NEW ROW variables,
 			 * adjustments will be needed below.
 			 */
+
+			if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+				ereport(ERROR,
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("\"%s\" is a partitioned table",
+								RelationGetRelationName(rel)),
+					 errdetail("Triggers on partitioned tables cannot have transition tables.")));
 
 			if (stmt->timing != TRIGGER_TYPE_AFTER)
 				ereport(ERROR,
@@ -514,8 +527,9 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 		if (funcrettype == OPAQUEOID)
 		{
 			ereport(WARNING,
-					(errmsg("changing return type of function %s from \"opaque\" to \"trigger\"",
-							NameListToString(stmt->funcname))));
+				 (errmsg("changing return type of function %s from %s to %s",
+						 NameListToString(stmt->funcname),
+						 "opaque", "trigger")));
 			SetFunctionReturnType(funcoid, TRIGGEROID);
 		}
 		else
@@ -766,9 +780,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	/*
 	 * Insert tuple into pg_trigger.
 	 */
-	simple_heap_insert(tgrel, tuple);
-
-	CatalogUpdateIndexes(tgrel, tuple);
+	CatalogTupleInsert(tgrel, tuple);
 
 	heap_freetuple(tuple);
 	heap_close(tgrel, RowExclusiveLock);
@@ -795,9 +807,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 
 	((Form_pg_class) GETSTRUCT(tuple))->relhastriggers = true;
 
-	simple_heap_update(pgrel, &tuple->t_self, tuple);
-
-	CatalogUpdateIndexes(pgrel, tuple);
+	CatalogTupleUpdate(pgrel, &tuple->t_self, tuple);
 
 	heap_freetuple(tuple);
 	heap_close(pgrel, RowExclusiveLock);
@@ -1070,6 +1080,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		AlterTableStmt *atstmt = makeNode(AlterTableStmt);
 		AlterTableCmd *atcmd = makeNode(AlterTableCmd);
 		Constraint *fkcon = makeNode(Constraint);
+		PlannedStmt *wrapper = makeNode(PlannedStmt);
 
 		ereport(NOTICE,
 				(errmsg("converting trigger group into constraint \"%s\" %s",
@@ -1159,10 +1170,17 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		fkcon->skip_validation = false;
 		fkcon->initially_valid = true;
 
+		/* finally, wrap it in a dummy PlannedStmt */
+		wrapper->commandType = CMD_UTILITY;
+		wrapper->canSetTag = false;
+		wrapper->utilityStmt = (Node *) atstmt;
+		wrapper->stmt_location = -1;
+		wrapper->stmt_len = -1;
+
 		/* ... and execute it */
-		ProcessUtility((Node *) atstmt,
+		ProcessUtility(wrapper,
 					   "(generated ALTER TABLE ADD FOREIGN KEY command)",
-					   PROCESS_UTILITY_SUBCOMMAND, NULL,
+					   PROCESS_UTILITY_SUBCOMMAND, NULL, NULL,
 					   None_Receiver, NULL);
 
 		/* Remove the matched item from the list */
@@ -1211,7 +1229,8 @@ RemoveTriggerById(Oid trigOid)
 
 	if (rel->rd_rel->relkind != RELKIND_RELATION &&
 		rel->rd_rel->relkind != RELKIND_VIEW &&
-		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
+		rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a table, view, or foreign table",
@@ -1226,7 +1245,7 @@ RemoveTriggerById(Oid trigOid)
 	/*
 	 * Delete the pg_trigger tuple.
 	 */
-	simple_heap_delete(tgrel, &tup->t_self);
+	CatalogTupleDelete(tgrel, &tup->t_self);
 
 	systable_endscan(tgscan);
 	heap_close(tgrel, RowExclusiveLock);
@@ -1316,7 +1335,8 @@ RangeVarCallbackForRenameTrigger(const RangeVar *rv, Oid relid, Oid oldrelid,
 
 	/* only tables and views can have triggers */
 	if (form->relkind != RELKIND_RELATION && form->relkind != RELKIND_VIEW &&
-		form->relkind != RELKIND_FOREIGN_TABLE)
+		form->relkind != RELKIND_FOREIGN_TABLE &&
+		form->relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a table, view, or foreign table",
@@ -1427,10 +1447,7 @@ renametrig(RenameStmt *stmt)
 		namestrcpy(&((Form_pg_trigger) GETSTRUCT(tuple))->tgname,
 				   stmt->newname);
 
-		simple_heap_update(tgrel, &tuple->t_self, tuple);
-
-		/* keep system catalog indexes current */
-		CatalogUpdateIndexes(tgrel, tuple);
+		CatalogTupleUpdate(tgrel, &tuple->t_self, tuple);
 
 		InvokeObjectPostAlterHook(TriggerRelationId,
 								  HeapTupleGetOid(tuple), 0);
@@ -1543,10 +1560,7 @@ EnableDisableTrigger(Relation rel, const char *tgname,
 
 			newtrig->tgenabled = fires_when;
 
-			simple_heap_update(tgrel, &newtup->t_self, newtup);
-
-			/* Keep catalog indexes current */
-			CatalogUpdateIndexes(tgrel, newtup);
+			CatalogTupleUpdate(tgrel, &newtup->t_self, newtup);
 
 			heap_freetuple(newtup);
 
@@ -1666,13 +1680,13 @@ RelationBuildTriggers(Relation relation)
 			bytea	   *val;
 			char	   *p;
 
-			val = DatumGetByteaP(fastgetattr(htup,
-											 Anum_pg_trigger_tgargs,
-											 tgrel->rd_att, &isnull));
+			val = DatumGetByteaPP(fastgetattr(htup,
+											  Anum_pg_trigger_tgargs,
+											  tgrel->rd_att, &isnull));
 			if (isnull)
 				elog(ERROR, "tgargs is null in trigger for relation \"%s\"",
 					 RelationGetRelationName(relation));
-			p = (char *) VARDATA(val);
+			p = (char *) VARDATA_ANY(val);
 			build->tgargs = (char **) palloc(build->tgnargs * sizeof(char *));
 			for (i = 0; i < build->tgnargs; i++)
 			{
@@ -3050,7 +3064,7 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 	if (trigger->tgqual)
 	{
 		TupleDesc	tupdesc = RelationGetDescr(relinfo->ri_RelationDesc);
-		List	  **predicate;
+		ExprState **predicate;
 		ExprContext *econtext;
 		TupleTableSlot *oldslot = NULL;
 		TupleTableSlot *newslot = NULL;
@@ -3071,7 +3085,7 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 		 * nodetrees for it.  Keep them in the per-query memory context so
 		 * they'll survive throughout the query.
 		 */
-		if (*predicate == NIL)
+		if (*predicate == NULL)
 		{
 			Node	   *tgqual;
 
@@ -3080,9 +3094,9 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 			/* Change references to OLD and NEW to INNER_VAR and OUTER_VAR */
 			ChangeVarNodes(tgqual, PRS2_OLD_VARNO, INNER_VAR, 0);
 			ChangeVarNodes(tgqual, PRS2_NEW_VARNO, OUTER_VAR, 0);
-			/* ExecQual wants implicit-AND form */
+			/* ExecPrepareQual wants implicit-AND form */
 			tgqual = (Node *) make_ands_implicit((Expr *) tgqual);
-			*predicate = (List *) ExecPrepareExpr((Expr *) tgqual, estate);
+			*predicate = ExecPrepareQual((List *) tgqual, estate);
 			MemoryContextSwitchTo(oldContext);
 		}
 
@@ -3130,7 +3144,7 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 		 */
 		econtext->ecxt_innertuple = oldslot;
 		econtext->ecxt_outertuple = newslot;
-		if (!ExecQual(*predicate, econtext, false))
+		if (!ExecQual(*predicate, econtext))
 			return false;
 	}
 

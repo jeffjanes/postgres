@@ -8,7 +8,7 @@
  *	  interrupted, unlike LWLock waits.  Condition variables are safe
  *	  to use within dynamic shared memory segments.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/storage/lmgr/condition_variable.c
@@ -71,19 +71,22 @@ ConditionVariablePrepareToSleep(ConditionVariable *cv)
 						  &MyProc->procLatch, NULL);
 	}
 
+	/*
+	 * Reset my latch before adding myself to the queue and before entering
+	 * the caller's predicate loop.
+	 */
+	ResetLatch(&MyProc->procLatch);
+
 	/* Add myself to the wait queue. */
 	SpinLockAcquire(&cv->mutex);
 	if (!proclist_contains(&cv->wakeup, pgprocno, cvWaitLink))
 		proclist_push_tail(&cv->wakeup, pgprocno, cvWaitLink);
 	SpinLockRelease(&cv->mutex);
-
-	/* Reset my latch before entering the caller's predicate loop. */
-	ResetLatch(&MyProc->procLatch);
 }
 
 /*--------------------------------------------------------------------------
  * Wait for the given condition variable to be signaled.  This should be
- * called in a predicate loop that tests for a specfic exit condition and
+ * called in a predicate loop that tests for a specific exit condition and
  * otherwise sleeps, like so:
  *
  *   ConditionVariablePrepareToSleep(cv); [optional]
@@ -108,7 +111,7 @@ ConditionVariableSleep(ConditionVariable *cv, uint32 wait_event_info)
 	 * return can be avoided by calling ConditionVariablePrepareToSleep(cv)
 	 * first.  Whether it's worth doing that depends on whether you expect the
 	 * condition to be met initially, in which case skipping the prepare
-	 * allows you to skip manipulation of the wait list, or not met intiailly,
+	 * allows you to skip manipulation of the wait list, or not met initially,
 	 * in which case preparing first allows you to skip a spurious test of the
 	 * caller's exit condition.
 	 */

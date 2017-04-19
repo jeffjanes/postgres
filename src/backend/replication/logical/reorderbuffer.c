@@ -4,7 +4,7 @@
  *	  PostgreSQL logical replay/reorder buffer management
  *
  *
- * Copyright (c) 2012-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -58,6 +58,7 @@
 #include "catalog/catalog.h"
 #include "lib/binaryheap.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "replication/logical.h"
 #include "replication/reorderbuffer.h"
 #include "replication/slot.h"
@@ -156,10 +157,7 @@ static const Size max_changes_in_memory = 4096;
  * major bottleneck, especially when spilling to disk while decoding batch
  * workloads.
  */
-static const Size max_cached_changes = 4096 * 2;
 static const Size max_cached_tuplebufs = 4096 * 2;		/* ~8MB */
-static const Size max_cached_transactions = 512;
-
 
 /* ---------------------------------------
  * primary reorderbuffer support routines
@@ -241,6 +239,16 @@ ReorderBufferAllocate(void)
 
 	buffer->context = new_ctx;
 
+	buffer->change_context = SlabContextCreate(new_ctx,
+											   "Change",
+											   SLAB_DEFAULT_BLOCK_SIZE,
+											   sizeof(ReorderBufferChange));
+
+	buffer->txn_context = SlabContextCreate(new_ctx,
+											"TXN",
+											SLAB_DEFAULT_BLOCK_SIZE,
+											sizeof(ReorderBufferTXN));
+
 	hash_ctl.keysize = sizeof(TransactionId);
 	hash_ctl.entrysize = sizeof(ReorderBufferTXNByIdEnt);
 	hash_ctl.hcxt = buffer->context;
@@ -251,8 +259,6 @@ ReorderBufferAllocate(void)
 	buffer->by_txn_last_xid = InvalidTransactionId;
 	buffer->by_txn_last_txn = NULL;
 
-	buffer->nr_cached_transactions = 0;
-	buffer->nr_cached_changes = 0;
 	buffer->nr_cached_tuplebufs = 0;
 
 	buffer->outbuf = NULL;
@@ -261,8 +267,6 @@ ReorderBufferAllocate(void)
 	buffer->current_restart_decoding_lsn = InvalidXLogRecPtr;
 
 	dlist_init(&buffer->toplevel_by_lsn);
-	dlist_init(&buffer->cached_transactions);
-	dlist_init(&buffer->cached_changes);
 	slist_init(&buffer->cached_tuplebufs);
 
 	return buffer;
@@ -291,19 +295,8 @@ ReorderBufferGetTXN(ReorderBuffer *rb)
 {
 	ReorderBufferTXN *txn;
 
-	/* check the slab cache */
-	if (rb->nr_cached_transactions > 0)
-	{
-		rb->nr_cached_transactions--;
-		txn = (ReorderBufferTXN *)
-			dlist_container(ReorderBufferTXN, node,
-							dlist_pop_head_node(&rb->cached_transactions));
-	}
-	else
-	{
-		txn = (ReorderBufferTXN *)
-			MemoryContextAlloc(rb->context, sizeof(ReorderBufferTXN));
-	}
+	txn = (ReorderBufferTXN *)
+		MemoryContextAlloc(rb->txn_context, sizeof(ReorderBufferTXN));
 
 	memset(txn, 0, sizeof(ReorderBufferTXN));
 
@@ -344,18 +337,7 @@ ReorderBufferReturnTXN(ReorderBuffer *rb, ReorderBufferTXN *txn)
 		txn->invalidations = NULL;
 	}
 
-	/* check whether to put into the slab cache */
-	if (rb->nr_cached_transactions < max_cached_transactions)
-	{
-		rb->nr_cached_transactions++;
-		dlist_push_head(&rb->cached_transactions, &txn->node);
-		VALGRIND_MAKE_MEM_UNDEFINED(txn, sizeof(ReorderBufferTXN));
-		VALGRIND_MAKE_MEM_DEFINED(&txn->node, sizeof(txn->node));
-	}
-	else
-	{
-		pfree(txn);
-	}
+	pfree(txn);
 }
 
 /*
@@ -366,19 +348,8 @@ ReorderBufferGetChange(ReorderBuffer *rb)
 {
 	ReorderBufferChange *change;
 
-	/* check the slab cache */
-	if (rb->nr_cached_changes)
-	{
-		rb->nr_cached_changes--;
-		change = (ReorderBufferChange *)
-			dlist_container(ReorderBufferChange, node,
-							dlist_pop_head_node(&rb->cached_changes));
-	}
-	else
-	{
-		change = (ReorderBufferChange *)
-			MemoryContextAlloc(rb->context, sizeof(ReorderBufferChange));
-	}
+	change = (ReorderBufferChange *)
+		MemoryContextAlloc(rb->change_context, sizeof(ReorderBufferChange));
 
 	memset(change, 0, sizeof(ReorderBufferChange));
 	return change;
@@ -434,20 +405,8 @@ ReorderBufferReturnChange(ReorderBuffer *rb, ReorderBufferChange *change)
 			break;
 	}
 
-	/* check whether to put into the slab cache */
-	if (rb->nr_cached_changes < max_cached_changes)
-	{
-		rb->nr_cached_changes++;
-		dlist_push_head(&rb->cached_changes, &change->node);
-		VALGRIND_MAKE_MEM_UNDEFINED(change, sizeof(ReorderBufferChange));
-		VALGRIND_MAKE_MEM_DEFINED(&change->node, sizeof(change->node));
-	}
-	else
-	{
-		pfree(change);
-	}
+	pfree(change);
 }
-
 
 /*
  * Get an unused, possibly preallocated, ReorderBufferTupleBuf fitting at
@@ -1714,7 +1673,7 @@ ReorderBufferCommit(ReorderBuffer *rb, TransactionId xid,
  *
  * NB: Transactions handled here have to have actively aborted (i.e. have
  * produced an abort record). Implicitly aborted transactions are handled via
- * ReorderBufferAbortOld(); transactions we're just not interesteded in, but
+ * ReorderBufferAbortOld(); transactions we're just not interested in, but
  * which have committed are handled in ReorderBufferForget().
  *
  * This function purges this transaction and its contents from memory and
@@ -1782,7 +1741,7 @@ ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid)
  * toplevel xid.
  *
  * This is significantly different to ReorderBufferAbort() because
- * transactions that have committed need to be treated differenly from aborted
+ * transactions that have committed need to be treated differently from aborted
  * ones since they may have modified the catalog.
  *
  * Note that this is only allowed to be called in the moment a transaction
@@ -2317,6 +2276,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	ondisk->size = sz;
 
+	pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_WRITE);
 	if (write(fd, rb->outbuf, ondisk->size) != ondisk->size)
 	{
 		int			save_errno = errno;
@@ -2328,6 +2288,7 @@ ReorderBufferSerializeChange(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				 errmsg("could not write to data file for XID %u: %m",
 						txn->xid)));
 	}
+	pgstat_report_wait_end();
 
 	Assert(ondisk->change.action == change->action);
 }
@@ -2408,7 +2369,9 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		 * end of this file.
 		 */
 		ReorderBufferSerializeReserve(rb, sizeof(ReorderBufferDiskChange));
+		pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_READ);
 		readBytes = read(*fd, rb->outbuf, sizeof(ReorderBufferDiskChange));
+		pgstat_report_wait_end();
 
 		/* eof */
 		if (readBytes == 0)
@@ -2435,8 +2398,10 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 							 sizeof(ReorderBufferDiskChange) + ondisk->size);
 		ondisk = (ReorderBufferDiskChange *) rb->outbuf;
 
+		pgstat_report_wait_start(WAIT_EVENT_REORDER_BUFFER_READ);
 		readBytes = read(*fd, rb->outbuf + sizeof(ReorderBufferDiskChange),
 						 ondisk->size - sizeof(ReorderBufferDiskChange));
+		pgstat_report_wait_end();
 
 		if (readBytes < 0)
 			ereport(ERROR,
@@ -2648,7 +2613,7 @@ StartupReorderBuffer(void)
 	while ((logical_de = ReadDir(logical_dir, "pg_replslot")) != NULL)
 	{
 		struct stat statbuf;
-		char		path[MAXPGPATH];
+		char		path[MAXPGPATH * 2 + 12];
 
 		if (strcmp(logical_de->d_name, ".") == 0 ||
 			strcmp(logical_de->d_name, "..") == 0)
@@ -2660,7 +2625,7 @@ StartupReorderBuffer(void)
 
 		/*
 		 * ok, has to be a surviving logical slot, iterate and delete
-		 * everythign starting with xid-*
+		 * everything starting with xid-*
 		 */
 		sprintf(path, "pg_replslot/%s", logical_de->d_name);
 
@@ -3048,8 +3013,8 @@ DisplayMapping(HTAB *tuplecid_data)
 			 ent->key.relnode.dbNode,
 			 ent->key.relnode.spcNode,
 			 ent->key.relnode.relNode,
-			 BlockIdGetBlockNumber(&ent->key.tid.ip_blkid),
-			 ent->key.tid.ip_posid,
+			 ItemPointerGetBlockNumber(&ent->key.tid),
+			 ItemPointerGetOffsetNumber(&ent->key.tid),
 			 ent->cmin,
 			 ent->cmax
 			);
@@ -3089,7 +3054,9 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, Oid relid, const char *fname)
 		memset(&key, 0, sizeof(ReorderBufferTupleCidKey));
 
 		/* read all mappings till the end of the file */
+		pgstat_report_wait_start(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
 		readBytes = read(fd, &map, sizeof(LogicalRewriteMappingData));
+		pgstat_report_wait_end();
 
 		if (readBytes < 0)
 			ereport(ERROR,

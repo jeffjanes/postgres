@@ -4,7 +4,7 @@
  *	  prototypes for functions in backend/catalog/namespace.c
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/namespace.h
@@ -140,6 +140,8 @@ extern void PopOverrideSearchPath(void);
 extern Oid	get_collation_oid(List *collname, bool missing_ok);
 extern Oid	get_conversion_oid(List *conname, bool missing_ok);
 extern Oid	FindDefaultConversionProc(int32 for_encoding, int32 to_encoding);
+
+extern Oid	get_statistics_oid(List *names, bool missing_ok);
 
 /* initialization & transaction cleanup code */
 extern void InitializeSearchPath(void);

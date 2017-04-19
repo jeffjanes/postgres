@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2017, PostgreSQL Global Development Group
  *
  * src/bin/psql/copy.c
  */
@@ -552,7 +552,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 		/* interactive input probably silly, but give one prompt anyway */
 		if (showprompt)
 		{
-			const char *prompt = get_prompt(PROMPT_COPY);
+			const char *prompt = get_prompt(PROMPT_COPY, NULL);
 
 			fputs(prompt, stdout);
 			fflush(stdout);
@@ -590,7 +590,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 
 			if (showprompt)
 			{
-				const char *prompt = get_prompt(PROMPT_COPY);
+				const char *prompt = get_prompt(PROMPT_COPY, NULL);
 
 				fputs(prompt, stdout);
 				fflush(stdout);

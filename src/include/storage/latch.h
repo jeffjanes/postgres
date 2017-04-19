@@ -90,7 +90,7 @@
  * efficient than using WaitLatch or WaitLatchOrSocket.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/latch.h
@@ -133,6 +133,9 @@ typedef struct WaitEvent
 	uint32		events;			/* triggered events */
 	pgsocket	fd;				/* socket fd associated with event */
 	void	   *user_data;		/* pointer provided in AddWaitEventToSet */
+#ifdef WIN32
+	bool		reset;			/* Is reset of the event required? */
+#endif
 } WaitEvent;
 
 /* forward declaration to avoid exposing latch.c implementation details */

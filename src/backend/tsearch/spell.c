@@ -3,7 +3,7 @@
  * spell.c
  *		Normalizing word with ISpell
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  * Ispell dictionary
  * -----------------
@@ -37,7 +37,7 @@
  *	  Spell field. The AffixData field is initialized if AF parameter is not
  *	  defined.
  *	- NISortAffixes():
- *	  - builds a list of compond affixes from the affix list and stores it
+ *	  - builds a list of compound affixes from the affix list and stores it
  *		in the CompoundAffix.
  *	  - builds prefix trees (Trie) from the affix list for prefixes and suffixes
  *		and stores them in Suffix and Prefix fields.

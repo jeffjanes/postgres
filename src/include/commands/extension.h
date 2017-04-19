@@ -4,7 +4,7 @@
  *		Extension management commands (create/drop extension).
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/extension.h
@@ -48,7 +48,7 @@ extern ObjectAddress ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *
 extern Oid	get_extension_oid(const char *extname, bool missing_ok);
 extern char *get_extension_name(Oid ext_oid);
 
-extern ObjectAddress AlterExtensionNamespace(List *names, const char *newschema,
+extern ObjectAddress AlterExtensionNamespace(const char *extensionName, const char *newschema,
 						Oid *oldschema);
 
 extern void AlterExtensionOwner_oid(Oid extensionOid, Oid newOwnerId);

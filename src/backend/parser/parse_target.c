@@ -3,7 +3,7 @@
  * parse_target.c
  *	  handle target lists
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -289,12 +289,41 @@ transformExpressionList(ParseState *pstate, List *exprlist,
 
 
 /*
+ * resolveTargetListUnknowns()
+ *		Convert any unknown-type targetlist entries to type TEXT.
+ *
+ * We do this after we've exhausted all other ways of identifying the output
+ * column types of a query.
+ */
+void
+resolveTargetListUnknowns(ParseState *pstate, List *targetlist)
+{
+	ListCell   *l;
+
+	foreach(l, targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(l);
+		Oid			restype = exprType((Node *) tle->expr);
+
+		if (restype == UNKNOWNOID)
+		{
+			tle->expr = (Expr *) coerce_type(pstate, (Node *) tle->expr,
+											 restype, TEXTOID, -1,
+											 COERCION_IMPLICIT,
+											 COERCE_IMPLICIT_CAST,
+											 -1);
+		}
+	}
+}
+
+
+/*
  * markTargetListOrigins()
  *		Mark targetlist columns that are simple Vars with the source
  *		table's OID and column number.
  *
- * Currently, this is done only for SELECT targetlists, since we only
- * need the info if we are going to send it to the frontend.
+ * Currently, this is done only for SELECT targetlists and RETURNING lists,
+ * since we only need the info if we are going to send it to the frontend.
  */
 void
 markTargetListOrigins(ParseState *pstate, List *targetlist)
@@ -367,6 +396,8 @@ markTargetListOrigin(ParseState *pstate, TargetEntry *tle,
 			break;
 		case RTE_FUNCTION:
 		case RTE_VALUES:
+		case RTE_TABLEFUNC:
+		case RTE_NAMEDTUPLESTORE:
 			/* not a simple relation, leave it unmarked */
 			break;
 		case RTE_CTE:
@@ -1475,6 +1506,7 @@ expandRecordVariable(ParseState *pstate, Var *var, int levelsup)
 	{
 		case RTE_RELATION:
 		case RTE_VALUES:
+		case RTE_NAMEDTUPLESTORE:
 
 			/*
 			 * This case should not occur: a column of a table or values list
@@ -1526,6 +1558,12 @@ expandRecordVariable(ParseState *pstate, Var *var, int levelsup)
 			/*
 			 * We couldn't get here unless a function is declared with one of
 			 * its result columns as RECORD, which is not allowed.
+			 */
+			break;
+		case RTE_TABLEFUNC:
+
+			/*
+			 * Table function cannot have columns with RECORD type.
 			 */
 			break;
 		case RTE_CTE:

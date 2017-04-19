@@ -28,6 +28,7 @@
 #include "compress_io.h"
 #include "parallel.h"
 #include "pg_backup_utils.h"
+#include "common/file_utils.h"
 
 /*--------
  * Routines in the format interface
@@ -198,7 +199,7 @@ InitArchiveFmt_Custom(ArchiveHandle *AH)
  *
  * Optional.
  *
- * Set up extrac format-related TOC data.
+ * Set up extract format-related TOC data.
 */
 static void
 _ArchiveEntry(ArchiveHandle *AH, TocEntry *te)
@@ -720,6 +721,10 @@ _CloseArchive(ArchiveHandle *AH)
 
 	if (fclose(AH->FH) != 0)
 		exit_horribly(modulename, "could not close archive file: %s\n", strerror(errno));
+
+	/* Sync the output file if one is defined */
+	if (AH->dosync && AH->mode == archModeWrite && AH->fSpec)
+		(void) fsync_fname(AH->fSpec, false, progname);
 
 	AH->FH = NULL;
 }

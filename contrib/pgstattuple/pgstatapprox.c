@@ -3,7 +3,7 @@
  * pgstatapprox.c
  *		  Bloat estimation functions
  *
- * Copyright (c) 2014-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2014-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/pgstattuple/pgstatapprox.c
@@ -70,7 +70,7 @@ statapprox_heap(Relation rel, output_type *stat)
 	TransactionId OldestXmin;
 	uint64		misc_count = 0;
 
-	OldestXmin = GetOldestXmin(rel, true);
+	OldestXmin = GetOldestXmin(rel, PROCARRAY_FLAGS_VACUUM);
 	bstrategy = GetAccessStrategy(BAS_BULKREAD);
 
 	nblocks = RelationGetNumberOfBlocks(rel);

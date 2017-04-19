@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/dependency.h
@@ -147,6 +147,7 @@ typedef enum ObjectClass
 	OCLASS_REWRITE,				/* pg_rewrite */
 	OCLASS_TRIGGER,				/* pg_trigger */
 	OCLASS_SCHEMA,				/* pg_namespace */
+	OCLASS_STATISTIC_EXT,		/* pg_statistic_ext */
 	OCLASS_TSPARSER,			/* pg_ts_parser */
 	OCLASS_TSDICT,				/* pg_ts_dict */
 	OCLASS_TSTEMPLATE,			/* pg_ts_template */
@@ -161,6 +162,9 @@ typedef enum ObjectClass
 	OCLASS_EXTENSION,			/* pg_extension */
 	OCLASS_EVENT_TRIGGER,		/* pg_event_trigger */
 	OCLASS_POLICY,				/* pg_policy */
+	OCLASS_PUBLICATION,			/* pg_publication */
+	OCLASS_PUBLICATION_REL,		/* pg_publication_rel */
+	OCLASS_SUBSCRIPTION,		/* pg_subscription */
 	OCLASS_TRANSFORM			/* pg_transform */
 } ObjectClass;
 
@@ -189,7 +193,8 @@ extern void recordDependencyOnExpr(const ObjectAddress *depender,
 extern void recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
 								Node *expr, Oid relId,
 								DependencyType behavior,
-								DependencyType self_behavior);
+								DependencyType self_behavior,
+								bool ignore_self);
 
 extern ObjectClass getObjectClass(const ObjectAddress *object);
 
@@ -233,11 +238,9 @@ extern long changeDependencyFor(Oid classId, Oid objectId,
 
 extern Oid	getExtensionOfObject(Oid classId, Oid objectId);
 
-extern bool sequenceIsOwned(Oid seqId, Oid *tableId, int32 *colId);
-
-extern void markSequenceUnowned(Oid seqId);
-
-extern List *getOwnedSequences(Oid relid);
+extern bool sequenceIsOwned(Oid seqId, char deptype, Oid *tableId, int32 *colId);
+extern List *getOwnedSequences(Oid relid, AttrNumber attnum);
+extern Oid getOwnedSequence(Oid relid, AttrNumber attnum);
 
 extern Oid	get_constraint_index(Oid constraintId);
 

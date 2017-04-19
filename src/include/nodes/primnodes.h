@@ -7,7 +7,7 @@
  *	  and join trees.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/primnodes.h
@@ -18,6 +18,7 @@
 #define PRIMNODES_H
 
 #include "access/attnum.h"
+#include "nodes/bitmapset.h"
 #include "nodes/pg_list.h"
 
 
@@ -42,13 +43,6 @@ typedef struct Alias
 	List	   *colnames;		/* optional list of column aliases */
 } Alias;
 
-typedef enum InhOption
-{
-	INH_NO,						/* Do NOT scan child tables */
-	INH_YES,					/* DO scan child tables */
-	INH_DEFAULT					/* Use current SQL_inheritance option */
-} InhOption;
-
 /* What to do at commit time for temporary relations */
 typedef enum OnCommitAction
 {
@@ -62,7 +56,7 @@ typedef enum OnCommitAction
  * RangeVar - range variable, used in FROM clauses
  *
  * Also used to represent table names in utility statements; there, the alias
- * field is not used, and inhOpt shows whether to apply the operation
+ * field is not used, and inh tells whether to apply the operation
  * recursively to child tables.  In some contexts it is also useful to carry
  * a TEMP table indication here.
  */
@@ -72,12 +66,33 @@ typedef struct RangeVar
 	char	   *catalogname;	/* the catalog (database) name, or NULL */
 	char	   *schemaname;		/* the schema name, or NULL */
 	char	   *relname;		/* the relation/sequence name */
-	InhOption	inhOpt;			/* expand rel by inheritance? recursively act
+	bool		inh;			/* expand rel by inheritance? recursively act
 								 * on children? */
 	char		relpersistence; /* see RELPERSISTENCE_* in pg_class.h */
 	Alias	   *alias;			/* table alias & optional column aliases */
 	int			location;		/* token location, or -1 if unknown */
 } RangeVar;
+
+/*
+ * TableFunc - node for a table function, such as XMLTABLE.
+ */
+typedef struct TableFunc
+{
+	NodeTag		type;
+	List	   *ns_uris;		/* list of namespace uri */
+	List	   *ns_names;		/* list of namespace names */
+	Node	   *docexpr;		/* input document expression */
+	Node	   *rowexpr;		/* row filter expression */
+	List	   *colnames;		/* column names (list of String) */
+	List	   *coltypes;		/* OID list of column type OIDs */
+	List	   *coltypmods;		/* integer list of column typmods */
+	List	   *colcollations;	/* OID list of column collation OIDs */
+	List	   *colexprs;		/* list of column filter expressions */
+	List	   *coldefexprs;	/* list of column default expressions */
+	Bitmapset  *notnulls;		/* nullability flag for each output column */
+	int			ordinalitycol;	/* counts from 0; -1 if none specified */
+	int			location;		/* token location, or -1 if unknown */
+} TableFunc;
 
 /*
  * IntoClause - target information for SELECT INTO, CREATE TABLE AS, and
@@ -684,6 +699,8 @@ typedef struct SubPlan
 	bool		unknownEqFalse; /* TRUE if it's okay to return FALSE when the
 								 * spec result is UNKNOWN; this allows much
 								 * simpler handling of null values */
+	bool		parallel_safe;	/* is the subplan parallel-safe? */
+	/* Note: parallel_safe does not consider contents of testexpr or args */
 	/* Information for passing params into and out of the subselect: */
 	/* setParam and parParam are lists of integers (param IDs) */
 	List	   *setParam;		/* initplan subqueries have to set these
@@ -1275,6 +1292,20 @@ typedef struct InferenceElem
 	Oid			infercollid;	/* OID of collation, or InvalidOid */
 	Oid			inferopclass;	/* OID of att opclass, or InvalidOid */
 } InferenceElem;
+
+/*
+ * NextValueExpr - get next value from sequence
+ *
+ * This has the same effect as calling the nextval() function, but it does not
+ * check permissions on the sequence.  This is used for identity columns,
+ * where the sequence is an implicit dependency without its own permissions.
+ */
+typedef struct NextValueExpr
+{
+	Expr		xpr;
+	Oid			seqid;
+	Oid			typeId;
+} NextValueExpr;
 
 /*--------------------
  * TargetEntry -

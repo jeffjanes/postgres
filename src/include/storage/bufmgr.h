@@ -4,7 +4,7 @@
  *	  POSTGRES buffer manager definitions.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/bufmgr.h
@@ -237,7 +237,7 @@ extern void FreeAccessStrategy(BufferAccessStrategy strategy);
 
 /*
  * Although this header file is nominally backend-only, certain frontend
- * programs like pg_xlogdump include it.  For compilers that emit static
+ * programs like pg_waldump include it.  For compilers that emit static
  * inline functions even when they're unused, that leads to unsatisfied
  * external references; hence hide these with #ifndef FRONTEND.
  */

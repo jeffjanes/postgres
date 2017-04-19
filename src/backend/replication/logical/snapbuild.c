@@ -34,7 +34,7 @@
  * xid. That is we keep a list of transactions between snapshot->(xmin, xmax)
  * that we consider committed, everything else is considered aborted/in
  * progress. That also allows us not to care about subtransactions before they
- * have committed which means this modules, in contrast to HS, doesn't have to
+ * have committed which means this module, in contrast to HS, doesn't have to
  * care about suboverflowed subtransactions and similar.
  *
  * One complexity of doing this is that to e.g. handle mixed DDL/DML
@@ -82,7 +82,7 @@
  * Initially the machinery is in the START stage. When an xl_running_xacts
  * record is read that is sufficiently new (above the safe xmin horizon),
  * there's a state transition. If there were no running xacts when the
- * runnign_xacts record was generated, we'll directly go into CONSISTENT
+ * running_xacts record was generated, we'll directly go into CONSISTENT
  * state, otherwise we'll switch to the FULL_SNAPSHOT state. Having a full
  * snapshot means that all transactions that start henceforth can be decoded
  * in their entirety, but transactions that started previously can't. In
@@ -96,7 +96,7 @@
  * is a convenient point to initialize replication from, which is why we
  * export a snapshot at that point, which *can* be used to read normal data.
  *
- * Copyright (c) 2012-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/snapbuild.c
@@ -107,7 +107,6 @@
 #include "postgres.h"
 
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include "miscadmin.h"
@@ -115,6 +114,8 @@
 #include "access/heapam_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
+
+#include "pgstat.h"
 
 #include "replication/logical.h"
 #include "replication/reorderbuffer.h"
@@ -274,7 +275,7 @@ static bool SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn);
 /*
  * Allocate a new snapshot builder.
  *
- * xmin_horizon is the xid >=which we can be sure no catalog rows have been
+ * xmin_horizon is the xid >= which we can be sure no catalog rows have been
  * removed, start_lsn is the LSN >= we want to replay commits.
  */
 SnapBuild *
@@ -498,51 +499,32 @@ SnapBuildBuildSnapshot(SnapBuild *builder, TransactionId xid)
 }
 
 /*
- * Export a snapshot so it can be set in another session with SET TRANSACTION
- * SNAPSHOT.
+ * Build the initial slot snapshot and convert it to a normal snapshot that
+ * is understood by HeapTupleSatisfiesMVCC.
  *
- * For that we need to start a transaction in the current backend as the
- * importing side checks whether the source transaction is still open to make
- * sure the xmin horizon hasn't advanced since then.
- *
- * After that we convert a locally built snapshot into the normal variant
- * understood by HeapTupleSatisfiesMVCC et al.
+ * The snapshot will be usable directly in current transaction or exported
+ * for loading in different transaction.
  */
-const char *
-SnapBuildExportSnapshot(SnapBuild *builder)
+Snapshot
+SnapBuildInitialSnapshot(SnapBuild *builder)
 {
 	Snapshot	snap;
-	char	   *snapname;
 	TransactionId xid;
 	TransactionId *newxip;
 	int			newxcnt = 0;
 
+	Assert(!FirstSnapshotSet);
+	Assert(XactIsoLevel == XACT_REPEATABLE_READ);
+
 	if (builder->state != SNAPBUILD_CONSISTENT)
-		elog(ERROR, "cannot export a snapshot before reaching a consistent state");
+		elog(ERROR, "cannot build an initial slot snapshot before reaching a consistent state");
 
 	if (!builder->committed.includes_all_transactions)
-		elog(ERROR, "cannot export a snapshot, not all transactions are monitored anymore");
+		elog(ERROR, "cannot build an initial slot snapshot, not all transactions are monitored anymore");
 
 	/* so we don't overwrite the existing value */
 	if (TransactionIdIsValid(MyPgXact->xmin))
-		elog(ERROR, "cannot export a snapshot when MyPgXact->xmin already is valid");
-
-	if (IsTransactionOrTransactionBlock())
-		elog(ERROR, "cannot export a snapshot from within a transaction");
-
-	if (SavedResourceOwnerDuringExport)
-		elog(ERROR, "can only export one snapshot at a time");
-
-	SavedResourceOwnerDuringExport = CurrentResourceOwner;
-	ExportInProgress = true;
-
-	StartTransactionCommand();
-
-	Assert(!FirstSnapshotSet);
-
-	/* There doesn't seem to a nice API to set these */
-	XactIsoLevel = XACT_REPEATABLE_READ;
-	XactReadOnly = true;
+		elog(ERROR, "cannot build an initial slot snapshot when MyPgXact->xmin already is valid");
 
 	snap = SnapBuildBuildSnapshot(builder, GetTopTransactionId());
 
@@ -577,7 +559,9 @@ SnapBuildExportSnapshot(SnapBuild *builder)
 		if (test == NULL)
 		{
 			if (newxcnt >= GetMaxSnapshotXidCount())
-				elog(ERROR, "snapshot too large");
+				ereport(ERROR,
+					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+					 errmsg("initial slot snapshot too large")));
 
 			newxip[newxcnt++] = xid;
 		}
@@ -588,9 +572,43 @@ SnapBuildExportSnapshot(SnapBuild *builder)
 	snap->xcnt = newxcnt;
 	snap->xip = newxip;
 
+	return snap;
+}
+
+/*
+ * Export a snapshot so it can be set in another session with SET TRANSACTION
+ * SNAPSHOT.
+ *
+ * For that we need to start a transaction in the current backend as the
+ * importing side checks whether the source transaction is still open to make
+ * sure the xmin horizon hasn't advanced since then.
+ */
+const char *
+SnapBuildExportSnapshot(SnapBuild *builder)
+{
+	Snapshot	snap;
+	char	   *snapname;
+
+	if (IsTransactionOrTransactionBlock())
+		elog(ERROR, "cannot export a snapshot from within a transaction");
+
+	if (SavedResourceOwnerDuringExport)
+		elog(ERROR, "can only export one snapshot at a time");
+
+	SavedResourceOwnerDuringExport = CurrentResourceOwner;
+	ExportInProgress = true;
+
+	StartTransactionCommand();
+
+	/* There doesn't seem to a nice API to set these */
+	XactIsoLevel = XACT_REPEATABLE_READ;
+	XactReadOnly = true;
+
+	snap = SnapBuildInitialSnapshot(builder);
+
 	/*
-	 * now that we've built a plain snapshot, use the normal mechanisms for
-	 * exporting it
+	 * now that we've built a plain snapshot, make it active and use the
+	 * normal mechanisms for exporting it
 	 */
 	snapname = ExportSnapshot(snap);
 
@@ -614,7 +632,7 @@ SnapBuildGetOrBuildSnapshot(SnapBuild *builder, TransactionId xid)
 	if (builder->snapshot == NULL)
 	{
 		builder->snapshot = SnapBuildBuildSnapshot(builder, xid);
-		/* inrease refcount for the snapshot builder */
+		/* increase refcount for the snapshot builder */
 		SnapBuildSnapIncRefcount(builder->snapshot);
 	}
 
@@ -678,7 +696,7 @@ SnapBuildProcessChange(SnapBuild *builder, TransactionId xid, XLogRecPtr lsn)
 		if (builder->snapshot == NULL)
 		{
 			builder->snapshot = SnapBuildBuildSnapshot(builder, xid);
-			/* inrease refcount for the snapshot builder */
+			/* increase refcount for the snapshot builder */
 			SnapBuildSnapIncRefcount(builder->snapshot);
 		}
 
@@ -911,7 +929,7 @@ SnapBuildEndTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid)
 		{
 			/*
 			 * None of the originally running transaction is running anymore,
-			 * so our incrementaly built snapshot now is consistent.
+			 * so our incrementally built snapshot now is consistent.
 			 */
 			ereport(LOG,
 				  (errmsg("logical decoding found consistent point at %X/%X",
@@ -1152,7 +1170,7 @@ SnapBuildProcessRunningXacts(SnapBuild *builder, XLogRecPtr lsn, xl_running_xact
 		 running->oldestRunningXid);
 
 	/*
-	 * Inrease shared memory limits, so vacuum can work on tuples we prevented
+	 * Increase shared memory limits, so vacuum can work on tuples we prevented
 	 * from being pruned till now.
 	 */
 	LogicalIncreaseXminForSlot(lsn, running->oldestRunningXid);
@@ -1473,7 +1491,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	/*
 	 * We identify snapshots by the LSN they are valid for. We don't need to
 	 * include timelines in the name as each LSN maps to exactly one timeline
-	 * unless the user used pg_resetxlog or similar. If a user did so, there's
+	 * unless the user used pg_resetwal or similar. If a user did so, there's
 	 * no hope continuing to decode anyway.
 	 */
 	sprintf(path, "pg_logical/snapshots/%X-%X.snap",
@@ -1581,6 +1599,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 		ereport(ERROR,
 				(errmsg("could not open file \"%s\": %m", path)));
 
+	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_WRITE);
 	if ((write(fd, ondisk, needed_length)) != needed_length)
 	{
 		CloseTransientFile(fd);
@@ -1588,6 +1607,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
+	pgstat_report_wait_end();
 
 	/*
 	 * fsync the file before renaming so that even if we crash after this we
@@ -1597,6 +1617,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	 * some noticeable overhead since it's performed synchronously during
 	 * decoding?
 	 */
+	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_SYNC);
 	if (pg_fsync(fd) != 0)
 	{
 		CloseTransientFile(fd);
@@ -1604,6 +1625,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
 	}
+	pgstat_report_wait_end();
 	CloseTransientFile(fd);
 
 	fsync_fname("pg_logical/snapshots", true);
@@ -1678,7 +1700,9 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 
 
 	/* read statically sized portion of snapshot */
+	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, &ondisk, SnapBuildOnDiskConstantSize);
+	pgstat_report_wait_end();
 	if (readBytes != SnapBuildOnDiskConstantSize)
 	{
 		CloseTransientFile(fd);
@@ -1704,7 +1728,9 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 			SnapBuildOnDiskConstantSize - SnapBuildOnDiskNotChecksummedSize);
 
 	/* read SnapBuild */
+	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, &ondisk.builder, sizeof(SnapBuild));
+	pgstat_report_wait_end();
 	if (readBytes != sizeof(SnapBuild))
 	{
 		CloseTransientFile(fd);
@@ -1718,7 +1744,9 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 	/* restore running xacts information */
 	sz = sizeof(TransactionId) * ondisk.builder.running.xcnt_space;
 	ondisk.builder.running.xip = MemoryContextAllocZero(builder->context, sz);
+	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, ondisk.builder.running.xip, sz);
+	pgstat_report_wait_end();
 	if (readBytes != sz)
 	{
 		CloseTransientFile(fd);
@@ -1732,7 +1760,9 @@ SnapBuildRestore(SnapBuild *builder, XLogRecPtr lsn)
 	/* restore committed xacts information */
 	sz = sizeof(TransactionId) * ondisk.builder.committed.xcnt;
 	ondisk.builder.committed.xip = MemoryContextAllocZero(builder->context, sz);
+	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, ondisk.builder.committed.xip, sz);
+	pgstat_report_wait_end();
 	if (readBytes != sz)
 	{
 		CloseTransientFile(fd);
@@ -1838,10 +1868,10 @@ CheckPointSnapBuild(void)
 	XLogRecPtr	redo;
 	DIR		   *snap_dir;
 	struct dirent *snap_de;
-	char		path[MAXPGPATH];
+	char		path[MAXPGPATH + 21];
 
 	/*
-	 * We start of with a minimum of the last redo pointer. No new replication
+	 * We start off with a minimum of the last redo pointer. No new replication
 	 * slot will start before that, so that's a safe upper bound for removal.
 	 */
 	redo = GetRedoRecPtr();
@@ -1865,7 +1895,7 @@ CheckPointSnapBuild(void)
 			strcmp(snap_de->d_name, "..") == 0)
 			continue;
 
-		snprintf(path, MAXPGPATH, "pg_logical/snapshots/%s", snap_de->d_name);
+		snprintf(path, sizeof(path), "pg_logical/snapshots/%s", snap_de->d_name);
 
 		if (lstat(path, &statbuf) == 0 && !S_ISREG(statbuf.st_mode))
 		{
@@ -1899,7 +1929,7 @@ CheckPointSnapBuild(void)
 			/*
 			 * It's not particularly harmful, though strange, if we can't
 			 * remove the file here. Don't prevent the checkpoint from
-			 * completing, that'd be cure worse than the disease.
+			 * completing, that'd be a cure worse than the disease.
 			 */
 			if (unlink(path) < 0)
 			{

@@ -36,7 +36,7 @@
  *
  * As ever, Windows requires its own implementation.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -49,7 +49,6 @@
 #include "postgres.h"
 
 #include <fcntl.h>
-#include <string.h>
 #include <unistd.h>
 #ifndef WIN32
 #include <sys/mman.h>
@@ -61,6 +60,7 @@
 #ifdef HAVE_SYS_SHM_H
 #include <sys/shm.h>
 #endif
+#include "pgstat.h"
 
 #include "portability/mem.h"
 #include "storage/dsm_impl.h"
@@ -912,10 +912,12 @@ dsm_impl_mmap(dsm_op op, dsm_handle handle, Size request_size,
 
 			if (goal > ZBUFFER_SIZE)
 				goal = ZBUFFER_SIZE;
+			pgstat_report_wait_start(WAIT_EVENT_DSM_FILL_ZERO_WRITE);
 			if (write(fd, zbuffer, goal) == goal)
 				remaining -= goal;
 			else
 				success = false;
+			pgstat_report_wait_end();
 		}
 
 		if (!success)

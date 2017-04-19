@@ -21,23 +21,21 @@
  */
 #include "postgres_fe.h"
 
+#include <ctype.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#ifdef WIN32
+#include <io.h>
+#endif
+
 #include "parallel.h"
 #include "pg_backup_archiver.h"
 #include "pg_backup_db.h"
 #include "pg_backup_utils.h"
 #include "dumputils.h"
 #include "fe_utils/string_utils.h"
-
-#include <ctype.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-
-#ifdef WIN32
-#include <io.h>
-#endif
 
 #include "libpq/libpq-fs.h"
 
@@ -56,7 +54,8 @@ static const char *modulename = gettext_noop("archiver");
 
 
 static ArchiveHandle *_allocAH(const char *FileSpec, const ArchiveFormat fmt,
-	 const int compression, ArchiveMode mode, SetupWorkerPtr setupWorkerPtr);
+	 const int compression, bool dosync, ArchiveMode mode,
+	 SetupWorkerPtrType setupWorkerPtr);
 static void _getObjectDescription(PQExpBuffer buf, TocEntry *te,
 					  ArchiveHandle *AH);
 static void _printTocEntry(ArchiveHandle *AH, TocEntry *te, bool isData, bool acl_pass);
@@ -203,10 +202,12 @@ setupRestoreWorker(Archive *AHX)
 /* Public */
 Archive *
 CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
-	 const int compression, ArchiveMode mode, SetupWorkerPtr setupDumpWorker)
+			  const int compression, bool dosync, ArchiveMode mode,
+			  SetupWorkerPtrType setupDumpWorker)
 
 {
-	ArchiveHandle *AH = _allocAH(FileSpec, fmt, compression, mode, setupDumpWorker);
+	ArchiveHandle *AH = _allocAH(FileSpec, fmt, compression, dosync,
+								 mode, setupDumpWorker);
 
 	return (Archive *) AH;
 }
@@ -216,7 +217,7 @@ CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
 Archive *
 OpenArchive(const char *FileSpec, const ArchiveFormat fmt)
 {
-	ArchiveHandle *AH = _allocAH(FileSpec, fmt, 0, archModeRead, setupRestoreWorker);
+	ArchiveHandle *AH = _allocAH(FileSpec, fmt, 0, true, archModeRead, setupRestoreWorker);
 
 	return (Archive *) AH;
 }
@@ -1105,7 +1106,8 @@ PrintTOCSummary(Archive *AHX)
 
 	ahprintf(AH, ";\n; Archive created at %s\n", stamp_str);
 	ahprintf(AH, ";     dbname: %s\n;     TOC Entries: %d\n;     Compression: %d\n",
-			 AH->archdbname, AH->tocCount, AH->compression);
+			 replace_line_endings(AH->archdbname),
+			 AH->tocCount, AH->compression);
 
 	switch (AH->format)
 	{
@@ -1143,10 +1145,37 @@ PrintTOCSummary(Archive *AHX)
 			curSection = te->section;
 		if (ropt->verbose ||
 			(_tocEntryRequired(te, curSection, ropt) & (REQ_SCHEMA | REQ_DATA)) != 0)
+		{
+			char	   *sanitized_name;
+			char	   *sanitized_schema;
+			char	   *sanitized_owner;
+
+			/*
+			 * As in _printTocEntry(), sanitize strings that might contain
+			 * newlines, to ensure that each logical output line is in fact
+			 * one physical output line.  This prevents confusion when the
+			 * file is read by "pg_restore -L".  Note that we currently don't
+			 * bother to quote names, meaning that the name fields aren't
+			 * automatically parseable.  "pg_restore -L" doesn't care because
+			 * it only examines the dumpId field, but someday we might want to
+			 * try harder.
+			 */
+			sanitized_name = replace_line_endings(te->tag);
+			if (te->namespace)
+				sanitized_schema = replace_line_endings(te->namespace);
+			else
+				sanitized_schema = pg_strdup("-");
+			sanitized_owner = replace_line_endings(te->owner);
+
 			ahprintf(AH, "%d; %u %u %s %s %s %s\n", te->dumpId,
 					 te->catalogId.tableoid, te->catalogId.oid,
-					 te->desc, te->namespace ? te->namespace : "-",
-					 te->tag, te->owner);
+					 te->desc, sanitized_schema, sanitized_name,
+					 sanitized_owner);
+
+			free(sanitized_name);
+			free(sanitized_schema);
+			free(sanitized_owner);
+		}
 		if (ropt->verbose && te->nDeps > 0)
 		{
 			int			i;
@@ -2242,7 +2271,8 @@ _discoverArchiveFormat(ArchiveHandle *AH)
  */
 static ArchiveHandle *
 _allocAH(const char *FileSpec, const ArchiveFormat fmt,
-	  const int compression, ArchiveMode mode, SetupWorkerPtr setupWorkerPtr)
+		 const int compression, bool dosync, ArchiveMode mode,
+		 SetupWorkerPtrType setupWorkerPtr)
 {
 	ArchiveHandle *AH;
 
@@ -2296,6 +2326,7 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 	AH->mode = mode;
 	AH->compression = compression;
+	AH->dosync = dosync;
 
 	memset(&(AH->sqlparse), 0, sizeof(AH->sqlparse));
 
@@ -2414,8 +2445,8 @@ mark_dump_job_done(ArchiveHandle *AH,
 void
 WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te)
 {
-	StartDataPtr startPtr;
-	EndDataPtr	endPtr;
+	StartDataPtrType startPtr;
+	EndDataPtrType	endPtr;
 
 	AH->currToc = te;
 
@@ -2875,7 +2906,15 @@ _tocEntryRequired(TocEntry *te, teSection curSection, RestoreOptions *ropt)
 	/* Mask it if we only want schema */
 	if (ropt->schemaOnly)
 	{
-		if (!(ropt->sequence_data && strcmp(te->desc, "SEQUENCE SET") == 0))
+		/*
+		 * In binary-upgrade mode, even with schema-only set, we do not mask
+		 * out large objects.  Only large object definitions, comments and
+		 * other information should be generated in binary-upgrade mode (not
+		 * the actual data).
+		 */
+		if (!(ropt->sequence_data && strcmp(te->desc, "SEQUENCE SET") == 0) &&
+			!(ropt->binary_upgrade && strcmp(te->desc, "BLOB") == 0) &&
+		!(ropt->binary_upgrade && strncmp(te->tag, "LARGE OBJECT ", 13) == 0))
 			res = res & REQ_SCHEMA;
 	}
 
@@ -3266,6 +3305,8 @@ _getObjectDescription(PQExpBuffer buf, TocEntry *te, ArchiveHandle *AH)
 		strcmp(type, "SCHEMA") == 0 ||
 		strcmp(type, "FOREIGN DATA WRAPPER") == 0 ||
 		strcmp(type, "SERVER") == 0 ||
+		strcmp(type, "PUBLICATION") == 0 ||
+		strcmp(type, "SUBSCRIPTION") == 0 ||
 		strcmp(type, "USER MAPPING") == 0)
 	{
 		/* We already know that search_path was set properly */
@@ -3476,7 +3517,9 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, bool isData, bool acl_pass)
 			strcmp(te->desc, "TEXT SEARCH DICTIONARY") == 0 ||
 			strcmp(te->desc, "TEXT SEARCH CONFIGURATION") == 0 ||
 			strcmp(te->desc, "FOREIGN DATA WRAPPER") == 0 ||
-			strcmp(te->desc, "SERVER") == 0)
+			strcmp(te->desc, "SERVER") == 0 ||
+			strcmp(te->desc, "PUBLICATION") == 0 ||
+			strcmp(te->desc, "SUBSCRIPTION") == 0)
 		{
 			PQExpBuffer temp = createPQExpBuffer();
 
@@ -3496,7 +3539,8 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, bool isData, bool acl_pass)
 				 strcmp(te->desc, "TRIGGER") == 0 ||
 				 strcmp(te->desc, "ROW SECURITY") == 0 ||
 				 strcmp(te->desc, "POLICY") == 0 ||
-				 strcmp(te->desc, "USER MAPPING") == 0)
+				 strcmp(te->desc, "USER MAPPING") == 0 ||
+				 strcmp(te->desc, "STATISTICS") == 0)
 		{
 			/* these object types don't have separate owners */
 		}
@@ -3520,8 +3564,9 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, bool isData, bool acl_pass)
 }
 
 /*
- * Sanitize a string to be included in an SQL comment, by replacing any
- * newlines with spaces.
+ * Sanitize a string to be included in an SQL comment or TOC listing,
+ * by replacing any newlines with spaces.
+ * The result is a freshly malloc'd string.
  */
 static char *
 replace_line_endings(const char *str)

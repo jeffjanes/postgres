@@ -4,7 +4,7 @@
  *		Functions for finding and validating executable files
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,7 +35,7 @@
 #define log_error4(str, param, arg1)	(fprintf(stderr, str, param, arg1), fputc('\n', stderr))
 #endif
 
-#ifdef WIN32_ONLY_COMPILER
+#ifdef _MSC_VER
 #define getcwd(cwd,len)  GetCurrentDirectory(len, cwd)
 #endif
 

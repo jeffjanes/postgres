@@ -3,7 +3,7 @@
  * parsexlog.c
  *	  Functions for reading Write-Ahead-Log
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *-------------------------------------------------------------------------
@@ -29,7 +29,7 @@
  * RmgrNames is an array of resource manager names, to make error messages
  * a bit nicer.
  */
-#define PG_RMGR(symname,name,redo,desc,identify,startup,cleanup) \
+#define PG_RMGR(symname,name,redo,desc,identify,startup,cleanup,mask) \
   name,
 
 static const char *RmgrNames[RM_MAX_ID + 1] = {

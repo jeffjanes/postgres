@@ -3,7 +3,7 @@
  * lsyscache.c
  *	  Convenience routines for common queries in the system catalog cache.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -834,6 +834,38 @@ get_attnum(Oid relid, const char *attname)
 	}
 	else
 		return InvalidAttrNumber;
+}
+
+/*
+ * get_attidentity
+ *
+ *		Given the relation id and the attribute name,
+ *		return the "attidentity" field from the attribute relation.
+ *
+ *		Returns '\0' if not found.
+ *
+ *		Since no identity is represented by '\0', this can also be used as a
+ *		Boolean test.
+ */
+char
+get_attidentity(Oid relid, AttrNumber attnum)
+{
+	HeapTuple	tp;
+
+	tp = SearchSysCache2(ATTNUM,
+						 ObjectIdGetDatum(relid),
+						 Int16GetDatum(attnum));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_attribute att_tup = (Form_pg_attribute) GETSTRUCT(tp);
+		char			result;
+
+		result = att_tup->attidentity;
+		ReleaseSysCache(tp);
+		return result;
+	}
+	else
+		return '\0';
 }
 
 /*
@@ -2332,7 +2364,7 @@ get_typavgwidth(Oid typid, int32 typmod)
 	}
 
 	/*
-	 * Ooops, we have no idea ... wild guess time.
+	 * Oops, we have no idea ... wild guess time.
 	 */
 	return 32;
 }
@@ -2832,7 +2864,7 @@ get_attavgwidth(Oid relid, AttrNumber attnum)
  * that have been provided by a stats hook and didn't really come from
  * pg_statistic.
  *
- * statstuple: pg_statistics tuple to be examined.
+ * statstuple: pg_statistic tuple to be examined.
  * atttype: type OID of attribute (can be InvalidOid if values == NULL).
  * atttypmod: typmod of attribute (can be 0 if values == NULL).
  * reqkind: STAKIND code for desired statistics slot kind.

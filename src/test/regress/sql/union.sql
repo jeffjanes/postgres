@@ -112,6 +112,12 @@ SELECT q1 FROM int8_tbl EXCEPT ALL SELECT DISTINCT q2 FROM int8_tbl ORDER BY 1;
 
 SELECT q1 FROM int8_tbl EXCEPT ALL SELECT q1 FROM int8_tbl FOR NO KEY UPDATE;
 
+-- nested cases
+(SELECT 1,2,3 UNION SELECT 4,5,6) INTERSECT SELECT 4,5,6;
+(SELECT 1,2,3 UNION SELECT 4,5,6 ORDER BY 1,2) INTERSECT SELECT 4,5,6;
+(SELECT 1,2,3 UNION SELECT 4,5,6) EXCEPT SELECT 4,5,6;
+(SELECT 1,2,3 UNION SELECT 4,5,6 ORDER BY 1,2) EXCEPT SELECT 4,5,6;
+
 --
 -- Mixed types
 --
@@ -322,3 +328,16 @@ select * from
 
 drop table t3;
 drop function expensivefunc(int);
+
+-- Test handling of appendrel quals that const-simplify into an AND
+explain (costs off)
+select * from
+  (select *, 0 as x from int8_tbl a
+   union all
+   select *, 1 as x from int8_tbl b) ss
+where (x = 0) or (q1 >= q2 and q1 <= q2);
+select * from
+  (select *, 0 as x from int8_tbl a
+   union all
+   select *, 1 as x from int8_tbl b) ss
+where (x = 0) or (q1 >= q2 and q1 <= q2);

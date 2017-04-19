@@ -521,15 +521,9 @@ PLy_input_datum_func2(PLyDatumToOb *arg, MemoryContext arg_mcxt, Oid typeOid, He
 static PyObject *
 PLyBool_FromBool(PLyDatumToOb *arg, Datum d)
 {
-	/*
-	 * We would like to use Py_RETURN_TRUE and Py_RETURN_FALSE here for
-	 * generating SQL from trigger functions, but those are only supported in
-	 * Python >= 2.4, and we support older versions.
-	 * http://docs.python.org/api/boolObjects.html
-	 */
 	if (DatumGetBool(d))
-		return PyBool_FromLong(1);
-	return PyBool_FromLong(0);
+		Py_RETURN_TRUE;
+	Py_RETURN_FALSE;
 }
 
 static PyObject *
@@ -609,9 +603,9 @@ PLyLong_FromOid(PLyDatumToOb *arg, Datum d)
 static PyObject *
 PLyBytes_FromBytea(PLyDatumToOb *arg, Datum d)
 {
-	text	   *txt = DatumGetByteaP(d);
-	char	   *str = VARDATA(txt);
-	size_t		size = VARSIZE(txt) - VARHDRSZ;
+	text	   *txt = DatumGetByteaPP(d);
+	char	   *str = VARDATA_ANY(txt);
+	size_t		size = VARSIZE_ANY_EXHDR(txt);
 
 	return PyBytes_FromStringAndSize(str, size);
 }
@@ -833,7 +827,7 @@ PLyObject_ToComposite(PLyObToDatum *arg, int32 typmod, PyObject *plrv, bool inar
 
 	/*
 	 * This will set up the dummy PLyTypeInfo's output conversion routines,
-	 * since we left is_rowtype as 2. A future optimisation could be caching
+	 * since we left is_rowtype as 2. A future optimization could be caching
 	 * that info instead of looking it up every time a tuple is returned from
 	 * the function.
 	 */

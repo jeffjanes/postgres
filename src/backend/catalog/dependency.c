@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -48,7 +48,11 @@
 #include "catalog/pg_opfamily.h"
 #include "catalog/pg_policy.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_publication.h"
+#include "catalog/pg_publication_rel.h"
 #include "catalog/pg_rewrite.h"
+#include "catalog/pg_statistic_ext.h"
+#include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_transform.h"
 #include "catalog/pg_trigger.h"
@@ -64,8 +68,10 @@
 #include "commands/extension.h"
 #include "commands/policy.h"
 #include "commands/proclang.h"
+#include "commands/publicationcmds.h"
 #include "commands/schemacmds.h"
 #include "commands/seclabel.h"
+#include "commands/sequence.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "nodes/nodeFuncs.h"
@@ -149,6 +155,7 @@ static const Oid object_classes[] = {
 	RewriteRelationId,			/* OCLASS_REWRITE */
 	TriggerRelationId,			/* OCLASS_TRIGGER */
 	NamespaceRelationId,		/* OCLASS_SCHEMA */
+	StatisticExtRelationId,		/* OCLASS_STATISTIC_EXT */
 	TSParserRelationId,			/* OCLASS_TSPARSER */
 	TSDictionaryRelationId,		/* OCLASS_TSDICT */
 	TSTemplateRelationId,		/* OCLASS_TSTEMPLATE */
@@ -163,6 +170,9 @@ static const Oid object_classes[] = {
 	ExtensionRelationId,		/* OCLASS_EXTENSION */
 	EventTriggerRelationId,		/* OCLASS_EVENT_TRIGGER */
 	PolicyRelationId,			/* OCLASS_POLICY */
+	PublicationRelationId,		/* OCLASS_PUBLICATION */
+	PublicationRelRelationId,	/* OCLASS_PUBLICATION_REL */
+	SubscriptionRelationId,		/* OCLASS_SUBSCRIPTION */
 	TransformRelationId			/* OCLASS_TRANSFORM */
 };
 
@@ -1054,7 +1064,7 @@ deleteOneObject(const ObjectAddress *object, Relation *depRel, int flags)
 
 	while (HeapTupleIsValid(tup = systable_getnext(scan)))
 	{
-		simple_heap_delete(*depRel, &tup->t_self);
+		CatalogTupleDelete(*depRel, &tup->t_self);
 	}
 
 	systable_endscan(scan);
@@ -1114,6 +1124,11 @@ doDeletion(const ObjectAddress *object, int flags)
 					else
 						heap_drop_with_catalog(object->objectId);
 				}
+
+				/* for a sequence, in addition to dropping the heap, also
+				 * delete pg_sequence tuple */
+				if (relKind == RELKIND_SEQUENCE)
+					DeleteSequenceTuple(object->objectId);
 				break;
 			}
 
@@ -1238,8 +1253,20 @@ doDeletion(const ObjectAddress *object, int flags)
 			RemovePolicyById(object->objectId);
 			break;
 
+		case OCLASS_PUBLICATION:
+			RemovePublicationById(object->objectId);
+			break;
+
+		case OCLASS_PUBLICATION_REL:
+			RemovePublicationRelById(object->objectId);
+			break;
+
 		case OCLASS_TRANSFORM:
 			DropTransformById(object->objectId);
+			break;
+
+		case OCLASS_STATISTIC_EXT:
+			RemoveStatisticsById(object->objectId);
 			break;
 
 		default:
@@ -1352,7 +1379,8 @@ void
 recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
 								Node *expr, Oid relId,
 								DependencyType behavior,
-								DependencyType self_behavior)
+								DependencyType self_behavior,
+								bool ignore_self)
 {
 	find_expr_references_context context;
 	RangeTblEntry rte;
@@ -1407,9 +1435,10 @@ recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
 		context.addrs->numrefs = outrefs;
 
 		/* Record the self-dependencies */
-		recordMultipleDependencies(depender,
-								   self_addrs->refs, self_addrs->numrefs,
-								   self_behavior);
+		if (!ignore_self)
+			recordMultipleDependencies(depender,
+									   self_addrs->refs, self_addrs->numrefs,
+									   self_behavior);
 
 		free_object_addresses(self_addrs);
 	}
@@ -1590,7 +1619,8 @@ find_expr_references_walker(Node *node,
 				case REGROLEOID:
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("constant of the type \"regrole\" cannot be used here")));
+						errmsg("constant of the type %s cannot be used here",
+							   "regrole")));
 					break;
 			}
 		}
@@ -1898,6 +1928,13 @@ find_expr_references_walker(Node *node,
 		add_object_address(OCLASS_PROC, tsc->tsmhandler, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
+	}
+	else if (IsA(node, NextValueExpr))
+	{
+		NextValueExpr  *nve = (NextValueExpr *) node;
+
+		add_object_address(OCLASS_CLASS, nve->seqid, 0,
+						   context->addrs);
 	}
 
 	return expression_tree_walker(node, find_expr_references_walker,
@@ -2353,6 +2390,9 @@ getObjectClass(const ObjectAddress *object)
 		case NamespaceRelationId:
 			return OCLASS_SCHEMA;
 
+		case StatisticExtRelationId:
+			return OCLASS_STATISTIC_EXT;
+
 		case TSParserRelationId:
 			return OCLASS_TSPARSER;
 
@@ -2395,6 +2435,15 @@ getObjectClass(const ObjectAddress *object)
 		case PolicyRelationId:
 			return OCLASS_POLICY;
 
+		case PublicationRelationId:
+			return OCLASS_PUBLICATION;
+
+		case PublicationRelRelationId:
+			return OCLASS_PUBLICATION_REL;
+
+		case SubscriptionRelationId:
+			return OCLASS_SUBSCRIPTION;
+
 		case TransformRelationId:
 			return OCLASS_TRANSFORM;
 	}
@@ -2434,7 +2483,7 @@ DeleteInitPrivs(const ObjectAddress *object)
 							  NULL, 3, key);
 
 	while (HeapTupleIsValid(oldtuple = systable_getnext(scan)))
-		simple_heap_delete(relation, &oldtuple->t_self);
+		CatalogTupleDelete(relation, &oldtuple->t_self);
 
 	systable_endscan(scan);
 

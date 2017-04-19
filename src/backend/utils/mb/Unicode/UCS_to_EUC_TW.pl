@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 #
-# Copyright (c) 2001-2016, PostgreSQL Global Development Group
+# Copyright (c) 2001-2017, PostgreSQL Global Development Group
 #
 # src/backend/utils/mb/Unicode/UCS_to_EUC_TW.pl
 #
@@ -18,7 +18,9 @@
 #		 # and Unicode name (not used in this script)
 
 use strict;
-require convutils;
+use convutils;
+
+my $this_script = $0;
 
 my $mapping = &read_source("CNS11643.TXT");
 
@@ -54,11 +56,13 @@ foreach my $i (@$mapping)
 			ucs => $i->{ucs},
 			code => ($i->{code} + 0x8ea10000),
 			rest => $i->{rest},
-			direction => 'to_unicode'
-		}
+			direction => TO_UNICODE,
+			f => $i->{f},
+			l => $i->{l}
+		};
 	}
 }
 
 push @$mapping, @extras;
 
-print_tables("EUC_TW", $mapping);
+print_conversion_tables($this_script, "EUC_TW", $mapping);

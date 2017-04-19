@@ -3,7 +3,7 @@
  * vacuumlo.c
  *	  This removes orphaned large objects from a database.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,10 +21,10 @@
 #include <termios.h>
 #endif
 
+#include "catalog/pg_class.h"
+
 #include "libpq-fe.h"
 #include "pg_getopt.h"
-
-#define atooid(x)  ((Oid) strtoul((x), NULL, 10))
 
 #define BUFSIZE			1024
 
@@ -211,7 +211,7 @@ vacuumlo(const char *database, const struct _param * param)
 	strcat(buf, "      AND a.atttypid = t.oid ");
 	strcat(buf, "      AND c.relnamespace = s.oid ");
 	strcat(buf, "      AND t.typname in ('oid', 'lo') ");
-	strcat(buf, "      AND c.relkind in ('r', 'm')");
+	strcat(buf, "      AND c.relkind in (" CppAsString2(RELKIND_RELATION) ", " CppAsString2(RELKIND_MATVIEW) ")");
 	strcat(buf, "      AND s.nspname !~ '^pg_'");
 	res = PQexec(conn, buf);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)

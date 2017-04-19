@@ -1,3 +1,6 @@
+test: read-only-anomaly
+test: read-only-anomaly-2
+test: read-only-anomaly-3
 test: read-write-unique
 test: read-write-unique-2
 test: read-write-unique-3
@@ -56,4 +59,5 @@ test: alter-table-2
 test: alter-table-3
 test: create-trigger
 test: async-notify
+test: vacuum-reltuples
 test: timeouts

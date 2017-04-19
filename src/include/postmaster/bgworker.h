@@ -31,7 +31,7 @@
  * different) code.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -91,9 +91,8 @@ typedef struct BackgroundWorker
 	int			bgw_flags;
 	BgWorkerStartTime bgw_start_time;
 	int			bgw_restart_time;		/* in seconds, or BGW_NEVER_RESTART */
-	bgworker_main_type bgw_main;
-	char		bgw_library_name[BGW_MAXLEN];	/* only if bgw_main is NULL */
-	char		bgw_function_name[BGW_MAXLEN];	/* only if bgw_main is NULL */
+	char		bgw_library_name[BGW_MAXLEN];
+	char		bgw_function_name[BGW_MAXLEN];
 	Datum		bgw_main_arg;
 	char		bgw_extra[BGW_EXTRALEN];
 	pid_t		bgw_notify_pid; /* SIGUSR1 this backend on start/stop */

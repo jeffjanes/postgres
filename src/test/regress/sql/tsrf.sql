@@ -17,6 +17,11 @@ SELECT generate_series(1, generate_series(1, 3));
 -- srf, with two SRF arguments
 SELECT generate_series(generate_series(1,3), generate_series(2, 4));
 
+-- check proper nesting of SRFs in different expressions
+explain (verbose, costs off)
+SELECT generate_series(1, generate_series(1, 3)), generate_series(2, 4);
+SELECT generate_series(1, generate_series(1, 3)), generate_series(2, 4);
+
 CREATE TABLE few(id int, dataa text, datab text);
 INSERT INTO few VALUES(1, 'a', 'foo'),(2, 'a', 'bar'),(3, 'b', 'bar');
 
@@ -31,10 +36,12 @@ SELECT few.id, generate_series(1,3) g FROM few ORDER BY id, generate_series(1,3)
 SELECT few.id FROM few ORDER BY id, generate_series(1,3) DESC;
 
 -- SRFs are computed after aggregation
+SET enable_hashagg TO 0; -- stable output order
 SELECT few.dataa, count(*), min(id), max(id), unnest('{1,1,3}'::int[]) FROM few WHERE few.id = 1 GROUP BY few.dataa;
 -- unless referenced in GROUP BY clause
 SELECT few.dataa, count(*), min(id), max(id), unnest('{1,1,3}'::int[]) FROM few WHERE few.id = 1 GROUP BY few.dataa, unnest('{1,1,3}'::int[]);
 SELECT few.dataa, count(*), min(id), max(id), unnest('{1,1,3}'::int[]) FROM few WHERE few.id = 1 GROUP BY few.dataa, 5;
+RESET enable_hashagg;
 
 -- check HAVING works when GROUP BY does [not] reference SRF output
 SELECT dataa, generate_series(1,1), count(*) FROM few GROUP BY 1 HAVING count(*) > 1;
@@ -59,12 +66,14 @@ SELECT SUM(count(*)) OVER(PARTITION BY generate_series(1,3) ORDER BY generate_se
 SELECT few.dataa, count(*), min(id), max(id), generate_series(1,3) FROM few GROUP BY few.dataa ORDER BY 5, 1;
 
 -- grouping sets are a bit special, they produce NULLs in columns not actually NULL
+set enable_hashagg = false;
 SELECT dataa, datab b, generate_series(1,2) g, count(*) FROM few GROUP BY CUBE(dataa, datab);
 SELECT dataa, datab b, generate_series(1,2) g, count(*) FROM few GROUP BY CUBE(dataa, datab) ORDER BY dataa;
 SELECT dataa, datab b, generate_series(1,2) g, count(*) FROM few GROUP BY CUBE(dataa, datab) ORDER BY g;
 SELECT dataa, datab b, generate_series(1,2) g, count(*) FROM few GROUP BY CUBE(dataa, datab, g);
 SELECT dataa, datab b, generate_series(1,2) g, count(*) FROM few GROUP BY CUBE(dataa, datab, g) ORDER BY dataa;
 SELECT dataa, datab b, generate_series(1,2) g, count(*) FROM few GROUP BY CUBE(dataa, datab, g) ORDER BY g;
+reset enable_hashagg;
 
 -- data modification
 CREATE TABLE fewmore AS SELECT generate_series(1,3) AS data;
@@ -126,6 +135,19 @@ SELECT (SELECT generate_series(1,3) LIMIT 1 OFFSET g.i) FROM generate_series(0,3
 -- Operators can return sets too
 CREATE OPERATOR |@| (PROCEDURE = unnest, RIGHTARG = ANYARRAY);
 SELECT |@|ARRAY[1,2,3];
+
+-- Some fun cases involving duplicate SRF calls
+explain (verbose, costs off)
+select generate_series(1,3) as x, generate_series(1,3) + 1 as xp1;
+select generate_series(1,3) as x, generate_series(1,3) + 1 as xp1;
+explain (verbose, costs off)
+select generate_series(1,3)+1 order by generate_series(1,3);
+select generate_series(1,3)+1 order by generate_series(1,3);
+
+-- Check that SRFs of same nesting level run in lockstep
+explain (verbose, costs off)
+select generate_series(1,3) as x, generate_series(3,6) + 1 as y;
+select generate_series(1,3) as x, generate_series(3,6) + 1 as y;
 
 -- Clean up
 DROP TABLE few;

@@ -119,6 +119,7 @@ typedef struct _restoreOptions
 	bool	   *idWanted;		/* array showing which dump IDs to emit */
 	int			enable_row_security;
 	int			sequence_data;	/* dump sequence data even in schema-only mode */
+	int			binary_upgrade;
 } RestoreOptions;
 
 typedef struct _dumpOptions
@@ -226,7 +227,7 @@ typedef int DumpId;
 
 typedef int (*DataDumperPtr) (Archive *AH, void *userArg);
 
-typedef void (*SetupWorkerPtr) (Archive *AH);
+typedef void (*SetupWorkerPtrType) (Archive *AH);
 
 /*
  * Main archiver interface.
@@ -272,8 +273,8 @@ extern Archive *OpenArchive(const char *FileSpec, const ArchiveFormat fmt);
 
 /* Create a new archive */
 extern Archive *CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
-			  const int compression, ArchiveMode mode,
-			  SetupWorkerPtr setupDumpWorker);
+			  const int compression, bool dosync, ArchiveMode mode,
+			  SetupWorkerPtrType setupDumpWorker);
 
 /* The --list option */
 extern void PrintTOCSummary(Archive *AH);

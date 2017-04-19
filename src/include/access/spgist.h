@@ -4,7 +4,7 @@
  *	  Public header file for SP-GiST access method.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/spgist.h
@@ -183,7 +183,6 @@ typedef struct spgLeafConsistentOut
 
 
 /* spgutils.c */
-extern Datum spghandler(PG_FUNCTION_ARGS);
 extern bytea *spgoptions(Datum reloptions, bool validate);
 
 /* spginsert.c */
@@ -192,7 +191,8 @@ extern IndexBuildResult *spgbuild(Relation heap, Relation index,
 extern void spgbuildempty(Relation index);
 extern bool spginsert(Relation index, Datum *values, bool *isnull,
 		  ItemPointer ht_ctid, Relation heapRel,
-		  IndexUniqueCheck checkUnique);
+		  IndexUniqueCheck checkUnique,
+		  struct IndexInfo *indexInfo);
 
 /* spgscan.c */
 extern IndexScanDesc spgbeginscan(Relation rel, int keysz, int orderbysz);
@@ -213,12 +213,5 @@ extern IndexBulkDeleteResult *spgvacuumcleanup(IndexVacuumInfo *info,
 
 /* spgvalidate.c */
 extern bool spgvalidate(Oid opclassoid);
-
-/* spgxlog.c */
-extern void spg_redo(XLogReaderState *record);
-extern void spg_desc(StringInfo buf, XLogReaderState *record);
-extern const char *spg_identify(uint8 info);
-extern void spg_xlog_startup(void);
-extern void spg_xlog_cleanup(void);
 
 #endif   /* SPGIST_H */

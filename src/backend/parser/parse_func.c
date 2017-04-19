@@ -3,7 +3,7 @@
  * parse_func.c
  *		handle function calls in parser
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1515,8 +1515,7 @@ func_get_detail(List *funcname,
 											 &isnull);
 			Assert(!isnull);
 			str = TextDatumGetCString(proargdefaults);
-			defaults = (List *) stringToNode(str);
-			Assert(IsA(defaults, List));
+			defaults = castNode(List, stringToNode(str));
 			pfree(str);
 
 			/* Delete any unused defaults from the returned list */
@@ -1896,8 +1895,10 @@ func_signature_string(List *funcname, int nargs,
 
 /*
  * LookupFuncName
- *		Given a possibly-qualified function name and a set of argument types,
- *		look up the function.
+ *
+ * Given a possibly-qualified function name and optionally a set of argument
+ * types, look up the function.  Pass nargs == -1 to indicate that no argument
+ * types are specified.
  *
  * If the function name is not schema-qualified, it is sought in the current
  * namespace search path.
@@ -1914,6 +1915,35 @@ LookupFuncName(List *funcname, int nargs, const Oid *argtypes, bool noError)
 	Assert(argtypes);
 
 	clist = FuncnameGetCandidates(funcname, nargs, NIL, false, false, noError);
+
+	/*
+	 * If no arguments were specified, the name must yield a unique candidate.
+	 */
+	if (nargs == -1)
+	{
+		if (clist)
+		{
+			if (clist->next)
+			{
+				if (!noError)
+					ereport(ERROR,
+							(errcode(ERRCODE_AMBIGUOUS_FUNCTION),
+							 errmsg("function name \"%s\" is not unique",
+									NameListToString(funcname)),
+							 errhint("Specify the argument list to select the function unambiguously.")));
+			}
+			else
+				return clist->oid;
+		}
+		else
+		{
+			if (!noError)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_FUNCTION),
+						 errmsg("could not find a function named \"%s\"",
+								NameListToString(funcname))));
+		}
+	}
 
 	while (clist)
 	{
@@ -1933,19 +1963,19 @@ LookupFuncName(List *funcname, int nargs, const Oid *argtypes, bool noError)
 }
 
 /*
- * LookupFuncNameTypeNames
+ * LookupFuncWithArgs
  *		Like LookupFuncName, but the argument types are specified by a
- *		list of TypeName nodes.
+ *		ObjectWithArgs node.
  */
 Oid
-LookupFuncNameTypeNames(List *funcname, List *argtypes, bool noError)
+LookupFuncWithArgs(ObjectWithArgs *func, bool noError)
 {
 	Oid			argoids[FUNC_MAX_ARGS];
 	int			argcount;
 	int			i;
 	ListCell   *args_item;
 
-	argcount = list_length(argtypes);
+	argcount = list_length(func->objargs);
 	if (argcount > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
@@ -1954,7 +1984,7 @@ LookupFuncNameTypeNames(List *funcname, List *argtypes, bool noError)
 							   FUNC_MAX_ARGS,
 							   FUNC_MAX_ARGS)));
 
-	args_item = list_head(argtypes);
+	args_item = list_head(func->objargs);
 	for (i = 0; i < argcount; i++)
 	{
 		TypeName   *t = (TypeName *) lfirst(args_item);
@@ -1963,19 +1993,19 @@ LookupFuncNameTypeNames(List *funcname, List *argtypes, bool noError)
 		args_item = lnext(args_item);
 	}
 
-	return LookupFuncName(funcname, argcount, argoids, noError);
+	return LookupFuncName(func->objname, func->args_unspecified ? -1 : argcount, argoids, noError);
 }
 
 /*
- * LookupAggNameTypeNames
- *		Find an aggregate function given a name and list of TypeName nodes.
+ * LookupAggWithArgs
+ *		Find an aggregate function from a given ObjectWithArgs node.
  *
- * This is almost like LookupFuncNameTypeNames, but the error messages refer
+ * This is almost like LookupFuncWithArgs, but the error messages refer
  * to aggregates rather than plain functions, and we verify that the found
  * function really is an aggregate.
  */
 Oid
-LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
+LookupAggWithArgs(ObjectWithArgs *agg, bool noError)
 {
 	Oid			argoids[FUNC_MAX_ARGS];
 	int			argcount;
@@ -1985,7 +2015,7 @@ LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
 	HeapTuple	ftup;
 	Form_pg_proc pform;
 
-	argcount = list_length(argtypes);
+	argcount = list_length(agg->objargs);
 	if (argcount > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
@@ -1995,7 +2025,7 @@ LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
 							   FUNC_MAX_ARGS)));
 
 	i = 0;
-	foreach(lc, argtypes)
+	foreach(lc, agg->objargs)
 	{
 		TypeName   *t = (TypeName *) lfirst(lc);
 
@@ -2003,7 +2033,7 @@ LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
 		i++;
 	}
 
-	oid = LookupFuncName(aggname, argcount, argoids, true);
+	oid = LookupFuncName(agg->objname, argcount, argoids, true);
 
 	if (!OidIsValid(oid))
 	{
@@ -2013,12 +2043,12 @@ LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_FUNCTION),
 					 errmsg("aggregate %s(*) does not exist",
-							NameListToString(aggname))));
+							NameListToString(agg->objname))));
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_FUNCTION),
 					 errmsg("aggregate %s does not exist",
-							func_signature_string(aggname, argcount,
+							func_signature_string(agg->objname, argcount,
 												  NIL, argoids))));
 	}
 
@@ -2037,7 +2067,7 @@ LookupAggNameTypeNames(List *aggname, List *argtypes, bool noError)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("function %s is not an aggregate",
-						func_signature_string(aggname, argcount,
+						func_signature_string(agg->objname, argcount,
 											  NIL, argoids))));
 	}
 
@@ -2141,7 +2171,12 @@ check_srf_call_placement(ParseState *pstate, int location)
 			errkind = true;
 			break;
 		case EXPR_KIND_VALUES:
-			/* okay */
+			/* SRFs are presently not supported by nodeValuesscan.c */
+			errkind = true;
+			break;
+		case EXPR_KIND_VALUES_SINGLE:
+			/* okay, since we process this like a SELECT tlist */
+			pstate->p_hasTargetSRFs = true;
 			break;
 		case EXPR_KIND_CHECK_CONSTRAINT:
 		case EXPR_KIND_DOMAIN_CHECK:
@@ -2165,6 +2200,9 @@ check_srf_call_placement(ParseState *pstate, int location)
 			break;
 		case EXPR_KIND_TRIGGER_WHEN:
 			err = _("set-returning functions are not allowed in trigger WHEN conditions");
+			break;
+		case EXPR_KIND_PARTITION_EXPRESSION:
+			err = _("set-returning functions are not allowed in partition key expression");
 			break;
 
 			/*

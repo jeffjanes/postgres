@@ -9,7 +9,7 @@
  *	  more likely to break across PostgreSQL releases than code that uses
  *	  only the official API.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/interfaces/libpq/libpq-int.h
@@ -21,11 +21,9 @@
 #define LIBPQ_INT_H
 
 /* We assume libpq-fe.h has already been included. */
-#include "postgres_fe.h"
 #include "libpq-events.h"
 
 #include <time.h>
-#include <sys/types.h>
 #ifndef WIN32
 #include <sys/time.h>
 #endif
@@ -55,7 +53,7 @@
 
 #ifdef ENABLE_SSPI
 #define SECURITY_WIN32
-#if defined(WIN32) && !defined(WIN32_ONLY_COMPILER)
+#if defined(WIN32) && !defined(_MSC_VER)
 #include <ntsecapi.h>
 #endif
 #include <security.h>
@@ -309,7 +307,7 @@ typedef struct pg_conn_host
 	char	   *host;			/* host name or address, or socket path */
 	pg_conn_host_type type;		/* type of host */
 	char	   *port;			/* port number for this host; if not NULL,
-								 * overrrides the PGConn's pgport */
+								 * overrides the PGConn's pgport */
 	char	   *password;		/* password for this host, read from the
 								 * password file.  only set if the PGconn's
 								 * pgpass field is NULL. */
@@ -343,6 +341,7 @@ struct pg_conn
 	char	   *replication;	/* connect as the replication standby? */
 	char	   *pguser;			/* Postgres username and password, if any */
 	char	   *pgpass;
+	char	   *pgpassfile;		/* path to a file containing password(s) */
 	char	   *keepalives;		/* use TCP keepalives? */
 	char	   *keepalives_idle;	/* time between TCP keepalives */
 	char	   *keepalives_interval;	/* time between TCP keepalive
@@ -407,7 +406,7 @@ struct pg_conn
 	bool		auth_req_received;		/* true if any type of auth req
 										 * received */
 	bool		password_needed;	/* true if server demanded a password */
-	bool		dot_pgpass_used;	/* true if used .pgpass */
+	bool		pgpassfile_used;	/* true if password is from pgpassfile */
 	bool		sigpipe_so;		/* have we masked SIGPIPE via SO_NOSIGPIPE? */
 	bool		sigpipe_flag;	/* can we mask SIGPIPE via MSG_NOSIGNAL? */
 
@@ -420,7 +419,6 @@ struct pg_conn
 	/* Miscellaneous stuff */
 	int			be_pid;			/* PID of backend --- needed for cancels */
 	int			be_key;			/* key of backend --- needed for cancels */
-	char		md5Salt[4];		/* password salt received from backend */
 	pgParameterStatus *pstatus; /* ParameterStatus data */
 	int			client_encoding;	/* encoding id */
 	bool		std_strings;	/* standard_conforming_strings */
@@ -453,7 +451,8 @@ struct pg_conn
 	PGresult   *result;			/* result being constructed */
 	PGresult   *next_result;	/* next result (used in single-row mode) */
 
-	/* Assorted state for SSL, GSS, etc */
+	/* Assorted state for SASL, SSL, GSS, etc */
+	void	   *sasl_state;
 
 #ifdef USE_SSL
 	bool		allow_ssl_try;	/* Allowed to try SSL negotiation */
@@ -475,14 +474,10 @@ struct pg_conn
 #ifdef ENABLE_GSS
 	gss_ctx_id_t gctx;			/* GSS context */
 	gss_name_t	gtarg_nam;		/* GSS target name */
-	gss_buffer_desc ginbuf;		/* GSS input token */
-	gss_buffer_desc goutbuf;	/* GSS output token */
 #endif
 
 #ifdef ENABLE_SSPI
-#ifndef ENABLE_GSS
-	gss_buffer_desc ginbuf;		/* GSS input token */
-#else
+#ifdef ENABLE_GSS
 	char	   *gsslib;			/* What GSS library to use ("gssapi" or
 								 * "sspi") */
 #endif
@@ -665,7 +660,7 @@ extern void pq_reset_sigpipe(sigset_t *osigset, bool sigpipe_pending,
 #endif
 
 /*
- * The SSL implementatation provides these functions (fe-secure-openssl.c)
+ * The SSL implementation provides these functions (fe-secure-openssl.c)
  */
 extern void pgtls_init_library(bool do_ssl, int do_crypto);
 extern int	pgtls_init(PGconn *conn);

@@ -6,7 +6,7 @@
  * See src/backend/utils/misc/README for more information.
  *
  *
- * Copyright (c) 2000-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2017, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
  * IDENTIFICATION
@@ -28,10 +28,13 @@
 
 #include "access/commit_ts.h"
 #include "access/gin.h"
+#include "access/rmgr.h"
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "access/xlog_internal.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_authid.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
 #include "commands/user.h"
@@ -54,11 +57,12 @@
 #include "parser/scansup.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
-#include "postmaster/bgworker.h"
+#include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
 #include "postmaster/walwriter.h"
+#include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/syncrep.h"
 #include "replication/walreceiver.h"
@@ -83,6 +87,7 @@
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/tzparser.h"
+#include "utils/varlena.h"
 #include "utils/xml.h"
 
 #ifndef PG_KRB_SRVTAB
@@ -144,6 +149,10 @@ static bool call_enum_check_hook(struct config_enum * conf, int *newval,
 
 static bool check_log_destination(char **newval, void **extra, GucSource source);
 static void assign_log_destination(const char *newval, void *extra);
+
+static bool check_wal_consistency_checking(char **newval, void **extra,
+	GucSource source);
+static void assign_wal_consistency_checking(const char *newval, void *extra);
 
 #ifdef HAVE_SYSLOG
 static int	syslog_facility = LOG_LOCAL0;
@@ -401,6 +410,7 @@ static const struct config_enum_entry force_parallel_mode_options[] = {
 static const struct config_enum_entry password_encryption_options[] = {
 	{"plain", PASSWORD_TYPE_PLAINTEXT, false},
 	{"md5", PASSWORD_TYPE_MD5, false},
+	{"scram-sha-256", PASSWORD_TYPE_SCRAM_SHA_256, false},
 	{"off", PASSWORD_TYPE_PLAINTEXT, false},
 	{"on", PASSWORD_TYPE_MD5, false},
 	{"true", PASSWORD_TYPE_MD5, true},
@@ -440,7 +450,6 @@ char	   *event_source;
 bool		row_security;
 bool		check_function_bodies = true;
 bool		default_with_oids = false;
-bool		SQL_inheritance = true;
 
 int			log_min_error_statement = ERROR;
 int			log_min_messages = WARNING;
@@ -601,6 +610,8 @@ const char *const config_group_names[] =
 	gettext_noop("Replication / Master Server"),
 	/* REPLICATION_STANDBY */
 	gettext_noop("Replication / Standby Servers"),
+	/* REPLICATION_SUBSCRIBERS */
+	gettext_noop("Replication / Subscribers"),
 	/* QUERY_TUNING */
 	gettext_noop("Query Tuning"),
 	/* QUERY_TUNING_METHOD */
@@ -720,6 +731,11 @@ static const unit_conversion memory_unit_conversion_table[] =
 	{"MB", GUC_UNIT_KB, 1024},
 	{"kB", GUC_UNIT_KB, 1},
 
+	{"TB", GUC_UNIT_MB, 1024 * 1024},
+	{"GB", GUC_UNIT_MB, 1024},
+	{"MB", GUC_UNIT_MB, 1},
+	{"kB", GUC_UNIT_MB, -1024},
+
 	{"TB", GUC_UNIT_BLOCKS, (1024 * 1024 * 1024) / (BLCKSZ / 1024)},
 	{"GB", GUC_UNIT_BLOCKS, (1024 * 1024) / (BLCKSZ / 1024)},
 	{"MB", GUC_UNIT_BLOCKS, 1024 / (BLCKSZ / 1024)},
@@ -729,11 +745,6 @@ static const unit_conversion memory_unit_conversion_table[] =
 	{"GB", GUC_UNIT_XBLOCKS, (1024 * 1024) / (XLOG_BLCKSZ / 1024)},
 	{"MB", GUC_UNIT_XBLOCKS, 1024 / (XLOG_BLCKSZ / 1024)},
 	{"kB", GUC_UNIT_XBLOCKS, -(XLOG_BLCKSZ / 1024)},
-
-	{"TB", GUC_UNIT_XSEGS, (1024 * 1024 * 1024) / (XLOG_SEG_SIZE / 1024)},
-	{"GB", GUC_UNIT_XSEGS, (1024 * 1024) / (XLOG_SEG_SIZE / 1024)},
-	{"MB", GUC_UNIT_XSEGS, -(XLOG_SEG_SIZE / (1024 * 1024))},
-	{"kB", GUC_UNIT_XSEGS, -(XLOG_SEG_SIZE / 1024)},
 
 	{""}						/* end of table marker */
 };
@@ -894,6 +905,15 @@ static struct config_bool ConfigureNamesBool[] =
 		true,
 		NULL, NULL, NULL
 	},
+	{
+		{"enable_gathermerge", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enables the planner's use of gather merge plans."),
+			NULL
+		},
+		&enable_gathermerge,
+		true,
+		NULL, NULL, NULL
+	},
 
 	{
 		{"geqo", PGC_USERSET, QUERY_TUNING_GEQO,
@@ -935,7 +955,7 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
-		{"ssl", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Enables SSL connections."),
 			NULL
 		},
@@ -944,7 +964,7 @@ static struct config_bool ConfigureNamesBool[] =
 		check_ssl, NULL, NULL
 	},
 	{
-		{"ssl_prefer_server_ciphers", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_prefer_server_ciphers", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Give priority to server ciphersuite order."),
 			NULL
 		},
@@ -1322,15 +1342,6 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
-		{"sql_inheritance", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
-			gettext_noop("Causes subtables to be included by default in various commands."),
-			NULL
-		},
-		&SQL_inheritance,
-		true,
-		NULL, NULL, NULL
-	},
-	{
 		{"transform_null_equals", PGC_USERSET, COMPAT_OPTIONS_CLIENT,
 			gettext_noop("Treats \"expr=NULL\" as \"expr IS NULL\"."),
 			gettext_noop("When turned on, expressions of the form expr = NULL "
@@ -1509,11 +1520,7 @@ static struct config_bool ConfigureNamesBool[] =
 			GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
 		},
 		&integer_datetimes,
-#ifdef HAVE_INT64_TIMESTAMP
 		true,
-#else
-		false,
-#endif
 		NULL, NULL, NULL
 	},
 
@@ -1674,7 +1681,7 @@ static struct config_int ConfigureNamesInt[] =
 {
 	{
 		{"archive_timeout", PGC_SIGHUP, WAL_ARCHIVING,
-			gettext_noop("Forces a switch to the next xlog file if a "
+			gettext_noop("Forces a switch to the next WAL file if a "
 						 "new file has not been started within N seconds."),
 			NULL,
 			GUC_UNIT_S
@@ -2195,6 +2202,28 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"max_pred_locks_per_relation", PGC_SIGHUP, LOCK_MANAGEMENT,
+			gettext_noop("Sets the maximum number of predicate-locked pages and tuples per relation."),
+			gettext_noop("If more than this total of pages and tuples in the same relation are locked "
+						 "by a connection, those locks are replaced by a relation level lock.")
+		},
+		&max_predicate_locks_per_relation,
+		-2, INT_MIN, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"max_pred_locks_per_page", PGC_SIGHUP, LOCK_MANAGEMENT,
+			gettext_noop("Sets the maximum number of predicate-locked tuples per page."),
+			gettext_noop("If more than this number of tuples on the same page are locked "
+						 "by a connection, those locks are replaced by a page level lock.")
+		},
+		&max_predicate_locks_per_page,
+		2, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"authentication_timeout", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Sets the maximum allowed time to complete client authentication."),
 			NULL,
@@ -2231,10 +2260,10 @@ static struct config_int ConfigureNamesInt[] =
 		{"min_wal_size", PGC_SIGHUP, WAL_CHECKPOINTS,
 			gettext_noop("Sets the minimum size to shrink the WAL to."),
 			NULL,
-			GUC_UNIT_XSEGS
+			GUC_UNIT_MB
 		},
-		&min_wal_size,
-		5, 2, INT_MAX,
+		&min_wal_size_mb,
+		5 * (XLOG_SEG_SIZE/ (1024 * 1024)), 2, MAX_KILOBYTES,
 		NULL, NULL, NULL
 	},
 
@@ -2242,10 +2271,10 @@ static struct config_int ConfigureNamesInt[] =
 		{"max_wal_size", PGC_SIGHUP, WAL_CHECKPOINTS,
 			gettext_noop("Sets the WAL size that triggers a checkpoint."),
 			NULL,
-			GUC_UNIT_XSEGS
+			GUC_UNIT_MB
 		},
-		&max_wal_size,
-		64, 2, INT_MAX,
+		&max_wal_size_mb,
+		64 * (XLOG_SEG_SIZE/ (1024 * 1024)), 2, MAX_KILOBYTES,
 		NULL, assign_max_wal_size, NULL
 	},
 
@@ -2314,7 +2343,7 @@ static struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_XBLOCKS
 		},
 		&WalWriterFlushAfter,
-		(1024*1024) / XLOG_BLCKSZ, 0, INT_MAX,
+		(1024 * 1024) / XLOG_BLCKSZ, 0, INT_MAX,
 		NULL, NULL, NULL
 	},
 
@@ -2325,7 +2354,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&max_wal_senders,
-		0, 0, MAX_BACKENDS,
+		10, 0, MAX_BACKENDS,
 		NULL, NULL, NULL
 	},
 
@@ -2336,7 +2365,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&max_replication_slots,
-		0, 0, MAX_BACKENDS /* XXX? */ ,
+		10, 0, MAX_BACKENDS /* XXX? */ ,
 		NULL, NULL, NULL
 	},
 
@@ -2427,7 +2456,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&bgwriter_lru_maxpages,
-		100, 0, 1000,
+		100, 0, INT_MAX / 2, /* Same upper limit as shared_buffers */
 		NULL, NULL, NULL
 	},
 
@@ -2479,6 +2508,30 @@ static struct config_int ConfigureNamesInt[] =
 		&max_worker_processes,
 		8, 0, MAX_BACKENDS,
 		check_max_worker_processes, NULL, NULL
+	},
+
+	{
+		{"max_logical_replication_workers",
+			PGC_POSTMASTER,
+			REPLICATION_SUBSCRIBERS,
+			gettext_noop("Maximum number of logical replication worker processes."),
+			NULL,
+		},
+		&max_logical_replication_workers,
+		4, 0, MAX_BACKENDS,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"max_sync_workers_per_subscription",
+			PGC_SIGHUP,
+			REPLICATION_SUBSCRIBERS,
+			gettext_noop("Maximum number of table synchronization workers per subscription."),
+			NULL,
+		},
+		&max_sync_workers_per_subscription,
+		2, 0, MAX_BACKENDS,
+		NULL, NULL, NULL
 	},
 
 	{
@@ -2629,7 +2682,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&autovacuum_freeze_max_age,
-		/* see pg_resetxlog if you change the upper-limit value */
+		/* see pg_resetwal if you change the upper-limit value */
 		200000000, 100000, 2000000000,
 		NULL, NULL, NULL
 	},
@@ -2660,7 +2713,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&max_parallel_workers_per_gather,
-		2, 0, 1024,
+		2, 0, MAX_PARALLEL_WORKER_LIMIT,
 		NULL, NULL, NULL
 	},
 
@@ -2670,7 +2723,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&max_parallel_workers,
-		8, 0, 1024,
+		8, 0, MAX_PARALLEL_WORKER_LIMIT,
 		NULL, NULL, NULL
 	},
 
@@ -2766,13 +2819,24 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"min_parallel_relation_size", PGC_USERSET, QUERY_TUNING_COST,
-			gettext_noop("Sets the minimum size of relations to be considered for parallel scan."),
-			NULL,
+		{"min_parallel_table_scan_size", PGC_USERSET, QUERY_TUNING_COST,
+			gettext_noop("Sets the minimum amount of table data for a parallel scan."),
+			gettext_noop("If the planner estimates that it will read a number of table pages too small to reach this limit, a parallel scan will not be considered."),
 			GUC_UNIT_BLOCKS,
 		},
-		&min_parallel_relation_size,
+		&min_parallel_table_scan_size,
 		(8 * 1024 * 1024) / BLCKSZ, 0, INT_MAX / 3,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"min_parallel_index_scan_size", PGC_USERSET, QUERY_TUNING_COST,
+			gettext_noop("Sets the minimum amount of index data for a parallel scan."),
+			gettext_noop("If the planner estimates that it will read a number of index pages too small to reach this limit, a parallel scan will not be considered."),
+			GUC_UNIT_BLOCKS,
+		},
+		&min_parallel_index_scan_size,
+		(512 * 1024) / BLCKSZ, 0, INT_MAX / 3,
 		NULL, NULL, NULL
 	},
 
@@ -3281,7 +3345,7 @@ static struct config_string ConfigureNamesString[] =
 			GUC_SUPERUSER_ONLY
 		},
 		&Log_directory,
-		"pg_log",
+		"log",
 		check_canonical_path, NULL, NULL
 	},
 	{
@@ -3445,7 +3509,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"ssl_cert_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_cert_file", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Location of the SSL server certificate file."),
 			NULL
 		},
@@ -3455,7 +3519,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"ssl_key_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_key_file", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Location of the SSL server private key file."),
 			NULL
 		},
@@ -3465,7 +3529,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"ssl_ca_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_ca_file", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Location of the SSL certificate authority file."),
 			NULL
 		},
@@ -3475,7 +3539,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"ssl_crl_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_crl_file", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Location of the SSL certificate revocation list file."),
 			NULL
 		},
@@ -3517,7 +3581,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"ssl_ciphers", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_ciphers", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Sets the list of allowed SSL ciphers."),
 			NULL,
 			GUC_SUPERUSER_ONLY
@@ -3532,7 +3596,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"ssl_ecdh_curve", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+		{"ssl_ecdh_curve", PGC_SIGHUP, CONN_AUTH_SECURITY,
 			gettext_noop("Sets the curve to use for ECDH."),
 			NULL,
 			GUC_SUPERUSER_ONLY
@@ -3566,6 +3630,17 @@ static struct config_string ConfigureNamesString[] =
 		&cluster_name,
 		"",
 		check_cluster_name, NULL, NULL
+	},
+
+	{
+		{"wal_consistency_checking", PGC_SUSET, DEVELOPER_OPTIONS,
+			gettext_noop("Sets the WAL resource managers for which WAL consistency checks are done."),
+			gettext_noop("Full-page images will be logged for all data blocks and cross-checked against the results of WAL replay."),
+			GUC_LIST_INPUT | GUC_NOT_IN_SAMPLE
+		},
+		&wal_consistency_checking_string,
+		"",
+		check_wal_consistency_checking, assign_wal_consistency_checking, NULL
 	},
 
 	/* End-of-list marker */
@@ -3759,7 +3834,7 @@ static struct config_enum ConfigureNamesEnum[] =
 			NULL
 		},
 		&wal_level,
-		WAL_LEVEL_MINIMAL, wal_level_options,
+		WAL_LEVEL_REPLICA, wal_level_options,
 		NULL, NULL, NULL
 	},
 
@@ -6639,10 +6714,11 @@ GetConfigOption(const char *name, bool missing_ok, bool restrict_superuser)
 	}
 	if (restrict_superuser &&
 		(record->flags & GUC_SUPERUSER_ONLY) &&
-		!superuser())
+		!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_SETTINGS))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to examine \"%s\"", name)));
+				 errmsg("must be superuser or a member of pg_read_all_settings to examine \"%s\"",
+				 name)));
 
 	switch (record->vartype)
 	{
@@ -6687,10 +6763,12 @@ GetConfigOptionResetString(const char *name)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 			   errmsg("unrecognized configuration parameter \"%s\"", name)));
-	if ((record->flags & GUC_SUPERUSER_ONLY) && !superuser())
+	if ((record->flags & GUC_SUPERUSER_ONLY) &&
+		!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_SETTINGS))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to examine \"%s\"", name)));
+				 errmsg("must be superuser or a member of pg_read_all_settings to examine \"%s\"",
+				 name)));
 
 	switch (record->vartype)
 	{
@@ -7290,7 +7368,7 @@ ExecSetVariableStmt(VariableSetStmt *stmt, bool isTopLevel)
 			}
 			else if (strcmp(stmt->name, "TRANSACTION SNAPSHOT") == 0)
 			{
-				A_Const    *con = (A_Const *) linitial(stmt->args);
+				A_Const    *con = linitial_node(A_Const, stmt->args);
 
 				if (stmt->is_local)
 					ereport(ERROR,
@@ -7298,7 +7376,6 @@ ExecSetVariableStmt(VariableSetStmt *stmt, bool isTopLevel)
 							 errmsg("SET LOCAL TRANSACTION SNAPSHOT is not implemented")));
 
 				WarnNoTransactionChain(isTopLevel, "SET TRANSACTION");
-				Assert(IsA(con, A_Const));
 				Assert(nodeTag(&con->val) == T_String);
 				ImportSnapshot(strVal(&con->val));
 			}
@@ -7874,8 +7951,8 @@ ShowGUCConfigOption(const char *name, DestReceiver *dest)
 
 	/* need a tuple descriptor representing a single TEXT column */
 	tupdesc = CreateTemplateTupleDesc(1, false);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, varname,
-					   TEXTOID, -1, 0);
+	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 1, varname,
+							  TEXTOID, -1, 0);
 
 	/* prepare for projection of tuples */
 	tstate = begin_tup_output_tupdesc(dest, tupdesc);
@@ -7901,12 +7978,12 @@ ShowAllGUCConfig(DestReceiver *dest)
 
 	/* need a tuple descriptor representing three TEXT columns */
 	tupdesc = CreateTemplateTupleDesc(3, false);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "name",
-					   TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "setting",
-					   TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "description",
-					   TEXTOID, -1, 0);
+	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 1, "name",
+							  TEXTOID, -1, 0);
+	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 2, "setting",
+							  TEXTOID, -1, 0);
+	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 3, "description",
+							  TEXTOID, -1, 0);
 
 	/* prepare for projection of tuples */
 	tstate = begin_tup_output_tupdesc(dest, tupdesc);
@@ -7978,10 +8055,12 @@ GetConfigOptionByName(const char *name, const char **varname, bool missing_ok)
 			   errmsg("unrecognized configuration parameter \"%s\"", name)));
 	}
 
-	if ((record->flags & GUC_SUPERUSER_ONLY) && !superuser())
+	if ((record->flags & GUC_SUPERUSER_ONLY) &&
+		!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_SETTINGS))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to examine \"%s\"", name)));
+				 errmsg("must be superuser or a member of pg_read_all_settings to examine \"%s\"",
+				 name)));
 
 	if (varname)
 		*varname = record->name;
@@ -8007,7 +8086,8 @@ GetConfigOptionByNum(int varnum, const char **values, bool *noshow)
 	if (noshow)
 	{
 		if ((conf->flags & GUC_NO_SHOW_ALL) ||
-			((conf->flags & GUC_SUPERUSER_ONLY) && !superuser()))
+			((conf->flags & GUC_SUPERUSER_ONLY) &&
+			!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_SETTINGS)))
 			*noshow = true;
 		else
 			*noshow = false;
@@ -8029,17 +8109,15 @@ GetConfigOptionByNum(int varnum, const char **values, bool *noshow)
 			case GUC_UNIT_KB:
 				values[2] = "kB";
 				break;
+			case GUC_UNIT_MB:
+				values[2] = "MB";
+				break;
 			case GUC_UNIT_BLOCKS:
 				snprintf(buffer, sizeof(buffer), "%dkB", BLCKSZ / 1024);
 				values[2] = pstrdup(buffer);
 				break;
 			case GUC_UNIT_XBLOCKS:
 				snprintf(buffer, sizeof(buffer), "%dkB", XLOG_BLCKSZ / 1024);
-				values[2] = pstrdup(buffer);
-				break;
-			case GUC_UNIT_XSEGS:
-				snprintf(buffer, sizeof(buffer), "%dMB",
-						 XLOG_SEG_SIZE / (1024 * 1024));
 				values[2] = pstrdup(buffer);
 				break;
 			case GUC_UNIT_MS:
@@ -9883,6 +9961,86 @@ call_enum_check_hook(struct config_enum * conf, int *newval, void **extra,
 /*
  * check_hook, assign_hook and show_hook subroutines
  */
+
+static bool
+check_wal_consistency_checking(char **newval, void **extra, GucSource source)
+{
+	char	   *rawstring;
+	List	   *elemlist;
+	ListCell   *l;
+	bool		newwalconsistency[RM_MAX_ID + 1];
+
+	/* Initialize the array */
+	MemSet(newwalconsistency, 0, (RM_MAX_ID + 1) * sizeof(bool));
+
+	/* Need a modifiable copy of string */
+	rawstring = pstrdup(*newval);
+
+	/* Parse string into list of identifiers */
+	if (!SplitIdentifierString(rawstring, ',', &elemlist))
+	{
+		/* syntax error in list */
+		GUC_check_errdetail("List syntax is invalid.");
+		pfree(rawstring);
+		list_free(elemlist);
+		return false;
+	}
+
+	foreach(l, elemlist)
+	{
+		char	   *tok = (char *) lfirst(l);
+		bool		found = false;
+		RmgrId		rmid;
+
+		/* Check for 'all'. */
+		if (pg_strcasecmp(tok, "all") == 0)
+		{
+			for (rmid = 0; rmid <= RM_MAX_ID; rmid++)
+				if (RmgrTable[rmid].rm_mask != NULL)
+					newwalconsistency[rmid] = true;
+			found = true;
+		}
+		else
+		{
+			/*
+			 * Check if the token matches with any individual resource
+			 * manager.
+			 */
+			for (rmid = 0; rmid <= RM_MAX_ID; rmid++)
+			{
+				if (pg_strcasecmp(tok, RmgrTable[rmid].rm_name) == 0 &&
+					RmgrTable[rmid].rm_mask != NULL)
+				{
+					newwalconsistency[rmid] = true;
+					found = true;
+				}
+			}
+		}
+
+		/* If a valid resource manager is found, check for the next one. */
+		if (!found)
+		{
+			GUC_check_errdetail("Unrecognized key word: \"%s\".", tok);
+			pfree(rawstring);
+			list_free(elemlist);
+			return false;
+		}
+	}
+
+	pfree(rawstring);
+	list_free(elemlist);
+
+	/* assign new value */
+	*extra = guc_malloc(ERROR, (RM_MAX_ID + 1) * sizeof(bool));
+	memcpy(*extra, newwalconsistency, (RM_MAX_ID + 1) * sizeof(bool));
+	return true;
+}
+
+static void
+assign_wal_consistency_checking(const char *newval, void *extra)
+{
+	wal_consistency_checking = (bool *) extra;
+}
 
 static bool
 check_log_destination(char **newval, void **extra, GucSource source)

@@ -5,7 +5,7 @@
  *
  * Code originally contributed by Adriaan Joubert.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,6 +20,7 @@
 #include "libpq/pqformat.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/array.h"
+#include "utils/builtins.h"
 #include "utils/varbit.h"
 
 #define HEXDIG(z)	 ((z)<10 ? ((z)+'0') : ((z)-10+'A'))
@@ -678,11 +679,10 @@ varbit_send(PG_FUNCTION_ARGS)
 Datum
 varbit_transform(PG_FUNCTION_ARGS)
 {
-	FuncExpr   *expr = (FuncExpr *) PG_GETARG_POINTER(0);
+	FuncExpr   *expr = castNode(FuncExpr, PG_GETARG_POINTER(0));
 	Node	   *ret = NULL;
 	Node	   *typmod;
 
-	Assert(IsA(expr, FuncExpr));
 	Assert(list_length(expr->args) >= 2);
 
 	typmod = (Node *) lsecond(expr->args);

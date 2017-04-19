@@ -8,7 +8,7 @@
  * stepping on each others' toes.  Formerly we used table-level locks
  * on pg_database, but that's too coarse-grained.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,7 +20,6 @@
 #include "postgres.h"
 
 #include <fcntl.h>
-#include <locale.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -37,6 +36,7 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
+#include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
@@ -545,10 +545,7 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 
 	HeapTupleSetOid(tuple, dboid);
 
-	simple_heap_insert(pg_database_rel, tuple);
-
-	/* Update indexes */
-	CatalogUpdateIndexes(pg_database_rel, tuple);
+	CatalogTupleInsert(pg_database_rel, tuple);
 
 	/*
 	 * Now generate additional catalog entries associated with the new DB
@@ -687,7 +684,7 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 
 		/*
 		 * Force synchronous commit, thus minimizing the window between
-		 * creation of the database files and commital of the transaction. If
+		 * creation of the database files and committal of the transaction. If
 		 * we crash before committing, we'll have a DB that's taking up disk
 		 * space but is not in pg_database, which is not good.
 		 */
@@ -790,6 +787,7 @@ dropdb(const char *dbname, bool missing_ok)
 	int			npreparedxacts;
 	int			nslots,
 				nslots_active;
+	int			nsubscriptions;
 
 	/*
 	 * Look up the target database's OID, and get exclusive lock on it. We
@@ -847,19 +845,22 @@ dropdb(const char *dbname, bool missing_ok)
 				 errmsg("cannot drop the currently open database")));
 
 	/*
-	 * Check whether there are, possibly unconnected, logical slots that refer
-	 * to the to-be-dropped database. The database lock we are holding
-	 * prevents the creation of new slots using the database.
+	 * Check whether there are active logical slots that refer to the
+	 * to-be-dropped database. The database lock we are holding prevents the
+	 * creation of new slots using the database or existing slots becoming
+	 * active.
 	 */
-	if (ReplicationSlotsCountDBSlots(db_id, &nslots, &nslots_active))
+	(void) ReplicationSlotsCountDBSlots(db_id, &nslots, &nslots_active);
+	if (nslots_active)
+	{
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_IN_USE),
-			  errmsg("database \"%s\" is used by a logical replication slot",
+			  errmsg("database \"%s\" is used by an active logical replication slot",
 					 dbname),
-				 errdetail_plural("There is %d slot, %d of them active.",
-								  "There are %d slots, %d of them active.",
-								  nslots,
-								  nslots, nslots_active)));
+				 errdetail_plural("There is %d active slot",
+								  "There are %d active slots",
+								  nslots_active, nslots_active)));
+	}
 
 	/*
 	 * Check for other backends in the target database.  (Because we hold the
@@ -875,13 +876,28 @@ dropdb(const char *dbname, bool missing_ok)
 				 errdetail_busy_db(notherbackends, npreparedxacts)));
 
 	/*
+	 * Check if there are subscriptions defined in the target database.
+	 *
+	 * We can't drop them automatically because they might be holding
+	 * resources in other databases/instances.
+	 */
+	if ((nsubscriptions = CountDBSubscriptions(db_id)) > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_IN_USE),
+				 errmsg("database \"%s\" is being used by logical replication subscription",
+						dbname),
+				 errdetail_plural("There is %d subscription.",
+								  "There are %d subscriptions.",
+								  nsubscriptions, nsubscriptions)));
+
+	/*
 	 * Remove the database's tuple from pg_database.
 	 */
 	tup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(db_id));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for database %u", db_id);
 
-	simple_heap_delete(pgdbrel, &tup->t_self);
+	CatalogTupleDelete(pgdbrel, &tup->t_self);
 
 	ReleaseSysCache(tup);
 
@@ -900,6 +916,11 @@ dropdb(const char *dbname, bool missing_ok)
 	 * Remove shared dependency references for the database.
 	 */
 	dropDatabaseDependencies(db_id);
+
+	/*
+	 * Drop db-specific replication slots.
+	 */
+	ReplicationSlotsDropDBSlots(db_id);
 
 	/*
 	 * Drop pages for this database that are in the shared buffer cache. This
@@ -941,7 +962,7 @@ dropdb(const char *dbname, bool missing_ok)
 
 	/*
 	 * Force synchronous commit, thus minimizing the window between removal of
-	 * the database files and commital of the transaction. If we crash before
+	 * the database files and committal of the transaction. If we crash before
 	 * committing, we'll have a DB that's gone on disk but still there
 	 * according to pg_database, which is not good.
 	 */
@@ -1023,8 +1044,7 @@ RenameDatabase(const char *oldname, const char *newname)
 	if (!HeapTupleIsValid(newtup))
 		elog(ERROR, "cache lookup failed for database %u", db_id);
 	namestrcpy(&(((Form_pg_database) GETSTRUCT(newtup))->datname), newname);
-	simple_heap_update(rel, &newtup->t_self, newtup);
-	CatalogUpdateIndexes(rel, newtup);
+	CatalogTupleUpdate(rel, &newtup->t_self, newtup);
 
 	InvokeObjectPostAlterHook(DatabaseRelationId, db_id, 0);
 
@@ -1279,10 +1299,7 @@ movedb(const char *dbname, const char *tblspcname)
 		newtuple = heap_modify_tuple(oldtuple, RelationGetDescr(pgdbrel),
 									 new_record,
 									 new_record_nulls, new_record_repl);
-		simple_heap_update(pgdbrel, &oldtuple->t_self, newtuple);
-
-		/* Update indexes */
-		CatalogUpdateIndexes(pgdbrel, newtuple);
+		CatalogTupleUpdate(pgdbrel, &oldtuple->t_self, newtuple);
 
 		InvokeObjectPostAlterHook(DatabaseRelationId,
 								  HeapTupleGetOid(newtuple), 0);
@@ -1299,7 +1316,7 @@ movedb(const char *dbname, const char *tblspcname)
 
 		/*
 		 * Force synchronous commit, thus minimizing the window between
-		 * copying the database files and commital of the transaction. If we
+		 * copying the database files and committal of the transaction. If we
 		 * crash before committing, we'll leave an orphaned set of files on
 		 * disk, which is not fatal but not good either.
 		 */
@@ -1537,10 +1554,7 @@ AlterDatabase(ParseState *pstate, AlterDatabaseStmt *stmt, bool isTopLevel)
 
 	newtuple = heap_modify_tuple(tuple, RelationGetDescr(rel), new_record,
 								 new_record_nulls, new_record_repl);
-	simple_heap_update(rel, &tuple->t_self, newtuple);
-
-	/* Update indexes */
-	CatalogUpdateIndexes(rel, newtuple);
+	CatalogTupleUpdate(rel, &tuple->t_self, newtuple);
 
 	InvokeObjectPostAlterHook(DatabaseRelationId,
 							  HeapTupleGetOid(newtuple), 0);
@@ -1675,8 +1689,7 @@ AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 		}
 
 		newtuple = heap_modify_tuple(tuple, RelationGetDescr(rel), repl_val, repl_null, repl_repl);
-		simple_heap_update(rel, &newtuple->t_self, newtuple);
-		CatalogUpdateIndexes(rel, newtuple);
+		CatalogTupleUpdate(rel, &newtuple->t_self, newtuple);
 
 		heap_freetuple(newtuple);
 
@@ -2119,10 +2132,16 @@ dbase_redo(XLogReaderState *record)
 			 * InitPostgres() cannot fully re-execute concurrently. This
 			 * avoids backends re-connecting automatically to same database,
 			 * which can happen in some cases.
+			 *
+			 * This will lock out walsenders trying to connect to db-specific
+			 * slots for logical decoding too, so it's safe for us to drop slots.
 			 */
 			LockSharedObjectForSession(DatabaseRelationId, xlrec->db_id, 0, AccessExclusiveLock);
 			ResolveRecoveryConflictWithDatabase(xlrec->db_id);
 		}
+
+		/* Drop any database-specific replication slots */
+		ReplicationSlotsDropDBSlots(xlrec->db_id);
 
 		/* Drop pages for this database that are in the shared buffer cache */
 		DropDatabaseBuffers(xlrec->db_id);
