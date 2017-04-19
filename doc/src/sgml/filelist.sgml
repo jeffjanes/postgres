@@ -24,6 +24,7 @@
 <!ENTITY indices    SYSTEM "indices.sgml">
 <!ENTITY json       SYSTEM "json.sgml">
 <!ENTITY mvcc       SYSTEM "mvcc.sgml">
+<!ENTITY parallel   SYSTEM "parallel.sgml">
 <!ENTITY perform    SYSTEM "perform.sgml">
 <!ENTITY queries    SYSTEM "queries.sgml">
 <!ENTITY rangetypes SYSTEM "rangetypes.sgml">
@@ -49,6 +50,7 @@
 <!ENTITY config        SYSTEM "config.sgml">
 <!ENTITY user-manag    SYSTEM "user-manag.sgml">
 <!ENTITY wal           SYSTEM "wal.sgml">
+<!ENTITY logical-replication    SYSTEM "logical-replication.sgml">
 
 <!-- programmer's guide -->
 <!ENTITY bgworker   SYSTEM "bgworker.sgml">
@@ -105,6 +107,7 @@
 <!-- contrib information -->
 <!ENTITY contrib         SYSTEM "contrib.sgml">
 <!ENTITY adminpack       SYSTEM "adminpack.sgml">
+<!ENTITY amcheck         SYSTEM "amcheck.sgml">
 <!ENTITY auth-delay      SYSTEM "auth-delay.sgml">
 <!ENTITY auto-explain    SYSTEM "auto-explain.sgml">
 <!ENTITY bloom           SYSTEM "bloom.sgml">
@@ -149,7 +152,6 @@
 <!ENTITY test-decoding   SYSTEM "test-decoding.sgml">
 <!ENTITY test-parser     SYSTEM "test-parser.sgml">
 <!ENTITY test-shm-mq     SYSTEM "test-shm-mq.sgml">
-<!ENTITY tsearch2        SYSTEM "tsearch2.sgml">
 <!ENTITY tsm-system-rows SYSTEM "tsm-system-rows.sgml">
 <!ENTITY tsm-system-time SYSTEM "tsm-system-time.sgml">
 <!ENTITY unaccent      SYSTEM "unaccent.sgml">
@@ -191,7 +193,6 @@
 
 <!-- back matter -->
 <!ENTITY biblio     SYSTEM "biblio.sgml">
-<!ENTITY bookindex  SYSTEM "bookindex.sgml">
 
 <!--
  Some parts of the documentation are also source for some plain-text
@@ -201,14 +202,3 @@
  -->
 <!ENTITY % standalone-ignore  "INCLUDE">
 <!ENTITY % standalone-include "IGNORE">
-
-<!--
- By default, no index is included.  Use -i include-index on the command line
- to include it.
- -->
-<!ENTITY % include-index "IGNORE">
-
-<!--
- Create empty index element for processing by XSLT stylesheet.
- -->
-<!ENTITY % include-xslt-index "IGNORE">

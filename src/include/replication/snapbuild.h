@@ -3,7 +3,7 @@
  * snapbuild.h
  *	  Exports from replication/logical/snapbuild.c.
  *
- * Copyright (c) 2012-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2017, PostgreSQL Global Development Group
  *
  * src/include/replication/snapbuild.h
  *
@@ -59,6 +59,7 @@ extern void FreeSnapshotBuilder(SnapBuild *cache);
 
 extern void SnapBuildSnapDecRefcount(Snapshot snap);
 
+extern Snapshot SnapBuildInitialSnapshot(SnapBuild *builder);
 extern const char *SnapBuildExportSnapshot(SnapBuild *snapstate);
 extern void SnapBuildClearExportedSnapshot(void);
 

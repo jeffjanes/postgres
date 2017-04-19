@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -164,8 +164,6 @@
  */
 #define atoui(x)  ((unsigned int) strtoul((x), NULL, 10))
 
-#define atooid(x)  ((Oid) strtoul((x), NULL, 10))
-
 #define strtobool(x)  ((*(x) == 't') ? true : false)
 
 #define nullable_string(token,length)  \
@@ -238,6 +236,7 @@ _readQuery(void)
 	READ_INT_FIELD(resultRelation);
 	READ_BOOL_FIELD(hasAggs);
 	READ_BOOL_FIELD(hasWindowFuncs);
+	READ_BOOL_FIELD(hasTargetSRFs);
 	READ_BOOL_FIELD(hasSubLinks);
 	READ_BOOL_FIELD(hasDistinctOn);
 	READ_BOOL_FIELD(hasRecursive);
@@ -248,6 +247,7 @@ _readQuery(void)
 	READ_NODE_FIELD(rtable);
 	READ_NODE_FIELD(jointree);
 	READ_NODE_FIELD(targetList);
+	READ_ENUM_FIELD(override, OverridingKind);
 	READ_NODE_FIELD(onConflict);
 	READ_NODE_FIELD(returningList);
 	READ_NODE_FIELD(groupClause);
@@ -261,6 +261,9 @@ _readQuery(void)
 	READ_NODE_FIELD(rowMarks);
 	READ_NODE_FIELD(setOperations);
 	READ_NODE_FIELD(constraintDeps);
+	/* withCheckOptions intentionally omitted, see comment in parsenodes.h */
+	READ_LOCATION_FIELD(stmt_location);
+	READ_LOCATION_FIELD(stmt_len);
 
 	READ_DONE();
 }
@@ -448,9 +451,34 @@ _readRangeVar(void)
 
 	READ_STRING_FIELD(schemaname);
 	READ_STRING_FIELD(relname);
-	READ_ENUM_FIELD(inhOpt, InhOption);
+	READ_BOOL_FIELD(inh);
 	READ_CHAR_FIELD(relpersistence);
 	READ_NODE_FIELD(alias);
+	READ_LOCATION_FIELD(location);
+
+	READ_DONE();
+}
+
+/*
+ * _readTableFunc
+ */
+static TableFunc *
+_readTableFunc(void)
+{
+	READ_LOCALS(TableFunc);
+
+	READ_NODE_FIELD(ns_names);
+	READ_NODE_FIELD(ns_uris);
+	READ_NODE_FIELD(docexpr);
+	READ_NODE_FIELD(rowexpr);
+	READ_NODE_FIELD(colnames);
+	READ_NODE_FIELD(coltypes);
+	READ_NODE_FIELD(coltypmods);
+	READ_NODE_FIELD(colcollations);
+	READ_NODE_FIELD(colexprs);
+	READ_NODE_FIELD(coldefexprs);
+	READ_BITMAPSET_FIELD(notnulls);
+	READ_INT_FIELD(ordinalitycol);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -1042,6 +1070,22 @@ _readMinMaxExpr(void)
 }
 
 /*
+ * _readSQLValueFunction
+ */
+static SQLValueFunction *
+_readSQLValueFunction(void)
+{
+	READ_LOCALS(SQLValueFunction);
+
+	READ_ENUM_FIELD(op, SQLValueFunctionOp);
+	READ_OID_FIELD(type);
+	READ_INT_FIELD(typmod);
+	READ_LOCATION_FIELD(location);
+
+	READ_DONE();
+}
+
+/*
  * _readXmlExpr
  */
 static XmlExpr *
@@ -1295,17 +1339,29 @@ _readRangeTblEntry(void)
 			READ_NODE_FIELD(functions);
 			READ_BOOL_FIELD(funcordinality);
 			break;
+		case RTE_TABLEFUNC:
+			READ_NODE_FIELD(tablefunc);
+			break;
 		case RTE_VALUES:
 			READ_NODE_FIELD(values_lists);
-			READ_NODE_FIELD(values_collations);
+			READ_NODE_FIELD(coltypes);
+			READ_NODE_FIELD(coltypmods);
+			READ_NODE_FIELD(colcollations);
 			break;
 		case RTE_CTE:
 			READ_STRING_FIELD(ctename);
 			READ_UINT_FIELD(ctelevelsup);
 			READ_BOOL_FIELD(self_reference);
-			READ_NODE_FIELD(ctecoltypes);
-			READ_NODE_FIELD(ctecoltypmods);
-			READ_NODE_FIELD(ctecolcollations);
+			READ_NODE_FIELD(coltypes);
+			READ_NODE_FIELD(coltypmods);
+			READ_NODE_FIELD(colcollations);
+			break;
+		case RTE_NAMEDTUPLESTORE:
+			READ_STRING_FIELD(enrname);
+			READ_OID_FIELD(relid);
+			READ_NODE_FIELD(coltypes);
+			READ_NODE_FIELD(coltypmods);
+			READ_NODE_FIELD(colcollations);
 			break;
 		default:
 			elog(ERROR, "unrecognized RTE kind: %d",
@@ -1372,6 +1428,7 @@ _readDefElem(void)
 	READ_STRING_FIELD(defname);
 	READ_NODE_FIELD(arg);
 	READ_ENUM_FIELD(defaction, DefElemAction);
+	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
 }
@@ -1395,13 +1452,16 @@ _readPlannedStmt(void)
 	READ_NODE_FIELD(planTree);
 	READ_NODE_FIELD(rtable);
 	READ_NODE_FIELD(resultRelations);
-	READ_NODE_FIELD(utilityStmt);
+	READ_NODE_FIELD(nonleafResultRelations);
 	READ_NODE_FIELD(subplans);
 	READ_BITMAPSET_FIELD(rewindPlanIDs);
 	READ_NODE_FIELD(rowMarks);
 	READ_NODE_FIELD(relationOids);
 	READ_NODE_FIELD(invalItems);
 	READ_INT_FIELD(nParamExec);
+	READ_NODE_FIELD(utilityStmt);
+	READ_LOCATION_FIELD(stmt_location);
+	READ_LOCATION_FIELD(stmt_len);
 
 	READ_DONE();
 }
@@ -1420,6 +1480,7 @@ ReadCommonPlan(Plan *local_node)
 	READ_FLOAT_FIELD(plan_rows);
 	READ_INT_FIELD(plan_width);
 	READ_BOOL_FIELD(parallel_aware);
+	READ_BOOL_FIELD(parallel_safe);
 	READ_INT_FIELD(plan_node_id);
 	READ_NODE_FIELD(targetlist);
 	READ_NODE_FIELD(qual);
@@ -1459,6 +1520,19 @@ _readResult(void)
 }
 
 /*
+ * _readProjectSet
+ */
+static ProjectSet *
+_readProjectSet(void)
+{
+	READ_LOCALS_NO_FIELDS(ProjectSet);
+
+	ReadCommonPlan(&local_node->plan);
+
+	READ_DONE();
+}
+
+/*
  * _readModifyTable
  */
 static ModifyTable *
@@ -1471,6 +1545,7 @@ _readModifyTable(void)
 	READ_ENUM_FIELD(operation, CmdType);
 	READ_BOOL_FIELD(canSetTag);
 	READ_UINT_FIELD(nominalRelation);
+	READ_NODE_FIELD(partitioned_rels);
 	READ_NODE_FIELD(resultRelations);
 	READ_INT_FIELD(resultRelIndex);
 	READ_NODE_FIELD(plans);
@@ -1500,6 +1575,7 @@ _readAppend(void)
 
 	ReadCommonPlan(&local_node->plan);
 
+	READ_NODE_FIELD(partitioned_rels);
 	READ_NODE_FIELD(appendplans);
 
 	READ_DONE();
@@ -1515,6 +1591,7 @@ _readMergeAppend(void)
 
 	ReadCommonPlan(&local_node->plan);
 
+	READ_NODE_FIELD(partitioned_rels);
 	READ_NODE_FIELD(mergeplans);
 	READ_INT_FIELD(numCols);
 	READ_ATTRNUMBER_ARRAY(sortColIdx, local_node->numCols);
@@ -1569,6 +1646,7 @@ _readBitmapOr(void)
 
 	ReadCommonPlan(&local_node->plan);
 
+	READ_BOOL_FIELD(isshared);
 	READ_NODE_FIELD(bitmapplans);
 
 	READ_DONE();
@@ -1680,6 +1758,7 @@ _readBitmapIndexScan(void)
 	ReadCommonScan(&local_node->scan);
 
 	READ_OID_FIELD(indexid);
+	READ_BOOL_FIELD(isshared);
 	READ_NODE_FIELD(indexqual);
 	READ_NODE_FIELD(indexqualorig);
 
@@ -1758,6 +1837,21 @@ _readValuesScan(void)
 	ReadCommonScan(&local_node->scan);
 
 	READ_NODE_FIELD(values_lists);
+
+	READ_DONE();
+}
+
+/*
+ * _readTableFuncScan
+ */
+static TableFuncScan *
+_readTableFuncScan(void)
+{
+	READ_LOCALS(TableFuncScan);
+
+	ReadCommonScan(&local_node->scan);
+
+	READ_NODE_FIELD(tablefunc);
 
 	READ_DONE();
 }
@@ -1856,6 +1950,7 @@ ReadCommonJoin(Join *local_node)
 	ReadCommonPlan(&local_node->plan);
 
 	READ_ENUM_FIELD(jointype, JoinType);
+	READ_BOOL_FIELD(inner_unique);
 	READ_NODE_FIELD(joinqual);
 }
 
@@ -1899,6 +1994,7 @@ _readMergeJoin(void)
 
 	ReadCommonJoin(&local_node->join);
 
+	READ_BOOL_FIELD(skip_mark_restore);
 	READ_NODE_FIELD(mergeclauses);
 
 	numCols = list_length(local_node->mergeclauses);
@@ -1991,6 +2087,7 @@ _readAgg(void)
 	READ_ATTRNUMBER_ARRAY(grpColIdx, local_node->numCols);
 	READ_OID_ARRAY(grpOperators, local_node->numCols);
 	READ_LONG_FIELD(numGroups);
+	READ_BITMAPSET_FIELD(aggParams);
 	READ_NODE_FIELD(groupingSets);
 	READ_NODE_FIELD(chain);
 
@@ -2051,6 +2148,26 @@ _readGather(void)
 	READ_INT_FIELD(num_workers);
 	READ_BOOL_FIELD(single_copy);
 	READ_BOOL_FIELD(invisible);
+
+	READ_DONE();
+}
+
+/*
+ * _readGatherMerge
+ */
+static GatherMerge *
+_readGatherMerge(void)
+{
+	READ_LOCALS(GatherMerge);
+
+	ReadCommonPlan(&local_node->plan);
+
+	READ_INT_FIELD(num_workers);
+	READ_INT_FIELD(numCols);
+	READ_ATTRNUMBER_ARRAY(sortColIdx, local_node->numCols);
+	READ_OID_ARRAY(sortOperators, local_node->numCols);
+	READ_OID_ARRAY(collations, local_node->numCols);
+	READ_BOOL_ARRAY(nullsFirst, local_node->numCols);
 
 	READ_DONE();
 }
@@ -2194,6 +2311,7 @@ _readSubPlan(void)
 	READ_OID_FIELD(firstColCollation);
 	READ_BOOL_FIELD(useHashTable);
 	READ_BOOL_FIELD(unknownEqFalse);
+	READ_BOOL_FIELD(parallel_safe);
 	READ_NODE_FIELD(setParam);
 	READ_NODE_FIELD(parParam);
 	READ_NODE_FIELD(args);
@@ -2247,6 +2365,36 @@ _readExtensibleNode(void)
 }
 
 /*
+ * _readPartitionBoundSpec
+ */
+static PartitionBoundSpec *
+_readPartitionBoundSpec(void)
+{
+	READ_LOCALS(PartitionBoundSpec);
+
+	READ_CHAR_FIELD(strategy);
+	READ_NODE_FIELD(listdatums);
+	READ_NODE_FIELD(lowerdatums);
+	READ_NODE_FIELD(upperdatums);
+
+	READ_DONE();
+}
+
+/*
+ * _readPartitionRangeDatum
+ */
+static PartitionRangeDatum *
+_readPartitionRangeDatum(void)
+{
+	READ_LOCALS(PartitionRangeDatum);
+
+	READ_BOOL_FIELD(infinite);
+	READ_NODE_FIELD(value);
+
+	READ_DONE();
+}
+
+/*
  * parseNodeString
  *
  * Given a character string representing a node tree, parseNodeString creates
@@ -2288,6 +2436,8 @@ parseNodeString(void)
 		return_value = _readRangeVar();
 	else if (MATCH("INTOCLAUSE", 10))
 		return_value = _readIntoClause();
+	else if (MATCH("TABLEFUNC", 9))
+		return_value = _readTableFunc();
 	else if (MATCH("VAR", 3))
 		return_value = _readVar();
 	else if (MATCH("CONST", 5))
@@ -2348,6 +2498,8 @@ parseNodeString(void)
 		return_value = _readCoalesceExpr();
 	else if (MATCH("MINMAX", 6))
 		return_value = _readMinMaxExpr();
+	else if (MATCH("SQLVALUEFUNCTION", 16))
+		return_value = _readSQLValueFunction();
 	else if (MATCH("XMLEXPR", 7))
 		return_value = _readXmlExpr();
 	else if (MATCH("NULLTEST", 8))
@@ -2392,6 +2544,8 @@ parseNodeString(void)
 		return_value = _readPlan();
 	else if (MATCH("RESULT", 6))
 		return_value = _readResult();
+	else if (MATCH("PROJECTSET", 10))
+		return_value = _readProjectSet();
 	else if (MATCH("MODIFYTABLE", 11))
 		return_value = _readModifyTable();
 	else if (MATCH("APPEND", 6))
@@ -2426,6 +2580,8 @@ parseNodeString(void)
 		return_value = _readFunctionScan();
 	else if (MATCH("VALUESSCAN", 10))
 		return_value = _readValuesScan();
+	else if (MATCH("TABLEFUNCSCAN", 13))
+		return_value = _readTableFuncScan();
 	else if (MATCH("CTESCAN", 7))
 		return_value = _readCteScan();
 	else if (MATCH("WORKTABLESCAN", 13))
@@ -2456,6 +2612,8 @@ parseNodeString(void)
 		return_value = _readUnique();
 	else if (MATCH("GATHER", 6))
 		return_value = _readGather();
+	else if (MATCH("GATHERMERGE", 11))
+		return_value = _readGatherMerge();
 	else if (MATCH("HASH", 4))
 		return_value = _readHash();
 	else if (MATCH("SETOP", 5))
@@ -2476,6 +2634,10 @@ parseNodeString(void)
 		return_value = _readAlternativeSubPlan();
 	else if (MATCH("EXTENSIBLENODE", 14))
 		return_value = _readExtensibleNode();
+	else if (MATCH("PARTITIONBOUND", 14))
+		return_value = _readPartitionBoundSpec();
+	else if (MATCH("PARTRANGEDATUM", 14))
+		return_value = _readPartitionRangeDatum();
 	else
 	{
 		elog(ERROR, "badly formatted node string \"%.32s\"...", token);

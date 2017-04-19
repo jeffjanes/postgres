@@ -99,11 +99,12 @@ typedef struct _restoreOptions
 	SimpleStringList indexNames;
 	SimpleStringList functionNames;
 	SimpleStringList schemaNames;
+	SimpleStringList schemaExcludeNames;
 	SimpleStringList triggerNames;
 	SimpleStringList tableNames;
 
 	int			useDB;
-	char	   *dbname;
+	char	   *dbname;			/* subject to expand_dbname */
 	char	   *pgport;
 	char	   *pghost;
 	char	   *username;
@@ -117,11 +118,13 @@ typedef struct _restoreOptions
 
 	bool	   *idWanted;		/* array showing which dump IDs to emit */
 	int			enable_row_security;
+	int			sequence_data;	/* dump sequence data even in schema-only mode */
+	int			binary_upgrade;
 } RestoreOptions;
 
 typedef struct _dumpOptions
 {
-	const char *dbname;
+	const char *dbname;			/* subject to expand_dbname */
 	const char *pghost;
 	const char *pgport;
 	const char *username;
@@ -157,8 +160,11 @@ typedef struct _dumpOptions
 	int			outputClean;
 	int			outputCreateDB;
 	bool		outputBlobs;
+	bool		dontOutputBlobs;
 	int			outputNoOwner;
 	char	   *outputSuperuser;
+
+	int			sequence_data;	/* dump sequence data even in schema-only mode */
 } DumpOptions;
 
 /*
@@ -221,7 +227,7 @@ typedef int DumpId;
 
 typedef int (*DataDumperPtr) (Archive *AH, void *userArg);
 
-typedef void (*SetupWorkerPtr) (Archive *AH);
+typedef void (*SetupWorkerPtrType) (Archive *AH);
 
 /*
  * Main archiver interface.
@@ -267,8 +273,8 @@ extern Archive *OpenArchive(const char *FileSpec, const ArchiveFormat fmt);
 
 /* Create a new archive */
 extern Archive *CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
-			  const int compression, ArchiveMode mode,
-			  SetupWorkerPtr setupDumpWorker);
+			  const int compression, bool dosync, ArchiveMode mode,
+			  SetupWorkerPtrType setupDumpWorker);
 
 /* The --list option */
 extern void PrintTOCSummary(Archive *AH);

@@ -3,7 +3,7 @@
  * fe-exec.c
  *	  functions related to sending a query down to the backend
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -824,6 +824,7 @@ pqInternalNotice(const PGNoticeHooks *hooks, const char *fmt,...)
 	 */
 	pqSaveMessageField(res, PG_DIAG_MESSAGE_PRIMARY, msgBuf);
 	pqSaveMessageField(res, PG_DIAG_SEVERITY, libpq_gettext("NOTICE"));
+	pqSaveMessageField(res, PG_DIAG_SEVERITY_NONLOCALIZED, "NOTICE");
 	/* XXX should provide a SQLSTATE too? */
 
 	/*
@@ -983,14 +984,31 @@ pqSaveParameterStatus(PGconn *conn, const char *name, const char *value)
 
 		cnt = sscanf(value, "%d.%d.%d", &vmaj, &vmin, &vrev);
 
-		if (cnt < 2)
-			conn->sversion = 0; /* unknown */
-		else
+		if (cnt == 3)
 		{
-			if (cnt == 2)
-				vrev = 0;
+			/* old style, e.g. 9.6.1 */
 			conn->sversion = (100 * vmaj + vmin) * 100 + vrev;
 		}
+		else if (cnt == 2)
+		{
+			if (vmaj >= 10)
+			{
+				/* new style, e.g. 10.1 */
+				conn->sversion = 100 * 100 * vmaj + vmin;
+			}
+			else
+			{
+				/* old style without minor version, e.g. 9.6devel */
+				conn->sversion = (100 * vmaj + vmin) * 100;
+			}
+		}
+		else if (cnt == 1)
+		{
+			/* new style without minor version, e.g. 10devel */
+			conn->sversion = 100 * 100 * vmaj;
+		}
+		else
+			conn->sversion = 0; /* unknown */
 	}
 }
 
@@ -1368,8 +1386,7 @@ PQsendQueryStart(PGconn *conn)
 	}
 
 	/* initialize async result-accumulation state */
-	conn->result = NULL;
-	conn->next_result = NULL;
+	pqClearAsyncResult(conn);
 
 	/* reset single-row processing mode */
 	conn->singleRowMode = false;
@@ -2317,7 +2334,7 @@ PQputCopyEnd(PGconn *conn, const char *errormsg)
 	{
 		if (errormsg)
 		{
-			/* Ooops, no way to do this in 2.0 */
+			/* Oops, no way to do this in 2.0 */
 			printfPQExpBuffer(&conn->errorMessage,
 							  libpq_gettext("function requires at least protocol version 3.0\n"));
 			return -1;

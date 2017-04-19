@@ -5,7 +5,7 @@
  *
  *	  Should be moved/renamed...    - vadim 07/28/98
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/tqual.h
@@ -104,12 +104,9 @@ extern bool ResolveCminCmaxDuringDecoding(struct HTAB *tuplecid_data,
  * Similarly, some initialization is required for SnapshotToast.  We need
  * to set lsn and whenTaken correctly to support snapshot_too_old.
  */
-static inline void
-InitToastSnapshot(Snapshot snapshot, XLogRecPtr lsn, int64 whenTaken)
-{
-	snapshot->satisfies = HeapTupleSatisfiesToast;
-	snapshot->lsn = lsn;
-	snapshot->whenTaken = whenTaken;
-}
+#define InitToastSnapshot(snapshotdata, l, w)  \
+	((snapshotdata).satisfies = HeapTupleSatisfiesToast, \
+	 (snapshotdata).lsn = (l),					\
+	 (snapshotdata).whenTaken = (w))
 
 #endif   /* TQUAL_H */

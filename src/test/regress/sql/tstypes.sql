@@ -64,34 +64,6 @@ SELECT 'a & !!b'::tsquery;
 SELECT '!!a & b'::tsquery;
 SELECT '!!a & !!b'::tsquery;
 
--- phrase transformation
-SELECT 'a <-> (b|c)'::tsquery;
-SELECT '(a|b) <-> c'::tsquery;
-SELECT '(a|b) <-> (d|c)'::tsquery;
-
-SELECT 'a <-> (b&c)'::tsquery;
-SELECT '(a&b) <-> c'::tsquery;
-SELECT '(a&b) <-> (d&c)'::tsquery;
-
-SELECT 'a <-> !b'::tsquery;
-SELECT '!a <-> b'::tsquery;
-SELECT '!a <-> !b'::tsquery;
-
-SELECT 'a <-> !(b&c)'::tsquery;
-SELECT 'a <-> !(b|c)'::tsquery;
-SELECT  '!(a&b) <-> c'::tsquery;
-SELECT  '!(a|b) <-> c'::tsquery;
-
-SELECT  '(!a|b) <-> c'::tsquery;
-SELECT  '(!a&b) <-> c'::tsquery;
-SELECT  'c <-> (!a|b)'::tsquery;
-SELECT  'c <-> (!a&b)'::tsquery;
-
-SELECT  '(a|b) <-> !c'::tsquery;
-SELECT  '(a&b) <-> !c'::tsquery;
-SELECT  '!c <-> (a|b)'::tsquery;
-SELECT  '!c <-> (a&b)'::tsquery;
-
 --comparisons
 SELECT 'a' < 'b & c'::tsquery as "true";
 SELECT 'a' > 'b & c'::tsquery as "false";
@@ -146,10 +118,35 @@ SELECT to_tsvector('simple', '1 2 11 3') @@ '1:* <-> 3' AS "true";
 
 SELECT to_tsvector('simple', '1 2 3 4') @@ '1 <-> 2 <-> 3' AS "true";
 SELECT to_tsvector('simple', '1 2 3 4') @@ '(1 <-> 2) <-> 3' AS "true";
-SELECT to_tsvector('simple', '1 2 3 4') @@ '1 <-> (2 <-> 3)' AS "false";
-SELECT to_tsvector('simple', '1 2 3 4') @@ '1 <2> (2 <-> 3)' AS "true";
+SELECT to_tsvector('simple', '1 2 3 4') @@ '1 <-> (2 <-> 3)' AS "true";
+SELECT to_tsvector('simple', '1 2 3 4') @@ '1 <2> (2 <-> 3)' AS "false";
 SELECT to_tsvector('simple', '1 2 1 2 3 4') @@ '(1 <-> 2) <-> 3' AS "true";
 SELECT to_tsvector('simple', '1 2 1 2 3 4') @@ '1 <-> 2 <-> 3' AS "true";
+-- without position data, phrase search does not match
+SELECT strip(to_tsvector('simple', '1 2 3 4')) @@ '1 <-> 2 <-> 3' AS "false";
+
+select to_tsvector('simple', 'q x q y') @@ 'q <-> (x & y)' AS "false";
+select to_tsvector('simple', 'q x') @@ 'q <-> (x | y <-> z)' AS "true";
+select to_tsvector('simple', 'q y') @@ 'q <-> (x | y <-> z)' AS "false";
+select to_tsvector('simple', 'q y z') @@ 'q <-> (x | y <-> z)' AS "true";
+select to_tsvector('simple', 'q y x') @@ 'q <-> (x | y <-> z)' AS "false";
+select to_tsvector('simple', 'q x y') @@ 'q <-> (x | y <-> z)' AS "true";
+select to_tsvector('simple', 'q x') @@ '(x | y <-> z) <-> q' AS "false";
+select to_tsvector('simple', 'x q') @@ '(x | y <-> z) <-> q' AS "true";
+select to_tsvector('simple', 'x y q') @@ '(x | y <-> z) <-> q' AS "false";
+select to_tsvector('simple', 'x y z') @@ '(x | y <-> z) <-> q' AS "false";
+select to_tsvector('simple', 'x y z q') @@ '(x | y <-> z) <-> q' AS "true";
+select to_tsvector('simple', 'y z q') @@ '(x | y <-> z) <-> q' AS "true";
+select to_tsvector('simple', 'y y q') @@ '(x | y <-> z) <-> q' AS "false";
+select to_tsvector('simple', 'y y q') @@ '(!x | y <-> z) <-> q' AS "true";
+select to_tsvector('simple', 'x y q') @@ '(!x | y <-> z) <-> q' AS "true";
+select to_tsvector('simple', 'y y q') @@ '(x | y <-> !z) <-> q' AS "true";
+select to_tsvector('simple', 'x q') @@ '(x | y <-> !z) <-> q' AS "true";
+select to_tsvector('simple', 'x q') @@ '(!x | y <-> z) <-> q' AS "false";
+select to_tsvector('simple', 'z q') @@ '(!x | y <-> z) <-> q' AS "true";
+select to_tsvector('simple', 'x y q y') @@ '!x <-> y' AS "true";
+select to_tsvector('simple', 'x y q y') @@ '!foo' AS "true";
+select to_tsvector('simple', '') @@ '!foo' AS "true";
 
 --ranking
 SELECT ts_rank(' a:1 s:2C d g'::tsvector, 'a | s');
@@ -193,6 +190,7 @@ SELECT 'a:1 b:3'::tsvector @@ 'a <0> b'::tsquery AS "false";
 SELECT 'a:1 b:3'::tsvector @@ 'a <1> b'::tsquery AS "false";
 SELECT 'a:1 b:3'::tsvector @@ 'a <2> b'::tsquery AS "true";
 SELECT 'a:1 b:3'::tsvector @@ 'a <3> b'::tsquery AS "false";
+SELECT 'a:1 b:3'::tsvector @@ 'a <0> a:*'::tsquery AS "true";
 
 -- tsvector editing operations
 
@@ -212,6 +210,7 @@ SELECT ts_delete('base:7 hidden:6 rebel:1 spaceship:2,33A,34B,35C,36D strike:3':
 SELECT ts_delete('base:7 hidden:6 rebel:1 spaceship:2,33A,34B,35C,36D strike:3'::tsvector, ARRAY['spaceshi','rebel']);
 SELECT ts_delete('base:7 hidden:6 rebel:1 spaceship:2,33A,34B,35C,36D strike:3'::tsvector, ARRAY['spaceship','leya','rebel']);
 SELECT ts_delete('base hidden rebel spaceship strike'::tsvector, ARRAY['spaceship','leya','rebel']);
+SELECT ts_delete('base hidden rebel spaceship strike'::tsvector, ARRAY['spaceship','leya','rebel','rebel']);
 SELECT ts_delete('base hidden rebel spaceship strike'::tsvector, ARRAY['spaceship','leya','rebel', NULL]);
 
 SELECT unnest('base:7 hidden:6 rebel:1 spaceship:2,33A,34B,35C,36D strike:3'::tsvector);
@@ -225,6 +224,8 @@ SELECT tsvector_to_array('base hidden rebel spaceship strike'::tsvector);
 
 SELECT array_to_tsvector(ARRAY['base','hidden','rebel','spaceship','strike']);
 SELECT array_to_tsvector(ARRAY['base','hidden','rebel','spaceship', NULL]);
+-- array_to_tsvector must sort and de-dup
+SELECT array_to_tsvector(ARRAY['foo','bar','baz','bar']);
 
 SELECT setweight('w:12B w:13* w:12,5,6 a:1,3* a:3 w asd:1dc asd zxc:81,567,222A'::tsvector, 'c');
 SELECT setweight('a:1,3A asd:1C w:5,6,12B,13A zxc:81,222A,567'::tsvector, 'c');

@@ -3,7 +3,7 @@
  * proc.c
  *	  routines to manage per-process shared memory data structure
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -39,9 +39,11 @@
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "replication/slot.h"
 #include "replication/syncrep.h"
+#include "storage/condition_variable.h"
 #include "storage/standby.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
@@ -195,14 +197,10 @@ InitProcGlobal(void)
 	 * between groups.
 	 */
 	procs = (PGPROC *) ShmemAlloc(TotalProcs * sizeof(PGPROC));
+	MemSet(procs, 0, TotalProcs * sizeof(PGPROC));
 	ProcGlobal->allProcs = procs;
 	/* XXX allProcCount isn't really all of them; it excludes prepared xacts */
 	ProcGlobal->allProcCount = MaxBackends + NUM_AUXILIARY_PROCS;
-	if (!procs)
-		ereport(FATAL,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("out of shared memory")));
-	MemSet(procs, 0, TotalProcs * sizeof(PGPROC));
 
 	/*
 	 * Also allocate a separate array of PGXACT structures.  This is separate
@@ -227,7 +225,7 @@ InitProcGlobal(void)
 		 */
 		if (i < MaxBackends + NUM_AUXILIARY_PROCS)
 		{
-			PGSemaphoreCreate(&(procs[i].sem));
+			procs[i].sem = PGSemaphoreCreate();
 			InitSharedLatch(&(procs[i].procLatch));
 			LWLockInitialize(&(procs[i].backendLock), LWTRANCHE_PROC);
 		}
@@ -373,6 +371,7 @@ InitProcess(void)
 	MyProc->backendId = InvalidBackendId;
 	MyProc->databaseId = InvalidOid;
 	MyProc->roleId = InvalidOid;
+	MyProc->isBackgroundWorker = IsBackgroundWorker;
 	MyPgXact->delayChkpt = false;
 	MyPgXact->vacuumFlags = 0;
 	/* NB -- autovac launcher intentionally does not set IS_AUTOVACUUM */
@@ -423,7 +422,7 @@ InitProcess(void)
 	 * be careful and reinitialize its value here.  (This is not strictly
 	 * necessary anymore, but seems like a good idea for cleanliness.)
 	 */
-	PGSemaphoreReset(&MyProc->sem);
+	PGSemaphoreReset(MyProc->sem);
 
 	/*
 	 * Arrange to clean up at backend exit.
@@ -545,6 +544,7 @@ InitAuxiliaryProcess(void)
 	MyProc->backendId = InvalidBackendId;
 	MyProc->databaseId = InvalidOid;
 	MyProc->roleId = InvalidOid;
+	MyProc->isBackgroundWorker = IsBackgroundWorker;
 	MyPgXact->delayChkpt = false;
 	MyPgXact->vacuumFlags = 0;
 	MyProc->lwWaiting = false;
@@ -578,7 +578,7 @@ InitAuxiliaryProcess(void)
 	 * be careful and reinitialize its value here.  (This is not strictly
 	 * necessary anymore, but seems like a good idea for cleanliness.)
 	 */
-	PGSemaphoreReset(&MyProc->sem);
+	PGSemaphoreReset(MyProc->sem);
 
 	/*
 	 * Arrange to clean up at process exit.
@@ -806,9 +806,15 @@ ProcKill(int code, Datum arg)
 	 */
 	LWLockReleaseAll();
 
+	/* Cancel any pending condition variable sleep, too */
+	ConditionVariableCancelSleep();
+
 	/* Make sure active replication slots are released */
 	if (MyReplicationSlot != NULL)
 		ReplicationSlotRelease();
+
+	/* Also cleanup all the temporary slots. */
+	ReplicationSlotCleanup();
 
 	/*
 	 * Detach from any lock group of which we are a member.  If the leader
@@ -911,6 +917,9 @@ AuxiliaryProcKill(int code, Datum arg)
 	/* Release any LW locks I am holding (see notes above) */
 	LWLockReleaseAll();
 
+	/* Cancel any pending condition variable sleep, too */
+	ConditionVariableCancelSleep();
+
 	/*
 	 * Reset MyLatch to the process local one.  This is so that signal
 	 * handlers et al can continue using the latch after the shared latch
@@ -933,6 +942,33 @@ AuxiliaryProcKill(int code, Datum arg)
 	SpinLockRelease(ProcStructLock);
 }
 
+/*
+ * AuxiliaryPidGetProc -- get PGPROC for an auxiliary process
+ * given its PID
+ *
+ * Returns NULL if not found.
+ */
+PGPROC *
+AuxiliaryPidGetProc(int pid)
+{
+	PGPROC	   *result = NULL;
+	int			index;
+
+	if (pid == 0)				/* never match dummy PGPROCs */
+		return NULL;
+
+	for (index = 0; index < NUM_AUXILIARY_PROCS; index++)
+	{
+		PGPROC	   *proc = &AuxiliaryProcs[index];
+
+		if (proc->pid == pid)
+		{
+			result = proc;
+			break;
+		}
+	}
+	return result;
+}
 
 /*
  * ProcQueue package: routines for putting processes to sleep
@@ -1217,7 +1253,8 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 		}
 		else
 		{
-			WaitLatch(MyLatch, WL_LATCH_SET, 0);
+			WaitLatch(MyLatch, WL_LATCH_SET, 0,
+					  PG_WAIT_LOCK | locallock->tag.lock.locktag_type);
 			ResetLatch(MyLatch);
 			/* check for deadlocks first, as that's probably log-worthy */
 			if (got_deadlock_timeout)
@@ -1740,9 +1777,9 @@ CheckDeadLockAlert(void)
  * wait again if not.
  */
 void
-ProcWaitForSignal(void)
+ProcWaitForSignal(uint32 wait_event_info)
 {
-	WaitLatch(MyLatch, WL_LATCH_SET, 0);
+	WaitLatch(MyLatch, WL_LATCH_SET, 0, wait_event_info);
 	ResetLatch(MyLatch);
 	CHECK_FOR_INTERRUPTS();
 }

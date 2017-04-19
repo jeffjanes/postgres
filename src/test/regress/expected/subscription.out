@@ -1,0 +1,127 @@
+--
+-- SUBSCRIPTION
+--
+CREATE ROLE regress_subscription_user LOGIN SUPERUSER;
+CREATE ROLE regress_subscription_user2;
+CREATE ROLE regress_subscription_user_dummy LOGIN NOSUPERUSER;
+SET SESSION AUTHORIZATION 'regress_subscription_user';
+-- fail - no publications
+CREATE SUBSCRIPTION testsub CONNECTION 'foo';
+ERROR:  syntax error at or near ";"
+LINE 1: CREATE SUBSCRIPTION testsub CONNECTION 'foo';
+                                                    ^
+-- fail - no connection
+CREATE SUBSCRIPTION testsub PUBLICATION foo;
+ERROR:  syntax error at or near "PUBLICATION"
+LINE 1: CREATE SUBSCRIPTION testsub PUBLICATION foo;
+                                    ^
+-- fail - cannot do CREATE SUBSCRIPTION CREATE SLOT inside transaction block
+BEGIN;
+CREATE SUBSCRIPTION testsub CONNECTION 'testconn' PUBLICATION testpub WITH (CREATE SLOT);
+ERROR:  CREATE SUBSCRIPTION ... CREATE SLOT cannot run inside a transaction block
+COMMIT;
+-- fail - invalid connection string
+CREATE SUBSCRIPTION testsub CONNECTION 'testconn' PUBLICATION testpub;
+ERROR:  invalid connection string syntax: missing "=" after "testconn" in connection info string
+
+-- fail - duplicate publications
+CREATE SUBSCRIPTION testsub CONNECTION 'dbname=doesnotexist' PUBLICATION foo, testpub, foo WITH (NOCONNECT);
+ERROR:  publication name "foo" used more than once
+-- ok
+CREATE SUBSCRIPTION testsub CONNECTION 'dbname=doesnotexist' PUBLICATION testpub WITH (NOCONNECT);
+WARNING:  tables were not subscribed, you will have to run ALTER SUBSCRIPTION ... REFRESH PUBLICATION to subscribe the tables
+COMMENT ON SUBSCRIPTION testsub IS 'test subscription';
+SELECT obj_description(s.oid, 'pg_subscription') FROM pg_subscription s;
+  obj_description  
+-------------------
+ test subscription
+(1 row)
+
+-- fail - name already exists
+CREATE SUBSCRIPTION testsub CONNECTION 'dbname=doesnotexist' PUBLICATION testpub WITH (NOCONNECT);
+ERROR:  subscription "testsub" already exists
+-- fail - must be superuser
+SET SESSION AUTHORIZATION 'regress_subscription_user2';
+CREATE SUBSCRIPTION testsub2 CONNECTION 'dbname=doesnotexist' PUBLICATION foo WITH (NOCONNECT);
+ERROR:  must be superuser to create subscriptions
+SET SESSION AUTHORIZATION 'regress_subscription_user';
+\dRs+
+                                         List of subscriptions
+  Name   |           Owner           | Enabled | Publication | Synchronous commit |      Conninfo       
+---------+---------------------------+---------+-------------+--------------------+---------------------
+ testsub | regress_subscription_user | f       | {testpub}   | off                | dbname=doesnotexist
+(1 row)
+
+ALTER SUBSCRIPTION testsub SET PUBLICATION testpub2, testpub3 NOREFRESH;
+ALTER SUBSCRIPTION testsub CONNECTION 'dbname=doesnotexist2';
+ALTER SUBSCRIPTION testsub WITH (SLOT NAME = 'newname');
+-- fail
+ALTER SUBSCRIPTION doesnotexist CONNECTION 'dbname=doesnotexist2';
+ERROR:  subscription "doesnotexist" does not exist
+\dRs+
+                                              List of subscriptions
+  Name   |           Owner           | Enabled |     Publication     | Synchronous commit |       Conninfo       
+---------+---------------------------+---------+---------------------+--------------------+----------------------
+ testsub | regress_subscription_user | f       | {testpub2,testpub3} | off                | dbname=doesnotexist2
+(1 row)
+
+BEGIN;
+ALTER SUBSCRIPTION testsub ENABLE;
+\dRs
+                        List of subscriptions
+  Name   |           Owner           | Enabled |     Publication     
+---------+---------------------------+---------+---------------------
+ testsub | regress_subscription_user | t       | {testpub2,testpub3}
+(1 row)
+
+ALTER SUBSCRIPTION testsub DISABLE;
+\dRs
+                        List of subscriptions
+  Name   |           Owner           | Enabled |     Publication     
+---------+---------------------------+---------+---------------------
+ testsub | regress_subscription_user | f       | {testpub2,testpub3}
+(1 row)
+
+COMMIT;
+-- fail - must be owner of subscription
+SET ROLE regress_subscription_user_dummy;
+ALTER SUBSCRIPTION testsub RENAME TO testsub_dummy;
+ERROR:  must be owner of subscription testsub
+RESET ROLE;
+ALTER SUBSCRIPTION testsub RENAME TO testsub_foo;
+ALTER SUBSCRIPTION testsub_foo WITH (SYNCHRONOUS_COMMIT = local);
+ALTER SUBSCRIPTION testsub_foo WITH (SYNCHRONOUS_COMMIT = foobar);
+ERROR:  invalid value for parameter "synchronous_commit": "foobar"
+HINT:  Available values: local, remote_write, remote_apply, on, off.
+\dRs+
+                                                List of subscriptions
+    Name     |           Owner           | Enabled |     Publication     | Synchronous commit |       Conninfo       
+-------------+---------------------------+---------+---------------------+--------------------+----------------------
+ testsub_foo | regress_subscription_user | f       | {testpub2,testpub3} | local              | dbname=doesnotexist2
+(1 row)
+
+-- rename back to keep the rest simple
+ALTER SUBSCRIPTION testsub_foo RENAME TO testsub;
+-- fail - new owner must be superuser
+ALTER SUBSCRIPTION testsub OWNER TO regress_subscription_user2;
+ERROR:  permission denied to change owner of subscription "testsub"
+HINT:  The owner of a subscription must be a superuser.
+ALTER ROLE regress_subscription_user2 SUPERUSER;
+-- now it works
+ALTER SUBSCRIPTION testsub OWNER TO regress_subscription_user2;
+-- fail - cannot do DROP SUBSCRIPTION DROP SLOT inside transaction block
+BEGIN;
+DROP SUBSCRIPTION testsub DROP SLOT;
+ERROR:  DROP SUBSCRIPTION ... DROP SLOT cannot run inside a transaction block
+COMMIT;
+BEGIN;
+DROP SUBSCRIPTION testsub NODROP SLOT;
+COMMIT;
+DROP SUBSCRIPTION IF EXISTS testsub NODROP SLOT;
+NOTICE:  subscription "testsub" does not exist, skipping
+DROP SUBSCRIPTION testsub NODROP SLOT;  -- fail
+ERROR:  subscription "testsub" does not exist
+RESET SESSION AUTHORIZATION;
+DROP ROLE regress_subscription_user;
+DROP ROLE regress_subscription_user2;
+DROP ROLE regress_subscription_user_dummy;

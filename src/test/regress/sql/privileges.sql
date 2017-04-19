@@ -17,7 +17,7 @@ DROP ROLE IF EXISTS regress_user4;
 DROP ROLE IF EXISTS regress_user5;
 DROP ROLE IF EXISTS regress_user6;
 
-SELECT lo_unlink(oid) FROM pg_largeobject_metadata;
+SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3000 ORDER BY oid;
 
 RESET client_min_messages;
 
@@ -259,7 +259,7 @@ INSERT INTO atest5(two) VALUES (6) ON CONFLICT (two) DO UPDATE set three = EXCLU
 INSERT INTO atest5(two) VALUES (6) ON CONFLICT (two) DO UPDATE set three = EXCLUDED.three;
 INSERT INTO atest5(two) VALUES (6) ON CONFLICT (two) DO UPDATE set one = 8; -- fails (due to UPDATE)
 INSERT INTO atest5(three) VALUES (4) ON CONFLICT (two) DO UPDATE set three = 10; -- fails (due to INSERT)
--- Check that the the columns in the inference require select privileges
+-- Check that the columns in the inference require select privileges
 -- Error. No privs on four
 INSERT INTO atest5(three) VALUES (4) ON CONFLICT (four) DO UPDATE set three = 10;
 
@@ -397,6 +397,15 @@ DROP FUNCTION testfunc1(int); -- fail
 DROP FUNCTION testfunc1(int); -- ok
 -- restore to sanity
 GRANT ALL PRIVILEGES ON LANGUAGE sql TO PUBLIC;
+
+-- verify privilege checks on array-element coercions
+BEGIN;
+SELECT '{1}'::int4[]::int8[];
+REVOKE ALL ON FUNCTION int8(integer) FROM PUBLIC;
+SELECT '{1}'::int4[]::int8[]; --superuser, suceed
+SET SESSION AUTHORIZATION regress_user4;
+SELECT '{1}'::int4[]::int8[]; --other user, fail
+ROLLBACK;
 
 -- privileges on types
 
@@ -729,7 +738,7 @@ SELECT lo_unlink(2002);
 
 \c -
 -- confirm ACL setting
-SELECT oid, pg_get_userbyid(lomowner) ownername, lomacl FROM pg_largeobject_metadata;
+SELECT oid, pg_get_userbyid(lomowner) ownername, lomacl FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3000 ORDER BY oid;
 
 SET SESSION AUTHORIZATION regress_user3;
 
@@ -807,6 +816,36 @@ SELECT has_table_privilege('regress_user1', 'testns.acltest1', 'INSERT'); -- no
 
 ALTER DEFAULT PRIVILEGES FOR ROLE regress_user1 REVOKE EXECUTE ON FUNCTIONS FROM public;
 
+ALTER DEFAULT PRIVILEGES IN SCHEMA testns GRANT USAGE ON SCHEMAS TO regress_user2; -- error
+
+ALTER DEFAULT PRIVILEGES GRANT USAGE ON SCHEMAS TO regress_user2;
+
+CREATE SCHEMA testns2;
+
+SELECT has_schema_privilege('regress_user2', 'testns2', 'USAGE'); -- yes
+SELECT has_schema_privilege('regress_user2', 'testns2', 'CREATE'); -- no
+
+ALTER DEFAULT PRIVILEGES REVOKE USAGE ON SCHEMAS FROM regress_user2;
+
+CREATE SCHEMA testns3;
+
+SELECT has_schema_privilege('regress_user2', 'testns3', 'USAGE'); -- no
+SELECT has_schema_privilege('regress_user2', 'testns3', 'CREATE'); -- no
+
+ALTER DEFAULT PRIVILEGES GRANT ALL ON SCHEMAS TO regress_user2;
+
+CREATE SCHEMA testns4;
+
+SELECT has_schema_privilege('regress_user2', 'testns4', 'USAGE'); -- yes
+SELECT has_schema_privilege('regress_user2', 'testns4', 'CREATE'); -- yes
+
+ALTER DEFAULT PRIVILEGES REVOKE ALL ON SCHEMAS FROM regress_user2;
+
+CREATE SCHEMA testns5;
+
+SELECT has_schema_privilege('regress_user2', 'testns5', 'USAGE'); -- no
+SELECT has_schema_privilege('regress_user2', 'testns5', 'CREATE'); -- no
+
 SET ROLE regress_user1;
 
 CREATE FUNCTION testns.foo() RETURNS int AS 'select 1' LANGUAGE sql;
@@ -844,6 +883,10 @@ SELECT count(*)
   WHERE nspname = 'testns';
 
 DROP SCHEMA testns CASCADE;
+DROP SCHEMA testns2 CASCADE;
+DROP SCHEMA testns3 CASCADE;
+DROP SCHEMA testns4 CASCADE;
+DROP SCHEMA testns5 CASCADE;
 
 SELECT d.*     -- check that entries went away
   FROM pg_default_acl d LEFT JOIN pg_namespace n ON defaclnamespace = n.oid
@@ -960,7 +1003,7 @@ DROP TABLE atestc;
 DROP TABLE atestp1;
 DROP TABLE atestp2;
 
-SELECT lo_unlink(oid) FROM pg_largeobject_metadata;
+SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3000 ORDER BY oid;
 
 DROP GROUP regress_group1;
 DROP GROUP regress_group2;

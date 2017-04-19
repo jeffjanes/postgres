@@ -3,7 +3,7 @@
  * hashvalidate.c
  *	  Opclass validator for hash.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -25,6 +25,7 @@
 #include "parser/parse_coerce.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/regproc.h"
 #include "utils/syscache.h"
 
 
@@ -186,9 +187,9 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-			errmsg("hash operator family \"%s\" lacks support function for operator %s",
-				   opfamilyname,
-				   format_operator(oprform->amopopr))));
+					 errmsg("hash operator family \"%s\" lacks support function for operator %s",
+							opfamilyname,
+							format_operator(oprform->amopopr))));
 			result = false;
 		}
 	}

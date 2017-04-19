@@ -3,7 +3,7 @@
  * spell.c
  *		Normalizing word with ISpell
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  * Ispell dictionary
  * -----------------
@@ -37,7 +37,7 @@
  *	  Spell field. The AffixData field is initialized if AF parameter is not
  *	  defined.
  *	- NISortAffixes():
- *	  - builds a list of compond affixes from the affix list and stores it
+ *	  - builds a list of compound affixes from the affix list and stores it
  *		in the CompoundAffix.
  *	  - builds prefix trees (Trie) from the affix list for prefixes and suffixes
  *		and stores them in Suffix and Prefix fields.
@@ -92,9 +92,7 @@ NIStartBuild(IspellDict *Conf)
 	 */
 	Conf->buildCxt = AllocSetContextCreate(CurTransactionContext,
 										   "Ispell dictionary init context",
-										   ALLOCSET_DEFAULT_MINSIZE,
-										   ALLOCSET_DEFAULT_INITSIZE,
-										   ALLOCSET_DEFAULT_MAXSIZE);
+										   ALLOCSET_DEFAULT_SIZES);
 }
 
 /*
@@ -433,7 +431,8 @@ getNextFlagFromString(IspellDict *Conf, char **sflagset, char *sflag)
 	if (Conf->flagMode == FM_LONG && maxstep > 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONFIG_FILE_ERROR),
-			errmsg("invalid affix flag \"%s\" with \"long\" flag value", sbuf)));
+				 errmsg("invalid affix flag \"%s\" with \"long\" flag value",
+						sbuf)));
 
 	*sflag = '\0';
 }
@@ -1263,8 +1262,9 @@ NIImportOOAffixes(IspellDict *Conf, const char *filename)
 				else if (STRNCMP(s, "default") != 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_CONFIG_FILE_ERROR),
-						   errmsg("Ispell dictionary supports only \"default\", "
-								  "\"long\", and \"num\" flag value")));
+							 errmsg("Ispell dictionary supports only "
+									"\"default\", \"long\", "
+									"and \"num\" flag values")));
 			}
 		}
 

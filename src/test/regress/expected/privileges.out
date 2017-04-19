@@ -12,7 +12,7 @@ DROP ROLE IF EXISTS regress_user3;
 DROP ROLE IF EXISTS regress_user4;
 DROP ROLE IF EXISTS regress_user5;
 DROP ROLE IF EXISTS regress_user6;
-SELECT lo_unlink(oid) FROM pg_largeobject_metadata;
+SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3000 ORDER BY oid;
  lo_unlink 
 -----------
 (0 rows)
@@ -390,7 +390,7 @@ INSERT INTO atest5(two) VALUES (6) ON CONFLICT (two) DO UPDATE set one = 8; -- f
 ERROR:  permission denied for relation atest5
 INSERT INTO atest5(three) VALUES (4) ON CONFLICT (two) DO UPDATE set three = 10; -- fails (due to INSERT)
 ERROR:  permission denied for relation atest5
--- Check that the the columns in the inference require select privileges
+-- Check that the columns in the inference require select privileges
 -- Error. No privs on four
 INSERT INTO atest5(three) VALUES (4) ON CONFLICT (four) DO UPDATE set three = 10;
 ERROR:  permission denied for relation atest5
@@ -586,6 +586,25 @@ ERROR:  must be owner of function testfunc1
 DROP FUNCTION testfunc1(int); -- ok
 -- restore to sanity
 GRANT ALL PRIVILEGES ON LANGUAGE sql TO PUBLIC;
+-- verify privilege checks on array-element coercions
+BEGIN;
+SELECT '{1}'::int4[]::int8[];
+ int8 
+------
+ {1}
+(1 row)
+
+REVOKE ALL ON FUNCTION int8(integer) FROM PUBLIC;
+SELECT '{1}'::int4[]::int8[]; --superuser, suceed
+ int8 
+------
+ {1}
+(1 row)
+
+SET SESSION AUTHORIZATION regress_user4;
+SELECT '{1}'::int4[]::int8[]; --other user, fail
+ERROR:  permission denied for function int8
+ROLLBACK;
 -- privileges on types
 -- switch to superuser
 \c -
@@ -1173,11 +1192,11 @@ SELECT lo_unlink(2002);
 
 \c -
 -- confirm ACL setting
-SELECT oid, pg_get_userbyid(lomowner) ownername, lomacl FROM pg_largeobject_metadata;
+SELECT oid, pg_get_userbyid(lomowner) ownername, lomacl FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3000 ORDER BY oid;
  oid  |   ownername   |                                             lomacl                                             
 ------+---------------+------------------------------------------------------------------------------------------------
- 1002 | regress_user1 | 
  1001 | regress_user1 | {regress_user1=rw/regress_user1,=rw/regress_user1}
+ 1002 | regress_user1 | 
  1003 | regress_user1 | {regress_user1=rw/regress_user1,regress_user2=r/regress_user1}
  1004 | regress_user1 | {regress_user1=rw/regress_user1,regress_user2=rw/regress_user1}
  1005 | regress_user1 | {regress_user1=rw/regress_user1,regress_user2=r*w/regress_user1,regress_user3=r/regress_user2}
@@ -1337,6 +1356,64 @@ SELECT has_table_privilege('regress_user1', 'testns.acltest1', 'INSERT'); -- no
 (1 row)
 
 ALTER DEFAULT PRIVILEGES FOR ROLE regress_user1 REVOKE EXECUTE ON FUNCTIONS FROM public;
+ALTER DEFAULT PRIVILEGES IN SCHEMA testns GRANT USAGE ON SCHEMAS TO regress_user2; -- error
+ERROR:  cannot use IN SCHEMA clause when using GRANT/REVOKE ON SCHEMAS
+ALTER DEFAULT PRIVILEGES GRANT USAGE ON SCHEMAS TO regress_user2;
+CREATE SCHEMA testns2;
+SELECT has_schema_privilege('regress_user2', 'testns2', 'USAGE'); -- yes
+ has_schema_privilege 
+----------------------
+ t
+(1 row)
+
+SELECT has_schema_privilege('regress_user2', 'testns2', 'CREATE'); -- no
+ has_schema_privilege 
+----------------------
+ f
+(1 row)
+
+ALTER DEFAULT PRIVILEGES REVOKE USAGE ON SCHEMAS FROM regress_user2;
+CREATE SCHEMA testns3;
+SELECT has_schema_privilege('regress_user2', 'testns3', 'USAGE'); -- no
+ has_schema_privilege 
+----------------------
+ f
+(1 row)
+
+SELECT has_schema_privilege('regress_user2', 'testns3', 'CREATE'); -- no
+ has_schema_privilege 
+----------------------
+ f
+(1 row)
+
+ALTER DEFAULT PRIVILEGES GRANT ALL ON SCHEMAS TO regress_user2;
+CREATE SCHEMA testns4;
+SELECT has_schema_privilege('regress_user2', 'testns4', 'USAGE'); -- yes
+ has_schema_privilege 
+----------------------
+ t
+(1 row)
+
+SELECT has_schema_privilege('regress_user2', 'testns4', 'CREATE'); -- yes
+ has_schema_privilege 
+----------------------
+ t
+(1 row)
+
+ALTER DEFAULT PRIVILEGES REVOKE ALL ON SCHEMAS FROM regress_user2;
+CREATE SCHEMA testns5;
+SELECT has_schema_privilege('regress_user2', 'testns5', 'USAGE'); -- no
+ has_schema_privilege 
+----------------------
+ f
+(1 row)
+
+SELECT has_schema_privilege('regress_user2', 'testns5', 'CREATE'); -- no
+ has_schema_privilege 
+----------------------
+ f
+(1 row)
+
 SET ROLE regress_user1;
 CREATE FUNCTION testns.foo() RETURNS int AS 'select 1' LANGUAGE sql;
 SELECT has_function_privilege('regress_user2', 'testns.foo()', 'EXECUTE'); -- no
@@ -1384,6 +1461,10 @@ SELECT count(*)
 
 DROP SCHEMA testns CASCADE;
 NOTICE:  drop cascades to table testns.acltest1
+DROP SCHEMA testns2 CASCADE;
+DROP SCHEMA testns3 CASCADE;
+DROP SCHEMA testns4 CASCADE;
+DROP SCHEMA testns5 CASCADE;
 SELECT d.*     -- check that entries went away
   FROM pg_default_acl d LEFT JOIN pg_namespace n ON defaclnamespace = n.oid
   WHERE nspname IS NULL AND defaclnamespace != 0;
@@ -1546,7 +1627,7 @@ DROP TABLE atest6;
 DROP TABLE atestc;
 DROP TABLE atestp1;
 DROP TABLE atestp2;
-SELECT lo_unlink(oid) FROM pg_largeobject_metadata;
+SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3000 ORDER BY oid;
  lo_unlink 
 -----------
          1

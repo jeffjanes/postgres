@@ -3,7 +3,7 @@
  * event_trigger.c
  *	  PostgreSQL EVENT TRIGGER support code.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -106,11 +106,14 @@ static event_trigger_support_data event_trigger_support[] = {
 	{"OPERATOR CLASS", true},
 	{"OPERATOR FAMILY", true},
 	{"POLICY", true},
+	{"PUBLICATION", true},
 	{"ROLE", false},
 	{"RULE", true},
 	{"SCHEMA", true},
 	{"SEQUENCE", true},
 	{"SERVER", true},
+	{"STATISTICS", true},
+	{"SUBSCRIPTION", true},
 	{"TABLE", true},
 	{"TABLESPACE", false},
 	{"TRANSFORM", true},
@@ -403,8 +406,7 @@ insert_event_trigger_tuple(char *trigname, char *eventname, Oid evtOwner,
 
 	/* Insert heap tuple. */
 	tuple = heap_form_tuple(tgrel->rd_att, values, nulls);
-	trigoid = simple_heap_insert(tgrel, tuple);
-	CatalogUpdateIndexes(tgrel, tuple);
+	trigoid = CatalogTupleInsert(tgrel, tuple);
 	heap_freetuple(tuple);
 
 	/* Depend on owner. */
@@ -483,7 +485,7 @@ RemoveEventTriggerById(Oid trigOid)
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for event trigger %u", trigOid);
 
-	simple_heap_delete(tgrel, &tup->t_self);
+	CatalogTupleDelete(tgrel, &tup->t_self);
 
 	ReleaseSysCache(tup);
 
@@ -522,8 +524,7 @@ AlterEventTrigger(AlterEventTrigStmt *stmt)
 	evtForm = (Form_pg_event_trigger) GETSTRUCT(tup);
 	evtForm->evtenabled = tgenabled;
 
-	simple_heap_update(tgrel, &tup->t_self, tup);
-	CatalogUpdateIndexes(tgrel, tup);
+	CatalogTupleUpdate(tgrel, &tup->t_self, tup);
 
 	InvokeObjectPostAlterHook(EventTriggerRelationId,
 							  trigoid, 0);
@@ -619,8 +620,7 @@ AlterEventTriggerOwner_internal(Relation rel, HeapTuple tup, Oid newOwnerId)
 			 errhint("The owner of an event trigger must be a superuser.")));
 
 	form->evtowner = newOwnerId;
-	simple_heap_update(rel, &tup->t_self, tup);
-	CatalogUpdateIndexes(rel, tup);
+	CatalogTupleUpdate(rel, &tup->t_self, tup);
 
 	/* Update owner dependency reference */
 	changeDependencyOnOwner(EventTriggerRelationId,
@@ -742,7 +742,7 @@ EventTriggerCommonSetup(Node *parsetree,
 
 	/*
 	 * Filter list of event triggers by command tag, and copy them into our
-	 * memory context.  Once we start running the command trigers, or indeed
+	 * memory context.  Once we start running the command triggers, or indeed
 	 * once we do anything at all that touches the catalogs, an invalidation
 	 * might leave cachelist pointing at garbage, so we must do this before we
 	 * can do much else.
@@ -1018,9 +1018,7 @@ EventTriggerInvoke(List *fn_oid_list, EventTriggerData *trigdata)
 	 */
 	context = AllocSetContextCreate(CurrentMemoryContext,
 									"event trigger context",
-									ALLOCSET_DEFAULT_MINSIZE,
-									ALLOCSET_DEFAULT_INITSIZE,
-									ALLOCSET_DEFAULT_MAXSIZE);
+									ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
 
 	/* Call each event trigger. */
@@ -1105,9 +1103,13 @@ EventTriggerSupportsObjectType(ObjectType obtype)
 		case OBJECT_OPERATOR:
 		case OBJECT_OPFAMILY:
 		case OBJECT_POLICY:
+		case OBJECT_PUBLICATION:
+		case OBJECT_PUBLICATION_REL:
 		case OBJECT_RULE:
 		case OBJECT_SCHEMA:
 		case OBJECT_SEQUENCE:
+		case OBJECT_SUBSCRIPTION:
+		case OBJECT_STATISTIC_EXT:
 		case OBJECT_TABCONSTRAINT:
 		case OBJECT_TABLE:
 		case OBJECT_TRANSFORM:
@@ -1170,6 +1172,10 @@ EventTriggerSupportsObjectClass(ObjectClass objclass)
 		case OCLASS_EXTENSION:
 		case OCLASS_POLICY:
 		case OCLASS_AM:
+		case OCLASS_PUBLICATION:
+		case OCLASS_PUBLICATION_REL:
+		case OCLASS_SUBSCRIPTION:
+		case OCLASS_STATISTIC_EXT:
 			return true;
 	}
 
@@ -1226,9 +1232,7 @@ EventTriggerBeginCompleteQuery(void)
 
 	cxt = AllocSetContextCreate(TopMemoryContext,
 								"event trigger state",
-								ALLOCSET_DEFAULT_MINSIZE,
-								ALLOCSET_DEFAULT_INITSIZE,
-								ALLOCSET_DEFAULT_MAXSIZE);
+								ALLOCSET_DEFAULT_SIZES);
 	state = MemoryContextAlloc(cxt, sizeof(EventTriggerQueryState));
 	state->cxt = cxt;
 	slist_init(&(state->SQLDropList));
@@ -1865,7 +1869,7 @@ EventTriggerCollectAlterOpFam(AlterOpFamilyStmt *stmt, Oid opfamoid,
 					 OperatorFamilyRelationId, opfamoid);
 	command->d.opfam.operators = operators;
 	command->d.opfam.procedures = procedures;
-	command->parsetree = copyObject(stmt);
+	command->parsetree = (Node *) copyObject(stmt);
 
 	currentEventTriggerState->commandList =
 		lappend(currentEventTriggerState->commandList, command);
@@ -1898,7 +1902,7 @@ EventTriggerCollectCreateOpClass(CreateOpClassStmt *stmt, Oid opcoid,
 					 OperatorClassRelationId, opcoid);
 	command->d.createopc.operators = operators;
 	command->d.createopc.procedures = procedures;
-	command->parsetree = copyObject(stmt);
+	command->parsetree = (Node *) copyObject(stmt);
 
 	currentEventTriggerState->commandList =
 		lappend(currentEventTriggerState->commandList, command);
@@ -1933,7 +1937,7 @@ EventTriggerCollectAlterTSConfig(AlterTSConfigurationStmt *stmt, Oid cfgId,
 	command->d.atscfg.dictIds = palloc(sizeof(Oid) * ndicts);
 	memcpy(command->d.atscfg.dictIds, dictIds, sizeof(Oid) * ndicts);
 	command->d.atscfg.ndicts = ndicts;
-	command->parsetree = copyObject(stmt);
+	command->parsetree = (Node *) copyObject(stmt);
 
 	currentEventTriggerState->commandList =
 		lappend(currentEventTriggerState->commandList, command);
@@ -1963,7 +1967,7 @@ EventTriggerCollectAlterDefPrivs(AlterDefaultPrivilegesStmt *stmt)
 	command->type = SCT_AlterDefaultPrivileges;
 	command->d.defprivs.objtype = stmt->action->objtype;
 	command->in_extension = creating_extension;
-	command->parsetree = copyObject(stmt);
+	command->parsetree = (Node *) copyObject(stmt);
 
 	currentEventTriggerState->commandList =
 		lappend(currentEventTriggerState->commandList, command);

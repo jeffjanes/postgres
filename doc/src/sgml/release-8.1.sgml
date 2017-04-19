@@ -539,14 +539,14 @@
 
     <listitem>
      <para>
-      Update pl/perl's <filename>ppport.h</> for modern Perl versions
+      Update PL/Perl's <filename>ppport.h</> for modern Perl versions
       (Andrew)
      </para>
     </listitem>
 
     <listitem>
      <para>
-      Fix assorted memory leaks in pl/python (Andreas Freund, Tom)
+      Fix assorted memory leaks in PL/Python (Andreas Freund, Tom)
      </para>
     </listitem>
 
@@ -572,7 +572,7 @@
      </para>
 
      <para>
-      This behavior has been observed on BSD-derived kernels including OS X.
+      This behavior has been observed on BSD-derived kernels including macOS.
       It resulted in an entirely-misleading startup failure complaining that
       the shared memory request size was too large.
      </para>
@@ -2188,7 +2188,7 @@
 
      <para>
       While this could theoretically happen anywhere, no standard build of
-      Perl did things this way ... until <productname>Mac OS X</> 10.5.
+      Perl did things this way ... until <productname>macOS</> 10.5.
      </para>
     </listitem>
 
@@ -2730,7 +2730,7 @@
 
     <listitem>
      <para>
-      Fix for Darwin (OS X) compilation (Tom)
+      Fix for macOS (Darwin) compilation (Tom)
      </para>
     </listitem>
 
@@ -3089,12 +3089,12 @@ when the  data directory is not specified (Magnus)</para></listitem>
 together in function result type declarations</para></listitem>
 
 <listitem><para>Recover properly if error occurs during argument passing
-in <application>PL/python</> (Neil)</para></listitem>
+in <application>PL/Python</> (Neil)</para></listitem>
 
 <listitem><para>Fix memory leak in <function>plperl_return_next</>
 (Neil)</para></listitem>
 
-<listitem><para>Fix <application>PL/perl</>'s handling of locales on
+<listitem><para>Fix <application>PL/Perl</>'s handling of locales on
 Win32 to match the backend (Andrew)</para></listitem>
 
 <listitem><para>Various optimizer fixes (Tom)</para></listitem>
@@ -3104,7 +3104,7 @@ Win32 to match the backend (Andrew)</para></listitem>
 (Bruce)</para></listitem>
 
 <listitem><para>Fix <application>pgxs</> <literal>-L</> library path
-specification for Win32, Cygwin, OS X, AIX (Bruce)</para></listitem>
+specification for Win32, Cygwin, macOS, AIX (Bruce)</para></listitem>
 
 <listitem><para>Check that SID is enabled while checking for Win32 admin
 privileges (Magnus)</para></listitem>
@@ -5225,7 +5225,7 @@ SELECT CURRENT_TIMESTAMP AT TIME ZONE 'Europe/London';
      <listitem>
       <para>
        Add support for <literal>fsync_writethrough</literal> on
-       Darwin (Chris Campbell)
+       macOS (Chris Campbell)
       </para>
      </listitem>
 

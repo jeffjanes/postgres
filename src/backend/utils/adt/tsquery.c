@@ -3,7 +3,7 @@
  * tsquery.c
  *	  I/O functions for tsquery
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -430,15 +430,16 @@ pushStop(TSQueryParserState state)
 
 #define STACKDEPTH	32
 
-typedef struct OperatorElement {
-	int8	op;
-	int16	distance;
+typedef struct OperatorElement
+{
+	int8		op;
+	int16		distance;
 } OperatorElement;
 
 static void
 pushOpStack(OperatorElement *stack, int *lenstack, int8 op, int16 distance)
 {
-	if (*lenstack == STACKDEPTH) /* internal error */
+	if (*lenstack == STACKDEPTH)	/* internal error */
 		elog(ERROR, "tsquery stack too small");
 
 	stack[*lenstack].op = op;
@@ -449,20 +450,20 @@ pushOpStack(OperatorElement *stack, int *lenstack, int8 op, int16 distance)
 
 static void
 cleanOpStack(TSQueryParserState state,
-		   OperatorElement *stack, int *lenstack, int8 op)
+			 OperatorElement *stack, int *lenstack, int8 op)
 {
-	int	opPriority = OP_PRIORITY(op);
+	int			opPriority = OP_PRIORITY(op);
 
-	while(*lenstack)
+	while (*lenstack)
 	{
 		/* NOT is right associative unlike to others */
 		if ((op != OP_NOT && opPriority > OP_PRIORITY(stack[*lenstack - 1].op)) ||
-			(op == OP_NOT && opPriority >=  OP_PRIORITY(stack[*lenstack - 1].op)))
+		(op == OP_NOT && opPriority >= OP_PRIORITY(stack[*lenstack - 1].op)))
 			break;
 
 		(*lenstack)--;
 		pushOperator(state, stack[*lenstack].op,
-							stack[*lenstack].distance);
+					 stack[*lenstack].distance);
 	}
 }
 
@@ -480,7 +481,7 @@ makepol(TSQueryParserState state,
 	ts_tokentype type;
 	int			lenval = 0;
 	char	   *strval = NULL;
-	OperatorElement	opstack[STACKDEPTH];
+	OperatorElement opstack[STACKDEPTH];
 	int			lenstack = 0;
 	int16		weight = 0;
 	bool		prefix;
@@ -503,7 +504,7 @@ makepol(TSQueryParserState state,
 				makepol(state, pushval, opaque);
 				break;
 			case PT_CLOSE:
-				cleanOpStack(state, opstack, &lenstack, OP_OR /* lowest */);
+				cleanOpStack(state, opstack, &lenstack, OP_OR /* lowest */ );
 				return;
 			case PT_ERR:
 			default:
@@ -514,7 +515,7 @@ makepol(TSQueryParserState state,
 		}
 	}
 
-	cleanOpStack(state, opstack, &lenstack, OP_OR /* lowest */);
+	cleanOpStack(state, opstack, &lenstack, OP_OR /* lowest */ );
 }
 
 static void
@@ -556,13 +557,11 @@ findoprnd_recurse(QueryItem *ptr, uint32 *pos, int nnodes, bool *needcleanup)
 				   curitem->oper == OP_OR ||
 				   curitem->oper == OP_PHRASE);
 
-			if (curitem->oper == OP_PHRASE)
-				*needcleanup = true;	/* push OP_PHRASE down later */
-
 			(*pos)++;
 
 			/* process RIGHT argument */
 			findoprnd_recurse(ptr, pos, nnodes, needcleanup);
+
 			curitem->left = *pos - tmp; /* set LEFT arg's offset */
 
 			/* process LEFT argument */
@@ -573,8 +572,9 @@ findoprnd_recurse(QueryItem *ptr, uint32 *pos, int nnodes, bool *needcleanup)
 
 
 /*
- * Fills in the left-fields previously left unfilled. The input
- * QueryItems must be in polish (prefix) notation.
+ * Fill in the left-fields previously left unfilled.
+ * The input QueryItems must be in polish (prefix) notation.
+ * Also, set *needcleanup to true if there are any QI_VALSTOP nodes.
  */
 static void
 findoprnd(QueryItem *ptr, int size, bool *needcleanup)
@@ -686,15 +686,17 @@ parse_tsquery(char *buf,
 	memcpy((void *) GETOPERAND(query), (void *) state.op, state.sumlen);
 	pfree(state.op);
 
-	/* Set left operand pointers for every operator. */
+	/*
+	 * Set left operand pointers for every operator.  While we're at it,
+	 * detect whether there are any QI_VALSTOP nodes.
+	 */
 	findoprnd(ptr, query->size, &needcleanup);
 
 	/*
-	 * QI_VALSTOP nodes should be cleaned and and OP_PHRASE should be pushed
-	 * down
+	 * If there are QI_VALSTOP nodes, delete them and simplify the tree.
 	 */
 	if (needcleanup)
-		return cleanup_fakeval_and_phrase(query);
+		query = cleanup_tsquery_stopwords(query);
 
 	return query;
 }
@@ -845,8 +847,8 @@ infix(INFIX *in, int parentPriority, bool rightPhraseOp)
 
 		in->curpol++;
 		if (priority < parentPriority ||
-			 /* phrase operator depends on order */
-			 (op == OP_PHRASE && rightPhraseOp))
+		/* phrase operator depends on order */
+			(op == OP_PHRASE && rightPhraseOp))
 		{
 			needParenthesis = true;
 			RESIZEBUF(in, 2);
@@ -916,7 +918,7 @@ tsqueryout(PG_FUNCTION_ARGS)
 	nrm.cur = nrm.buf = (char *) palloc(sizeof(char) * nrm.buflen);
 	*(nrm.cur) = '\0';
 	nrm.op = GETOPERAND(query);
-	infix(&nrm, -1 /* lowest priority */, false);
+	infix(&nrm, -1 /* lowest priority */ , false);
 
 	PG_FREE_IF_COPY(query, 0);
 	PG_RETURN_CSTRING(nrm.buf);
@@ -1087,6 +1089,9 @@ tsqueryrecv(PG_FUNCTION_ARGS)
 	 */
 	findoprnd(item, size, &needcleanup);
 
+	/* Can't have found any QI_VALSTOP nodes */
+	Assert(!needcleanup);
+
 	/* Copy operands to output struct */
 	for (i = 0; i < size; i++)
 	{
@@ -1103,9 +1108,6 @@ tsqueryrecv(PG_FUNCTION_ARGS)
 	Assert(ptr - GETOPERAND(query) == datalen);
 
 	SET_VARSIZE(query, len + datalen);
-
-	if (needcleanup)
-		PG_RETURN_TSQUERY(cleanup_fakeval_and_phrase(query));
 
 	PG_RETURN_TSQUERY(query);
 }

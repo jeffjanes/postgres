@@ -32,7 +32,7 @@
  * happen, it would tie up KnownAssignedXids indefinitely, so we protect
  * ourselves by pruning the array when a valid list of running XIDs arrives.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -53,6 +53,7 @@
 #include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/spin.h"
@@ -105,9 +106,6 @@ static PGXACT *allPgXact;
 static TransactionId *KnownAssignedXids;
 static bool *KnownAssignedXidsValid;
 static TransactionId latestObservedXid = InvalidTransactionId;
-
-/* LWLock tranche for backend locks */
-static LWLockTranche ProcLWLockTranche;
 
 /*
  * If we're in STANDBY_SNAPSHOT_PENDING state, standbySnapshotPendingXmin is
@@ -266,11 +264,7 @@ CreateSharedProcArray(void)
 	}
 
 	/* Register and initialize fields of ProcLWLockTranche */
-	ProcLWLockTranche.name = "proc";
-	ProcLWLockTranche.array_base = (char *) (ProcGlobal->allProcs) +
-		offsetof(PGPROC, backendLock);
-	ProcLWLockTranche.array_stride = sizeof(PGPROC);
-	LWLockRegisterTranche(LWTRANCHE_PROC, &ProcLWLockTranche);
+	LWLockRegisterTranche(LWTRANCHE_PROC, "proc");
 }
 
 /*
@@ -287,7 +281,7 @@ ProcArrayAdd(PGPROC *proc)
 	if (arrayP->numProcs >= arrayP->maxProcs)
 	{
 		/*
-		 * Ooops, no room.  (This really shouldn't happen, since there is a
+		 * Oops, no room.  (This really shouldn't happen, since there is a
 		 * fixed supply of PGPROC structs too, and so we should have failed
 		 * earlier.)
 		 */
@@ -377,7 +371,7 @@ ProcArrayRemove(PGPROC *proc, TransactionId latestXid)
 		}
 	}
 
-	/* Ooops */
+	/* Oops */
 	LWLockRelease(ProcArrayLock);
 
 	elog(LOG, "failed to find proc %p in ProcArray", proc);
@@ -388,7 +382,7 @@ ProcArrayRemove(PGPROC *proc, TransactionId latestXid)
  * ProcArrayEndTransaction -- mark a transaction as no longer running
  *
  * This is used interchangeably for commit and abort cases.  The transaction
- * commit/abort must already be reported to WAL and pg_clog.
+ * commit/abort must already be reported to WAL and pg_xact.
  *
  * proc is currently always MyProc, but we pass it explicitly for flexibility.
  * latestXid is the latest Xid among the transaction's main XID and
@@ -491,7 +485,6 @@ ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid)
 	volatile PROC_HDR *procglobal = ProcGlobal;
 	uint32		nextidx;
 	uint32		wakeidx;
-	int			extraWaits = -1;
 
 	/* We should definitely have an XID to clear. */
 	Assert(TransactionIdIsValid(allPgXact[proc->pgprocno].xid));
@@ -518,21 +511,25 @@ ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid)
 	 */
 	if (nextidx != INVALID_PGPROCNO)
 	{
+		int			extraWaits = 0;
+
 		/* Sleep until the leader clears our XID. */
+		pgstat_report_wait_start(WAIT_EVENT_PROCARRAY_GROUP_UPDATE);
 		for (;;)
 		{
 			/* acts as a read barrier */
-			PGSemaphoreLock(&proc->sem);
+			PGSemaphoreLock(proc->sem);
 			if (!proc->procArrayGroupMember)
 				break;
 			extraWaits++;
 		}
+		pgstat_report_wait_end();
 
 		Assert(pg_atomic_read_u32(&proc->procArrayGroupNext) == INVALID_PGPROCNO);
 
 		/* Fix semaphore count for any absorbed wakeups */
 		while (extraWaits-- > 0)
-			PGSemaphoreUnlock(&proc->sem);
+			PGSemaphoreUnlock(proc->sem);
 		return;
 	}
 
@@ -591,7 +588,7 @@ ProcArrayGroupClearXid(PGPROC *proc, TransactionId latestXid)
 		proc->procArrayGroupMember = false;
 
 		if (proc != MyProc)
-			PGSemaphoreUnlock(&proc->sem);
+			PGSemaphoreUnlock(proc->sem);
 	}
 }
 
@@ -1180,7 +1177,7 @@ TransactionIdIsInProgress(TransactionId xid)
 	 * At this point, we know it's either a subtransaction of one of the Xids
 	 * in xids[], or it's not running.  If it's an already-failed
 	 * subtransaction, we want to say "not running" even though its parent may
-	 * still be running.  So first, check pg_clog to see if it's been aborted.
+	 * still be running.  So first, check pg_xact to see if it's been aborted.
 	 */
 	xc_slow_answer_inc();
 
@@ -1266,8 +1263,13 @@ TransactionIdIsActive(TransactionId xid)
  * If rel is NULL or a shared relation, all backends are considered, otherwise
  * only backends running in this database are considered.
  *
- * If ignoreVacuum is TRUE then backends with the PROC_IN_VACUUM flag set are
- * ignored.
+ * The flags are used to ignore the backends in calculation when any of the
+ * corresponding flags is set. Typically, if you want to ignore ones with
+ * PROC_IN_VACUUM flag, you can use PROCARRAY_FLAGS_VACUUM.
+ *
+ * PROCARRAY_SLOTS_XMIN causes GetOldestXmin to ignore the xmin and
+ * catalog_xmin of any replication slots that exist in the system when
+ * calculating the oldest xmin.
  *
  * This is used by VACUUM to decide which deleted tuples must be preserved in
  * the passed in table. For shared relations backends in all databases must be
@@ -1299,6 +1301,7 @@ TransactionIdIsActive(TransactionId xid)
  * in the master but are still being replayed on the standby, thus possibly
  * making the GetOldestXmin reading go backwards.  In this case there is a
  * possibility that we lose data that the standby would like to have, but
+ * unless the standby uses a replication slot to make its xmin persistent
  * there is little we can do about that --- data is only protected if the
  * walsender runs continuously while queries are executed on the standby.
  * (The Hot Standby code deals with such cases by failing standby queries
@@ -1308,7 +1311,7 @@ TransactionIdIsActive(TransactionId xid)
  * GetOldestXmin() move backwards, with no consequences for data integrity.
  */
 TransactionId
-GetOldestXmin(Relation rel, bool ignoreVacuum)
+GetOldestXmin(Relation rel, int flags)
 {
 	ProcArrayStruct *arrayP = procArray;
 	TransactionId result;
@@ -1346,14 +1349,7 @@ GetOldestXmin(Relation rel, bool ignoreVacuum)
 		volatile PGPROC *proc = &allProcs[pgprocno];
 		volatile PGXACT *pgxact = &allPgXact[pgprocno];
 
-		/*
-		 * Backend is doing logical decoding which manages xmin separately,
-		 * check below.
-		 */
-		if (pgxact->vacuumFlags & PROC_IN_LOGICAL_DECODING)
-			continue;
-
-		if (ignoreVacuum && (pgxact->vacuumFlags & PROC_IN_VACUUM))
+		if (pgxact->vacuumFlags & (flags & PROCARRAY_PROC_FLAGS_MASK))
 			continue;
 
 		if (allDbs ||
@@ -1429,7 +1425,8 @@ GetOldestXmin(Relation rel, bool ignoreVacuum)
 	/*
 	 * Check whether there are replication slots requiring an older xmin.
 	 */
-	if (TransactionIdIsValid(replication_slot_xmin) &&
+	if (!(flags & PROCARRAY_SLOTS_XMIN) &&
+		TransactionIdIsValid(replication_slot_xmin) &&
 		NormalTransactionIdPrecedes(replication_slot_xmin, result))
 		result = replication_slot_xmin;
 
@@ -1439,7 +1436,8 @@ GetOldestXmin(Relation rel, bool ignoreVacuum)
 	 * possible. We need to do so if we're computing the global limit (rel =
 	 * NULL) or if the passed relation is a catalog relation of some kind.
 	 */
-	if ((rel == NULL ||
+	if (!(flags & PROCARRAY_SLOTS_XMIN) &&
+		(rel == NULL ||
 		 RelationIsAccessibleInLogicalDecoding(rel)) &&
 		TransactionIdIsValid(replication_slot_catalog_xmin) &&
 		NormalTransactionIdPrecedes(replication_slot_catalog_xmin, result))
@@ -1498,7 +1496,8 @@ GetMaxSnapshotSubxidCount(void)
  *			older than this are known not running any more.
  *		RecentGlobalXmin: the global xmin (oldest TransactionXmin across all
  *			running transactions, except those running LAZY VACUUM).  This is
- *			the same computation done by GetOldestXmin(true, true).
+ *			the same computation done by
+ *			GetOldestXmin(NULL, PROCARRAY_FLAGS_VACUUM).
  *		RecentGlobalDataXmin: the global xmin for non-catalog tables
  *			>= RecentGlobalXmin
  *
@@ -2751,6 +2750,38 @@ CountDBBackends(Oid databaseid)
 }
 
 /*
+ * CountDBConnections --- counts database backends ignoring any background
+ *		worker processes
+ */
+int
+CountDBConnections(Oid databaseid)
+{
+	ProcArrayStruct *arrayP = procArray;
+	int			count = 0;
+	int			index;
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+
+	for (index = 0; index < arrayP->numProcs; index++)
+	{
+		int			pgprocno = arrayP->pgprocnos[index];
+		volatile PGPROC *proc = &allProcs[pgprocno];
+
+		if (proc->pid == 0)
+			continue;			/* do not count prepared xacts */
+		if (proc->isBackgroundWorker)
+			continue;			/* do not count background workers */
+		if (!OidIsValid(databaseid) ||
+			proc->databaseId == databaseid)
+			count++;
+	}
+
+	LWLockRelease(ProcArrayLock);
+
+	return count;
+}
+
+/*
  * CancelDBBackends --- cancel backends that are using specified database
  */
 void
@@ -2809,6 +2840,8 @@ CountUserBackends(Oid roleid)
 
 		if (proc->pid == 0)
 			continue;			/* do not count prepared xacts */
+		if (proc->isBackgroundWorker)
+			continue;			/* do not count background workers */
 		if (proc->roleId == roleid)
 			count++;
 	}

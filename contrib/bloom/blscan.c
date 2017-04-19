@@ -3,7 +3,7 @@
  * blscan.c
  *		Bloom index scan functions.
  *
- * Copyright (c) 2016, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/bloom/blscan.c
@@ -135,7 +135,7 @@ blgetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 		page = BufferGetPage(buffer);
 		TestForOldSnapshot(scan->xs_snapshot, scan->indexRelation, page);
 
-		if (!BloomPageIsDeleted(page))
+		if (!PageIsNew(page) && !BloomPageIsDeleted(page))
 		{
 			OffsetNumber offset,
 						maxOffset = BloomPageGetMaxOffset(page);

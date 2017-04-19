@@ -51,9 +51,9 @@
  *	PrepareToInvalidateCacheTuple() routine provides the knowledge of which
  *	catcaches may need invalidation for a given tuple.
  *
- *	Also, whenever we see an operation on a pg_class or pg_attribute tuple,
- *	we register a relcache flush operation for the relation described by that
- *	tuple.
+ *	Also, whenever we see an operation on a pg_class, pg_attribute, or
+ *	pg_index tuple, we register a relcache flush operation for the relation
+ *	described by that tuple (as specified in CacheInvalidateHeapTuple()).
  *
  *	We keep the relcache flush requests in lists separate from the catcache
  *	tuple flush requests.  This allows us to issue all the pending catcache
@@ -85,7 +85,7 @@
  *	problems can be overcome cheaply.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -94,6 +94,8 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <limits.h>
 
 #include "access/htup_details.h"
 #include "access/xact.h"
@@ -375,11 +377,16 @@ AddRelcacheInvalidationMessage(InvalidationListHeader *hdr,
 {
 	SharedInvalidationMessage msg;
 
-	/* Don't add a duplicate item */
-	/* We assume dbId need not be checked because it will never change */
+	/*
+	 * Don't add a duplicate item.
+	 * We assume dbId need not be checked because it will never change.
+	 * InvalidOid for relId means all relations so we don't need to add
+	 * individual ones when it is present.
+	 */
 	ProcessMessageList(hdr->rclist,
 					   if (msg->rc.id == SHAREDINVALRELCACHE_ID &&
-						   msg->rc.relId == relId)
+						   (msg->rc.relId == relId ||
+							msg->rc.relId == InvalidOid))
 					   return);
 
 	/* OK, add the item */
@@ -509,8 +516,10 @@ RegisterRelcacheInvalidation(Oid dbId, Oid relId)
 	/*
 	 * If the relation being invalidated is one of those cached in the local
 	 * relcache init file, mark that we need to zap that file at commit.
+	 * Same is true when we are invalidating whole relcache.
 	 */
-	if (OidIsValid(dbId) && RelationIdIsInInitFile(relId))
+	if (OidIsValid(dbId) &&
+		(RelationIdIsInInitFile(relId) || relId == InvalidOid))
 		transInvalInfo->RelcacheInitFileInval = true;
 }
 
@@ -565,7 +574,10 @@ LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)
 		{
 			int			i;
 
-			RelationCacheInvalidateEntry(msg->rc.relId);
+			if (msg->rc.relId == InvalidOid)
+				RelationCacheInvalidate();
+			else
+				RelationCacheInvalidateEntry(msg->rc.relId);
 
 			for (i = 0; i < relcache_callback_count; i++)
 			{
@@ -1120,6 +1132,7 @@ CacheInvalidateHeapTuple(Relation relation,
 
 	/*
 	 * Now, is this tuple one of the primary definers of a relcache entry?
+	 * See comments in file header for deeper explanation.
 	 *
 	 * Note we ignore newtuple here; we assume an update cannot move a tuple
 	 * from being part of one relcache entry to being part of another.
@@ -1224,6 +1237,21 @@ CacheInvalidateRelcache(Relation relation)
 		databaseId = MyDatabaseId;
 
 	RegisterRelcacheInvalidation(databaseId, relationId);
+}
+
+/*
+ * CacheInvalidateRelcacheAll
+ *		Register invalidation of the whole relcache at the end of command.
+ *
+ * This is used by alter publication as changes in publications may affect
+ * large number of tables.
+ */
+void
+CacheInvalidateRelcacheAll(void)
+{
+	PrepareInvalidationState();
+
+	RegisterRelcacheInvalidation(InvalidOid, InvalidOid);
 }
 
 /*
