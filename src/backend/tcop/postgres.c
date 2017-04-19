@@ -890,7 +890,7 @@ exec_simple_query(const char *query_string)
 	bool		save_log_statement_stats = log_statement_stats;
 	bool		was_logged = false;
 	bool		isTopLevel;
-	char		msec_str[32];
+	char		msec_str[96];
 
 
 	/*
@@ -1172,12 +1172,12 @@ exec_simple_query(const char *query_string)
 	{
 		case 1:
 			ereport(LOG,
-					(errmsg("duration: %s ms", msec_str),
+					(errmsg("duration: %s", msec_str),
 					 errhidestmt(true)));
 			break;
 		case 2:
 			ereport(LOG,
-					(errmsg("duration: %s ms  statement: %s",
+					(errmsg("duration: %s  statement: %s",
 							msec_str, query_string),
 					 errhidestmt(true),
 					 errdetail_execute(parsetree_list)));
@@ -1212,7 +1212,7 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	CachedPlanSource *psrc;
 	bool		is_named;
 	bool		save_log_statement_stats = log_statement_stats;
-	char		msec_str[32];
+	char		msec_str[96];
 
 	/*
 	 * Report query to various monitoring facilities.
@@ -1435,12 +1435,12 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	{
 		case 1:
 			ereport(LOG,
-					(errmsg("duration: %s ms", msec_str),
+					(errmsg("duration: %s", msec_str),
 					 errhidestmt(true)));
 			break;
 		case 2:
 			ereport(LOG,
-					(errmsg("duration: %s ms  parse %s: %s",
+					(errmsg("duration: %s  parse %s: %s",
 							msec_str,
 							*stmt_name ? stmt_name : "<unnamed>",
 							query_string),
@@ -1478,7 +1478,7 @@ exec_bind_message(StringInfo input_message)
 	MemoryContext oldContext;
 	bool		save_log_statement_stats = log_statement_stats;
 	bool		snapshot_set = false;
-	char		msec_str[32];
+	char		msec_str[96];
 
 	/* Get the fixed part of the message */
 	portal_name = pq_getmsgstring(input_message);
@@ -1815,12 +1815,12 @@ exec_bind_message(StringInfo input_message)
 	{
 		case 1:
 			ereport(LOG,
-					(errmsg("duration: %s ms", msec_str),
+					(errmsg("duration: %s", msec_str),
 					 errhidestmt(true)));
 			break;
 		case 2:
 			ereport(LOG,
-					(errmsg("duration: %s ms  bind %s%s%s: %s",
+					(errmsg("duration: %s  bind %s%s%s: %s",
 							msec_str,
 							*stmt_name ? stmt_name : "<unnamed>",
 							*portal_name ? "/" : "",
@@ -1857,7 +1857,7 @@ exec_execute_message(const char *portal_name, long max_rows)
 	bool		is_xact_command;
 	bool		execute_is_fetch;
 	bool		was_logged = false;
-	char		msec_str[32];
+	char		msec_str[96];
 
 	/* Adjust destination to tell printtup.c what to do */
 	dest = whereToSendOutput;
@@ -2033,12 +2033,12 @@ exec_execute_message(const char *portal_name, long max_rows)
 	{
 		case 1:
 			ereport(LOG,
-					(errmsg("duration: %s ms", msec_str),
+					(errmsg("duration: %s", msec_str),
 					 errhidestmt(true)));
 			break;
 		case 2:
 			ereport(LOG,
-					(errmsg("duration: %s ms  %s %s%s%s: %s",
+					(errmsg("duration: %s  %s %s%s%s: %s",
 							msec_str,
 							execute_is_fetch ?
 							_("execute fetch from") :
@@ -2111,6 +2111,7 @@ check_log_duration(char *msec_str, bool was_logged)
 		int			usecs;
 		int			msecs;
 		bool		exceeded;
+		PGRUsage	statementStartRUsage;
 
 		TimestampDifference(GetCurrentStatementStartTimestamp(),
 							GetCurrentTimestamp(),
@@ -2129,8 +2130,9 @@ check_log_duration(char *msec_str, bool was_logged)
 
 		if (exceeded || log_duration)
 		{
-			snprintf(msec_str, 32, "%ld.%03d",
-					 secs * 1000 + msecs, usecs % 1000);
+			statementStartRUsage=GetCurrentStatementStartRUsage();
+			snprintf(msec_str, 96, "%ld.%03d ms %s ",
+					 secs * 1000 + msecs, usecs % 1000, pg_rusage_show(&statementStartRUsage));
 			if (exceeded && !was_logged)
 				return 2;
 			else

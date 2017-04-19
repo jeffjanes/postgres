@@ -60,6 +60,7 @@
 #include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
+#include "utils/pg_rusage.h"
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
 #include "utils/timeout.h"
@@ -249,6 +250,7 @@ static bool currentCommandIdUsed;
 static TimestampTz xactStartTimestamp;
 static TimestampTz stmtStartTimestamp;
 static TimestampTz xactStopTimestamp;
+static PGRUsage    stmtStartRUsage;
 
 /*
  * GID to be used for preparing the current transaction.  This is also
@@ -719,6 +721,13 @@ GetCurrentStatementStartTimestamp(void)
 	return stmtStartTimestamp;
 }
 
+PGRUsage
+GetCurrentStatementStartRUsage(void)
+{
+	return stmtStartRUsage;
+}
+
+
 /*
  *	GetCurrentTransactionStopTimestamp
  *
@@ -740,6 +749,7 @@ void
 SetCurrentStatementStartTimestamp(void)
 {
 	stmtStartTimestamp = GetCurrentTimestamp();
+	pg_rusage_init(&stmtStartRUsage);
 }
 
 /*

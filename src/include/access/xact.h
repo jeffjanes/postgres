@@ -20,6 +20,7 @@
 #include "storage/relfilenode.h"
 #include "storage/sinval.h"
 #include "utils/datetime.h"
+#include "utils/pg_rusage.h"
 
 
 /*
@@ -340,6 +341,7 @@ extern bool SubTransactionIsActive(SubTransactionId subxid);
 extern CommandId GetCurrentCommandId(bool used);
 extern TimestampTz GetCurrentTransactionStartTimestamp(void);
 extern TimestampTz GetCurrentStatementStartTimestamp(void);
+extern PGRUsage GetCurrentStatementStartRUsage(void);
 extern TimestampTz GetCurrentTransactionStopTimestamp(void);
 extern void SetCurrentStatementStartTimestamp(void);
 extern int	GetCurrentTransactionNestLevel(void);
