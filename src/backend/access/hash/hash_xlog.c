@@ -40,7 +40,7 @@ hash_xlog_init_meta_page(XLogReaderState *record)
 	metabuf = XLogInitBufferForRedo(record, 0);
 	Assert(BufferIsValid(metabuf));
 	_hash_init_metabuffer(metabuf, xlrec->num_tuples, xlrec->procid,
-						  xlrec->ffactor, true);
+						  xlrec->ffactor, xlrec->dnumbuckets, true);
 	page = (Page) BufferGetPage(metabuf);
 	PageSetLSN(page, lsn);
 	MarkBufferDirty(metabuf);

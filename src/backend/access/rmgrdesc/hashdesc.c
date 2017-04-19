@@ -28,8 +28,8 @@ hash_desc(StringInfo buf, XLogReaderState *record)
 			{
 				xl_hash_init_meta_page *xlrec = (xl_hash_init_meta_page *) rec;
 
-				appendStringInfo(buf, "num_tuples %g, fillfactor %d",
-								 xlrec->num_tuples, xlrec->ffactor);
+				appendStringInfo(buf, "num_tuples %g, fillfactor %d dnumbuckets %f",
+								 xlrec->num_tuples, xlrec->ffactor, xlrec->dnumbuckets);
 				break;
 			}
 		case XLOG_HASH_INIT_BITMAP_PAGE:

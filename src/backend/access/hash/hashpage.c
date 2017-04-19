@@ -377,7 +377,7 @@ _hash_init(Relation rel, double num_tuples, ForkNumber forkNum)
 	 * whole relation will be rolled back.
 	 */
 	metabuf = _hash_getnewbuf(rel, HASH_METAPAGE, forkNum);
-	_hash_init_metabuffer(metabuf, num_tuples, procid, ffactor, false);
+	_hash_init_metabuffer(metabuf, num_tuples, procid, ffactor, HashGetBuckets(rel,-1), false);
 	MarkBufferDirty(metabuf);
 
 	pg = BufferGetPage(metabuf);
@@ -392,6 +392,7 @@ _hash_init(Relation rel, double num_tuples, ForkNumber forkNum)
 		xlrec.num_tuples = num_tuples;
 		xlrec.procid = metap->hashm_procid;
 		xlrec.ffactor = metap->hashm_ffactor;
+		xlrec.dnumbuckets = HashGetBuckets(rel,-1);
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHashInitMetaPage);
@@ -495,12 +496,11 @@ _hash_init(Relation rel, double num_tuples, ForkNumber forkNum)
  */
 void
 _hash_init_metabuffer(Buffer buf, double num_tuples, RegProcedure procid,
-					  uint16 ffactor, bool initpage)
+					  uint16 ffactor, double dnumbuckets, bool initpage)
 {
 	HashMetaPage metap;
 	HashPageOpaque pageopaque;
 	Page		page;
-	double		dnumbuckets;
 	uint32		num_buckets;
 	uint32		spare_index;
 	uint32		i;
@@ -513,8 +513,8 @@ _hash_init_metabuffer(Buffer buf, double num_tuples, RegProcedure procid,
 	 * The upper limit is determined by considerations explained in
 	 * _hash_expandtable().
 	 */
-	dnumbuckets = num_tuples / ffactor;
-	dnumbuckets = HashGetBuckets(rel,dnumbuckets);
+	if (dnumbuckets < 0)
+		dnumbuckets = num_tuples / ffactor;
 	if (dnumbuckets <= 2.0)
 		num_buckets = 2;
 	else if (dnumbuckets >= (double) 0x40000000)

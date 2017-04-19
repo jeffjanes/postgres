@@ -232,10 +232,11 @@ typedef struct xl_hash_init_meta_page
 	double		num_tuples;
 	RegProcedure procid;
 	uint16		ffactor;
+	double		dnumbuckets;
 }	xl_hash_init_meta_page;
 
 #define SizeOfHashInitMetaPage		\
-	(offsetof(xl_hash_init_meta_page, ffactor) + sizeof(uint16))
+	(offsetof(xl_hash_init_meta_page, dnumbuckets) + sizeof(uint16))
 
 /*
  * This is what we need to initialize bitmap page.

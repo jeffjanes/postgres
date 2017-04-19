@@ -399,7 +399,7 @@ extern void _hash_dropscanbuf(Relation rel, HashScanOpaque so);
 extern uint32 _hash_init(Relation rel, double num_tuples,
 		   ForkNumber forkNum);
 extern void _hash_init_metabuffer(Buffer buf, double num_tuples,
-					  RegProcedure procid, uint16 ffactor, bool initpage);
+					  RegProcedure procid, uint16 ffactor, double dnumbuckets, bool initpage);
 extern void _hash_pageinit(Page page, Size size);
 extern void _hash_expandtable(Relation rel, Buffer metabuf);
 extern void _hash_finish_split(Relation rel, Buffer metabuf, Buffer obuf,
