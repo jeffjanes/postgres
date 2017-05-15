@@ -338,7 +338,6 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				database_name access_method_clause access_method attr_name
 				name cursor_name file_name
 				index_name opt_index_name cluster_index_specification
-				def_key
 
 %type <list>	func_name handler_name qual_Op qual_all_Op subquery_Op
 				opt_class opt_inline_handler opt_validator validator_clause
@@ -652,7 +651,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	MAPPING MATCH MATERIALIZED MAXVALUE METHOD MINUTE_P MINVALUE MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NEW NEXT NO NONE
-	NOREFRESH NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
+	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
 	NULLS_P NUMERIC
 
 	OBJECT_P OF OFF OFFSET OIDS OLD ON ONLY OPERATOR OPTION OPTIONS OR
@@ -3836,31 +3835,29 @@ ExistingIndex:   USING INDEX index_name				{ $$ = $3; }
 /*****************************************************************************
  *
  *		QUERY :
- *				CREATE STATISTICS stats_name WITH (options) ON (columns) FROM relname
+ *				CREATE STATISTICS stats_name [(stat types)]
+ *					ON expression-list FROM from_list
+ *
+ * Note: the expectation here is that the clauses after ON are a subset of
+ * SELECT syntax, allowing for expressions and joined tables, and probably
+ * someday a WHERE clause.  Much less than that is currently implemented,
+ * but the grammar accepts it and then we'll throw FEATURE_NOT_SUPPORTED
+ * errors as necessary at execution.
  *
  *****************************************************************************/
 
-
-CreateStatsStmt:	CREATE STATISTICS any_name opt_reloptions ON '(' columnList ')' FROM qualified_name
-						{
-							CreateStatsStmt *n = makeNode(CreateStatsStmt);
-							n->defnames = $3;
-							n->relation = $10;
-							n->keys = $7;
-							n->options = $4;
-							n->if_not_exists = false;
-							$$ = (Node *)n;
-						}
-					| CREATE STATISTICS IF_P NOT EXISTS any_name opt_reloptions ON '(' columnList ')' FROM qualified_name
-						{
-							CreateStatsStmt *n = makeNode(CreateStatsStmt);
-							n->defnames = $6;
-							n->relation = $13;
-							n->keys = $10;
-							n->options = $7;
-							n->if_not_exists = true;
-							$$ = (Node *)n;
-						}
+CreateStatsStmt:
+			CREATE opt_if_not_exists STATISTICS any_name
+			opt_name_list ON expr_list FROM from_list
+				{
+					CreateStatsStmt *n = makeNode(CreateStatsStmt);
+					n->defnames = $4;
+					n->stat_types = $5;
+					n->exprs = $7;
+					n->relations = $9;
+					n->if_not_exists = $2;
+					$$ = (Node *)n;
+				}
 			;
 
 /*****************************************************************************
@@ -5673,19 +5670,14 @@ def_list:	def_elem								{ $$ = list_make1($1); }
 			| def_list ',' def_elem					{ $$ = lappend($1, $3); }
 		;
 
-def_elem:	def_key '=' def_arg
+def_elem:	ColLabel '=' def_arg
 				{
 					$$ = makeDefElem($1, (Node *) $3, @1);
 				}
-			| def_key
+			| ColLabel
 				{
 					$$ = makeDefElem($1, NULL, @1);
 				}
-		;
-
-def_key:
-			ColLabel						{ $$ = $1; }
-			| ColLabel ColLabel				{ $$ = psprintf("%s %s", $1, $2); }
 		;
 
 /* Note: any simple identifier will be returned as a type name! */
@@ -9173,9 +9165,10 @@ publication_for_tables:
 				}
 		;
 
+
 /*****************************************************************************
  *
- * ALTER PUBLICATION name [ WITH ] options
+ * ALTER PUBLICATION name SET ( options )
  *
  * ALTER PUBLICATION name ADD TABLE table [, table2]
  *
@@ -9186,7 +9179,7 @@ publication_for_tables:
  *****************************************************************************/
 
 AlterPublicationStmt:
-			ALTER PUBLICATION name WITH definition
+			ALTER PUBLICATION name SET definition
 				{
 					AlterPublicationStmt *n = makeNode(AlterPublicationStmt);
 					n->pubname = $3;
@@ -9254,12 +9247,12 @@ publication_name_item:
 
 /*****************************************************************************
  *
- * ALTER SUBSCRIPTION name [ WITH ] options
+ * ALTER SUBSCRIPTION name ...
  *
  *****************************************************************************/
 
 AlterSubscriptionStmt:
-			ALTER SUBSCRIPTION name WITH definition
+			ALTER SUBSCRIPTION name SET definition
 				{
 					AlterSubscriptionStmt *n =
 						makeNode(AlterSubscriptionStmt);
@@ -9296,7 +9289,7 @@ AlterSubscriptionStmt:
 					n->options = $8;
 					$$ = (Node *)n;
 				}
-			| ALTER SUBSCRIPTION name SET PUBLICATION publication_name_list NOREFRESH
+			| ALTER SUBSCRIPTION name SET PUBLICATION publication_name_list SKIP REFRESH
 				{
 					AlterSubscriptionStmt *n =
 						makeNode(AlterSubscriptionStmt);
@@ -14758,7 +14751,6 @@ unreserved_keyword:
 			| NEW
 			| NEXT
 			| NO
-			| NOREFRESH
 			| NOTHING
 			| NOTIFY
 			| NOWAIT

@@ -898,8 +898,6 @@ _outHash(StringInfo str, const Hash *node)
 	WRITE_OID_FIELD(skewTable);
 	WRITE_INT_FIELD(skewColumn);
 	WRITE_BOOL_FIELD(skewInherit);
-	WRITE_OID_FIELD(skewColType);
-	WRITE_INT_FIELD(skewColTypmod);
 }
 
 static void
@@ -2639,9 +2637,9 @@ _outCreateStatsStmt(StringInfo str, const CreateStatsStmt *node)
 	WRITE_NODE_TYPE("CREATESTATSSTMT");
 
 	WRITE_NODE_FIELD(defnames);
-	WRITE_NODE_FIELD(relation);
-	WRITE_NODE_FIELD(keys);
-	WRITE_NODE_FIELD(options);
+	WRITE_NODE_FIELD(stat_types);
+	WRITE_NODE_FIELD(exprs);
+	WRITE_NODE_FIELD(relations);
 	WRITE_BOOL_FIELD(if_not_exists);
 }
 

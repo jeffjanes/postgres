@@ -616,6 +616,21 @@ static const SchemaQuery Query_for_list_of_matviews = {
 	NULL
 };
 
+static const SchemaQuery Query_for_list_of_statistics = {
+	/* catname */
+	"pg_catalog.pg_statistic_ext s",
+	/* selcondition */
+	NULL,
+	/* viscondition */
+	"pg_catalog.pg_statistics_obj_is_visible(s.oid)",
+	/* namespace */
+	"s.stxnamespace",
+	/* result */
+	"pg_catalog.quote_ident(s.stxname)",
+	/* qualresult */
+	NULL
+};
+
 
 /*
  * Queries to get lists of names of various kinds of things, possibly
@@ -1023,6 +1038,7 @@ static const pgsql_thing_t words_after_create[] = {
 	{"SCHEMA", Query_for_list_of_schemas},
 	{"SEQUENCE", NULL, &Query_for_list_of_sequences},
 	{"SERVER", Query_for_list_of_servers},
+	{"STATISTICS", NULL, &Query_for_list_of_statistics},
 	{"SUBSCRIPTION", Query_for_list_of_subscriptions},
 	{"SYSTEM", NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
 	{"TABLE", NULL, &Query_for_list_of_tables},
@@ -1504,28 +1520,27 @@ psql_completion(const char *text, int start, int end)
 		COMPLETE_WITH_LIST6("WITH (", "ADD TABLE", "SET TABLE", "DROP TABLE",
 							"OWNER TO", "RENAME TO");
 	}
-	/* ALTER PUBLICATION <name> .. WITH ( ... */
-	else if (HeadMatches3("ALTER", "PUBLICATION",MatchAny) && TailMatches2("WITH", "("))
+	/* ALTER PUBLICATION <name> .. SET ( ... */
+	else if (HeadMatches3("ALTER", "PUBLICATION",MatchAny) && TailMatches2("SET", "("))
 	{
-		COMPLETE_WITH_LIST6("PUBLISH INSERT", "NOPUBLISH INSERT", "PUBLISH UPDATE",
-							"NOPUBLISH UPDATE", "PUBLISH DELETE", "NOPUBLISH DELETE");
+		COMPLETE_WITH_CONST("publish");
 	}
 	/* ALTER SUBSCRIPTION <name> ... */
 	else if (Matches3("ALTER","SUBSCRIPTION",MatchAny))
 	{
-		COMPLETE_WITH_LIST8("WITH (", "CONNECTION", "SET PUBLICATION", "ENABLE",
+		COMPLETE_WITH_LIST8("SET (", "CONNECTION", "SET PUBLICATION", "ENABLE",
 							"DISABLE", "OWNER TO", "RENAME TO", "REFRESH PUBLICATION WITH (");
 	}
 	/* ALTER SUBSCRIPTION <name> REFRESH PUBLICATION WITH ( ... */
 	else if (HeadMatches3("ALTER", "SUBSCRIPTION", MatchAny) &&
 			 TailMatches4("REFRESH", "PUBLICATION", "WITH", "("))
 	{
-		COMPLETE_WITH_LIST2("COPY DATA", "NOCOPY DATA");
+		COMPLETE_WITH_CONST("copy_data");
 	}
-	/* ALTER SUBSCRIPTION <name> .. WITH ( ... */
-	else if (HeadMatches3("ALTER", "SUBSCRIPTION", MatchAny) && TailMatches2("WITH", "("))
+	/* ALTER SUBSCRIPTION <name> .. SET ( ... */
+	else if (HeadMatches3("ALTER", "SUBSCRIPTION", MatchAny) && TailMatches2("SET", "("))
 	{
-		COMPLETE_WITH_CONST("SLOT NAME");
+		COMPLETE_WITH_CONST("slot_name");
 	}
 	/* ALTER SCHEMA <name> */
 	else if (Matches3("ALTER", "SCHEMA", MatchAny))
@@ -1782,6 +1797,10 @@ psql_completion(const char *text, int start, int end)
 	/* ALTER RULE <name> ON <name> */
 	else if (Matches5("ALTER", "RULE", MatchAny, "ON", MatchAny))
 		COMPLETE_WITH_CONST("RENAME TO");
+
+	/* ALTER STATISTICS <name> */
+	else if (Matches3("ALTER", "STATISTICS", MatchAny))
+		COMPLETE_WITH_LIST3("OWNER TO", "RENAME TO", "SET SCHEMA");
 
 	/* ALTER TRIGGER <name>, add ON */
 	else if (Matches3("ALTER", "TRIGGER", MatchAny))
@@ -2119,7 +2138,8 @@ psql_completion(const char *text, int start, int end)
 		{"ACCESS METHOD", "CAST", "COLLATION", "CONVERSION", "DATABASE",
 			"EVENT TRIGGER", "EXTENSION",
 			"FOREIGN DATA WRAPPER", "FOREIGN TABLE",
-			"SERVER", "INDEX", "LANGUAGE", "POLICY", "PUBLICATION", "RULE", "SCHEMA", "SEQUENCE", "SUBSCRIPTION",
+			"SERVER", "INDEX", "LANGUAGE", "POLICY", "PUBLICATION", "RULE",
+			"SCHEMA", "SEQUENCE", "STATISTICS", "SUBSCRIPTION",
 			"TABLE", "TYPE", "VIEW", "MATERIALIZED VIEW", "COLUMN", "AGGREGATE", "FUNCTION",
 			"OPERATOR", "TRIGGER", "CONSTRAINT", "DOMAIN", "LARGE OBJECT",
 		"TABLESPACE", "TEXT SEARCH", "ROLE", NULL};
@@ -2349,9 +2369,7 @@ psql_completion(const char *text, int start, int end)
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables, NULL);
 	/* Complete "CREATE PUBLICATION <name> [...] WITH" */
 	else if (HeadMatches2("CREATE", "PUBLICATION") && TailMatches2("WITH", "("))
-		COMPLETE_WITH_LIST2("PUBLISH", "NOPUBLISH");
-	else if (HeadMatches2("CREATE", "PUBLICATION") && TailMatches3("WITH", "(", MatchAny))
-		COMPLETE_WITH_LIST3("INSERT", "UPDATE", "DELETE");
+		COMPLETE_WITH_CONST("publish");
 
 /* CREATE RULE */
 	/* Complete "CREATE RULE <sth>" with "AS ON" */
@@ -2382,6 +2400,19 @@ psql_completion(const char *text, int start, int end)
 /* CREATE SERVER <name> */
 	else if (Matches3("CREATE", "SERVER", MatchAny))
 		COMPLETE_WITH_LIST3("TYPE", "VERSION", "FOREIGN DATA WRAPPER");
+
+/* CREATE STATISTICS <name> */
+	else if (Matches3("CREATE", "STATISTICS", MatchAny))
+		COMPLETE_WITH_LIST2("(", "ON");
+	else if (Matches4("CREATE", "STATISTICS", MatchAny, "("))
+		COMPLETE_WITH_LIST2("ndistinct", "dependencies");
+	else if (HeadMatches3("CREATE", "STATISTICS", MatchAny) &&
+			 previous_words[0][0] == '(' &&
+			 previous_words[0][strlen(previous_words[0]) - 1] == ')')
+		COMPLETE_WITH_CONST("ON");
+	else if (HeadMatches3("CREATE", "STATISTICS", MatchAny) &&
+			 TailMatches1("FROM"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables, NULL);
 
 /* CREATE TABLE --- is allowed inside CREATE SCHEMA, so use TailMatches */
 	/* Complete "CREATE TEMP/TEMPORARY" with the possible temp objects */
@@ -2427,9 +2458,8 @@ psql_completion(const char *text, int start, int end)
 		COMPLETE_WITH_CONST("WITH (");
 	/* Complete "CREATE SUBSCRIPTION <name> ...  WITH ( <opt>" */
 	else if (HeadMatches2("CREATE", "SUBSCRIPTION") && TailMatches2("WITH", "("))
-		COMPLETE_WITH_LIST8("ENABLED", "DISABLED", "CREATE SLOT",
-							"NOCREATE SLOT", "SLOT NAME", "COPY DATA", "NOCOPY DATA",
-							"NOCONNECT");
+		COMPLETE_WITH_LIST5("enabled", "create_slot", "slot_name",
+							"copy_data", "connect");
 
 /* CREATE TRIGGER --- is allowed inside CREATE SCHEMA, so use TailMatches */
 	/* complete CREATE TRIGGER <name> with BEFORE,AFTER,INSTEAD OF */
@@ -2589,7 +2619,7 @@ psql_completion(const char *text, int start, int end)
 /* DROP */
 	/* Complete DROP object with CASCADE / RESTRICT */
 	else if (Matches3("DROP",
-					  "COLLATION|CONVERSION|DOMAIN|EXTENSION|LANGUAGE|PUBLICATION|SCHEMA|SEQUENCE|SERVER|SUBSCRIPTION|TABLE|TYPE|VIEW",
+					  "COLLATION|CONVERSION|DOMAIN|EXTENSION|LANGUAGE|PUBLICATION|SCHEMA|SEQUENCE|SERVER|SUBSCRIPTION|STATISTICS|TABLE|TYPE|VIEW",
 					  MatchAny) ||
 			 Matches4("DROP", "ACCESS", "METHOD", MatchAny) ||
 			 (Matches4("DROP", "AGGREGATE|FUNCTION", MatchAny, MatchAny) &&

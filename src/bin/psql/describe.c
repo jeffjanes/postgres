@@ -1858,13 +1858,26 @@ describeOneTableDetails(const char *schemaname,
 		PGresult   *result;
 		char	   *parent_name;
 		char	   *partdef;
+		char	   *partconstraintdef = NULL;
 
-		printfPQExpBuffer(&buf,
-			 "SELECT inhparent::pg_catalog.regclass, pg_get_expr(c.relpartbound, inhrelid)"
-			 " FROM pg_catalog.pg_class c"
-			 " JOIN pg_catalog.pg_inherits"
-			 " ON c.oid = inhrelid"
-			 " WHERE c.oid = '%s' AND c.relispartition;", oid);
+		/* If verbose, also request the partition constraint definition */
+		if (verbose)
+			printfPQExpBuffer(&buf,
+				"SELECT inhparent::pg_catalog.regclass,"
+				"		pg_get_expr(c.relpartbound, inhrelid),"
+				"		pg_get_partition_constraintdef(inhrelid)"
+				" FROM pg_catalog.pg_class c"
+				" JOIN pg_catalog.pg_inherits"
+				" ON c.oid = inhrelid"
+				" WHERE c.oid = '%s' AND c.relispartition;", oid);
+		else
+			printfPQExpBuffer(&buf,
+				"SELECT inhparent::pg_catalog.regclass,"
+				"		pg_get_expr(c.relpartbound, inhrelid)"
+				" FROM pg_catalog.pg_class c"
+				" JOIN pg_catalog.pg_inherits"
+				" ON c.oid = inhrelid"
+				" WHERE c.oid = '%s' AND c.relispartition;", oid);
 		result = PSQLexec(buf.data);
 		if (!result)
 			goto error_return;
@@ -1873,9 +1886,21 @@ describeOneTableDetails(const char *schemaname,
 		{
 			parent_name = PQgetvalue(result, 0, 0);
 			partdef = PQgetvalue(result, 0, 1);
+
+			if (PQnfields(result) == 3)
+				partconstraintdef = PQgetvalue(result, 0, 2);
+
 			printfPQExpBuffer(&tmpbuf, _("Partition of: %s %s"), parent_name,
 						  partdef);
 			printTableAddFooter(&cont, tmpbuf.data);
+
+			if (partconstraintdef)
+			{
+				printfPQExpBuffer(&tmpbuf, _("Partition constraint: %s"),
+								  partconstraintdef);
+				printTableAddFooter(&cont, tmpbuf.data);
+			}
+
 			PQclear(result);
 		}
 	}
@@ -2355,8 +2380,9 @@ describeOneTableDetails(const char *schemaname,
 		{
 			printfPQExpBuffer(&buf,
 							  "SELECT oid, "
+							  "stxrelid::pg_catalog.regclass, "
 							  "stxnamespace::pg_catalog.regnamespace AS nsp, "
-							  "stxname, stxkeys,\n"
+							  "stxname,\n"
 							  "  (SELECT pg_catalog.string_agg(pg_catalog.quote_ident(attname),', ')\n"
 							  "   FROM pg_catalog.unnest(stxkeys) s(attnum)\n"
 							  "   JOIN pg_catalog.pg_attribute a ON (stxrelid = a.attrelid AND\n"
@@ -2376,7 +2402,7 @@ describeOneTableDetails(const char *schemaname,
 
 			if (tuples > 0)
 			{
-				printTableAddFooter(&cont, _("Statistics:"));
+				printTableAddFooter(&cont, _("Statistics objects:"));
 
 				for (i = 0; i < tuples; i++)
 				{
@@ -2384,10 +2410,10 @@ describeOneTableDetails(const char *schemaname,
 
 					printfPQExpBuffer(&buf, "    ");
 
-					/* statistics name (qualified with namespace) */
-					appendPQExpBuffer(&buf, "\"%s.%s\" WITH (",
-									  PQgetvalue(result, i, 1),
-									  PQgetvalue(result, i, 2));
+					/* statistics object name (qualified with namespace) */
+					appendPQExpBuffer(&buf, "\"%s\".\"%s\" (",
+									  PQgetvalue(result, i, 2),
+									  PQgetvalue(result, i, 3));
 
 					/* options */
 					if (strcmp(PQgetvalue(result, i, 5), "t") == 0)
@@ -2401,8 +2427,9 @@ describeOneTableDetails(const char *schemaname,
 						appendPQExpBuffer(&buf, "%sdependencies", gotone ? ", " : "");
 					}
 
-					appendPQExpBuffer(&buf, ") ON (%s)",
-									  PQgetvalue(result, i, 4));
+					appendPQExpBuffer(&buf, ") ON %s FROM %s",
+									  PQgetvalue(result, i, 4),
+									  PQgetvalue(result, i, 1));
 
 					printTableAddFooter(&cont, buf.data);
 				}

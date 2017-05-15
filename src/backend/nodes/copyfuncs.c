@@ -1052,8 +1052,6 @@ _copyHash(const Hash *from)
 	COPY_SCALAR_FIELD(skewTable);
 	COPY_SCALAR_FIELD(skewColumn);
 	COPY_SCALAR_FIELD(skewInherit);
-	COPY_SCALAR_FIELD(skewColType);
-	COPY_SCALAR_FIELD(skewColTypmod);
 
 	return newnode;
 }
@@ -3389,9 +3387,9 @@ _copyCreateStatsStmt(const CreateStatsStmt *from)
 	CreateStatsStmt *newnode = makeNode(CreateStatsStmt);
 
 	COPY_NODE_FIELD(defnames);
-	COPY_NODE_FIELD(relation);
-	COPY_NODE_FIELD(keys);
-	COPY_NODE_FIELD(options);
+	COPY_NODE_FIELD(stat_types);
+	COPY_NODE_FIELD(exprs);
+	COPY_NODE_FIELD(relations);
 	COPY_SCALAR_FIELD(if_not_exists);
 
 	return newnode;
