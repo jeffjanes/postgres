@@ -425,7 +425,7 @@ static const BuiltinScript builtin_script[] =
 		"END;\n"
 	},
 	{
-		"tpcb-like-func",
+		"tpcb-func",
 		"<builtin: TPC-B (sort of) in PL/pgSQL>",
 		"\\set aid random(1, " CppAsString2(naccounts) " * :scale)\n"
 		"\\set bid random(1, " CppAsString2(nbranches) " * :scale)\n"
