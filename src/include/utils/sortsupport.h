@@ -72,7 +72,7 @@ typedef struct SortSupportData
 	 * sort support functions.
 	 */
 	bool		ssup_reverse;	/* descending-order sort? */
-	bool		ssup_nulls_first;		/* sort nulls first? */
+	bool		ssup_nulls_first;	/* sort nulls first? */
 
 	/*
 	 * These fields are workspace for callers, and should not be touched by
@@ -222,7 +222,7 @@ ApplySortComparator(Datum datum1, bool isNull1,
 	}
 	else
 	{
-		compare = (*ssup->comparator) (datum1, datum2, ssup);
+		compare = ssup->comparator(datum1, datum2, ssup);
 		if (ssup->ssup_reverse)
 			compare = -compare;
 	}
@@ -260,7 +260,7 @@ ApplySortAbbrevFullComparator(Datum datum1, bool isNull1,
 	}
 	else
 	{
-		compare = (*ssup->abbrev_full_comparator) (datum1, datum2, ssup);
+		compare = ssup->abbrev_full_comparator(datum1, datum2, ssup);
 		if (ssup->ssup_reverse)
 			compare = -compare;
 	}
@@ -274,4 +274,4 @@ extern void PrepareSortSupportFromOrderingOp(Oid orderingOp, SortSupport ssup);
 extern void PrepareSortSupportFromIndexRel(Relation indexRel, int16 strategy,
 							   SortSupport ssup);
 
-#endif   /* SORTSUPPORT_H */
+#endif							/* SORTSUPPORT_H */

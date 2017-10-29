@@ -34,7 +34,7 @@ typedef struct PartitionDescData
 {
 	int			nparts;			/* Number of partitions */
 	Oid		   *oids;			/* OIDs of partitions */
-	PartitionBoundInfo boundinfo;		/* collection of partition bounds */
+	PartitionBoundInfo boundinfo;	/* collection of partition bounds */
 } PartitionDescData;
 
 typedef struct PartitionDescData *PartitionDesc;
@@ -71,20 +71,26 @@ typedef struct PartitionDispatchData
 typedef struct PartitionDispatchData *PartitionDispatch;
 
 extern void RelationBuildPartitionDesc(Relation relation);
-extern bool partition_bounds_equal(PartitionKey key,
-					   PartitionBoundInfo p1, PartitionBoundInfo p2);
+extern bool partition_bounds_equal(int partnatts, int16 *parttyplen,
+					   bool *parttypbyval, PartitionBoundInfo b1,
+					   PartitionBoundInfo b2);
+extern PartitionBoundInfo partition_bounds_copy(PartitionBoundInfo src,
+					  PartitionKey key);
 
-extern void check_new_partition_bound(char *relname, Relation parent, Node *bound);
+extern void check_new_partition_bound(char *relname, Relation parent,
+						  PartitionBoundSpec *spec);
 extern Oid	get_partition_parent(Oid relid);
-extern List *get_qual_from_partbound(Relation rel, Relation parent, Node *bound);
+extern List *get_qual_from_partbound(Relation rel, Relation parent,
+						PartitionBoundSpec *spec);
 extern List *map_partition_varattnos(List *expr, int target_varno,
-						Relation partrel, Relation parent);
+						Relation partrel, Relation parent,
+						bool *found_whole_row);
 extern List *RelationGetPartitionQual(Relation rel);
+extern Expr *get_partition_qual_relid(Oid relid);
 
 /* For tuple routing */
 extern PartitionDispatch *RelationGetPartitionDispatchInfo(Relation rel,
-								 int lockmode, int *num_parted,
-								 List **leaf_part_oids);
+								 int *num_parted, List **leaf_part_oids);
 extern void FormPartitionKeyDatum(PartitionDispatch pd,
 					  TupleTableSlot *slot,
 					  EState *estate,
@@ -95,4 +101,11 @@ extern int get_partition_for_tuple(PartitionDispatch *pd,
 						EState *estate,
 						PartitionDispatchData **failed_at,
 						TupleTableSlot **failed_slot);
-#endif   /* PARTITION_H */
+extern Oid	get_default_oid_from_partdesc(PartitionDesc partdesc);
+extern Oid	get_default_partition_oid(Oid parentId);
+extern void update_default_partition_oid(Oid parentId, Oid defaultPartId);
+extern void check_default_allows_bound(Relation parent, Relation defaultRel,
+						   PartitionBoundSpec *new_spec);
+extern List *get_proposed_default_constraint(List *new_part_constaints);
+
+#endif							/* PARTITION_H */

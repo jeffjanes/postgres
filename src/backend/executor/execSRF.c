@@ -291,7 +291,7 @@ ExecMakeTableFunctionResult(SetExprState *setexpr,
 						 */
 						oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_query_memory);
 						tupdesc = lookup_rowtype_tupdesc_copy(HeapTupleHeaderGetTypeId(td),
-											   HeapTupleHeaderGetTypMod(td));
+															  HeapTupleHeaderGetTypMod(td));
 						rsinfo.setDesc = tupdesc;
 						MemoryContextSwitchTo(oldcontext);
 					}
@@ -467,11 +467,16 @@ ExecInitFunctionResultSet(Expr *expr,
  * function itself.  The argument expressions may not contain set-returning
  * functions (the planner is supposed to have separated evaluation for those).
  *
+ * This should be called in a short-lived (per-tuple) context, argContext
+ * needs to live until all rows have been returned (i.e. *isDone set to
+ * ExprEndResult or ExprSingleResult).
+ *
  * This is used by nodeProjectSet.c.
  */
 Datum
 ExecMakeFunctionResultSet(SetExprState *fcache,
 						  ExprContext *econtext,
+						  MemoryContext argContext,
 						  bool *isNull,
 						  ExprDoneCond *isDone)
 {
@@ -495,8 +500,21 @@ restart:
 	 */
 	if (fcache->funcResultStore)
 	{
-		if (tuplestore_gettupleslot(fcache->funcResultStore, true, false,
-									fcache->funcResultSlot))
+		TupleTableSlot *slot = fcache->funcResultSlot;
+		MemoryContext oldContext;
+		bool		foundTup;
+
+		/*
+		 * Have to make sure tuple in slot lives long enough, otherwise
+		 * clearing the slot could end up trying to free something already
+		 * freed.
+		 */
+		oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
+		foundTup = tuplestore_gettupleslot(fcache->funcResultStore, true, false,
+										   fcache->funcResultSlot);
+		MemoryContextSwitchTo(oldContext);
+
+		if (foundTup)
 		{
 			*isDone = ExprMultipleResult;
 			if (fcache->funcReturnsTuple)
@@ -524,11 +542,20 @@ restart:
 	 * function manager.  We skip the evaluation if it was already done in the
 	 * previous call (ie, we are continuing the evaluation of a set-valued
 	 * function).  Otherwise, collect the current argument values into fcinfo.
+	 *
+	 * The arguments have to live in a context that lives at least until all
+	 * rows from this SRF have been returned, otherwise ValuePerCall SRFs
+	 * would reference freed memory after the first returned row.
 	 */
 	fcinfo = &fcache->fcinfo_data;
 	arguments = fcache->args;
 	if (!fcache->setArgsValid)
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(argContext);
+
 		ExecEvalFuncArgs(fcinfo, arguments, econtext);
+		MemoryContextSwitchTo(oldContext);
+	}
 	else
 	{
 		/* Reset flag (we may set it again below) */
@@ -667,10 +694,10 @@ init_sexpr(Oid foid, Oid input_collation, Expr *node,
 	if (list_length(sexpr->args) > FUNC_MAX_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-			 errmsg_plural("cannot pass more than %d argument to a function",
-						   "cannot pass more than %d arguments to a function",
-						   FUNC_MAX_ARGS,
-						   FUNC_MAX_ARGS)));
+				 errmsg_plural("cannot pass more than %d argument to a function",
+							   "cannot pass more than %d arguments to a function",
+							   FUNC_MAX_ARGS,
+							   FUNC_MAX_ARGS)));
 
 	/* Set up the primary fmgr lookup information */
 	fmgr_info_cxt(foid, &(sexpr->func), sexprCxt);
@@ -687,7 +714,7 @@ init_sexpr(Oid foid, Oid input_collation, Expr *node,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("set-valued function called in context that cannot accept a set"),
 				 parent ? executor_errposition(parent->state,
-										  exprLocation((Node *) node)) : 0));
+											   exprLocation((Node *) node)) : 0));
 
 	/* Otherwise, caller should have marked the sexpr correctly */
 	Assert(sexpr->func.fn_retset == sexpr->funcReturnsSet);
@@ -707,7 +734,8 @@ init_sexpr(Oid foid, Oid input_collation, Expr *node,
 		/* Must save tupdesc in sexpr's context */
 		oldcontext = MemoryContextSwitchTo(sexprCxt);
 
-		if (functypclass == TYPEFUNC_COMPOSITE)
+		if (functypclass == TYPEFUNC_COMPOSITE ||
+			functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
 		{
 			/* Composite data type, e.g. a table's row type */
 			Assert(tupdesc);
@@ -897,14 +925,14 @@ tupledesc_match(TupleDesc dst_tupdesc, TupleDesc src_tupdesc)
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("function return row and query-specified return row do not match"),
 				 errdetail_plural("Returned row contains %d attribute, but query expects %d.",
-				"Returned row contains %d attributes, but query expects %d.",
+								  "Returned row contains %d attributes, but query expects %d.",
 								  src_tupdesc->natts,
 								  src_tupdesc->natts, dst_tupdesc->natts)));
 
 	for (i = 0; i < dst_tupdesc->natts; i++)
 	{
-		Form_pg_attribute dattr = dst_tupdesc->attrs[i];
-		Form_pg_attribute sattr = src_tupdesc->attrs[i];
+		Form_pg_attribute dattr = TupleDescAttr(dst_tupdesc, i);
+		Form_pg_attribute sattr = TupleDescAttr(src_tupdesc, i);
 
 		if (IsBinaryCoercible(sattr->atttypid, dattr->atttypid))
 			continue;			/* no worries */

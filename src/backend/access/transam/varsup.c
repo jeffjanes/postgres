@@ -67,7 +67,7 @@ GetNewTransactionId(bool isSubXact)
 		return BootstrapTransactionId;
 	}
 
-	/* safety check, we should never get this far in a HS slave */
+	/* safety check, we should never get this far in a HS standby */
 	if (RecoveryInProgress())
 		elog(ERROR, "cannot assign TransactionIds during recovery");
 
@@ -272,7 +272,7 @@ AdvanceOldestClogXid(TransactionId oldest_datfrozenxid)
 {
 	LWLockAcquire(CLogTruncationLock, LW_EXCLUSIVE);
 	if (TransactionIdPrecedes(ShmemVariableCache->oldestClogXid,
-		oldest_datfrozenxid))
+							  oldest_datfrozenxid))
 	{
 		ShmemVariableCache->oldestClogXid = oldest_datfrozenxid;
 	}
@@ -399,11 +399,11 @@ SetTransactionIdLimit(TransactionId oldest_datfrozenxid, Oid oldest_datoid)
 
 		if (oldest_datname)
 			ereport(WARNING,
-			(errmsg("database \"%s\" must be vacuumed within %u transactions",
-					oldest_datname,
-					xidWrapLimit - curXid),
-			 errhint("To avoid a database shutdown, execute a database-wide VACUUM in that database.\n"
-					 "You might also need to commit or roll back old prepared transactions.")));
+					(errmsg("database \"%s\" must be vacuumed within %u transactions",
+							oldest_datname,
+							xidWrapLimit - curXid),
+					 errhint("To avoid a database shutdown, execute a database-wide VACUUM in that database.\n"
+							 "You might also need to commit or roll back old prepared transactions.")));
 		else
 			ereport(WARNING,
 					(errmsg("database with OID %u must be vacuumed within %u transactions",
@@ -468,7 +468,7 @@ GetNewObjectId(void)
 {
 	Oid			result;
 
-	/* safety check, we should never get this far in a HS slave */
+	/* safety check, we should never get this far in a HS standby */
 	if (RecoveryInProgress())
 		elog(ERROR, "cannot assign OIDs during recovery");
 

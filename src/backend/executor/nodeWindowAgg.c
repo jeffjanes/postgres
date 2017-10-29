@@ -49,6 +49,7 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/regproc.h"
 #include "utils/syscache.h"
 #include "windowapi.h"
 
@@ -95,7 +96,7 @@ typedef struct WindowStatePerFuncData
 	int			aggno;			/* if so, index of its PerAggData */
 
 	WindowObject winobj;		/* object used in window function API */
-}	WindowStatePerFuncData;
+}			WindowStatePerFuncData;
 
 /*
  * For plain aggregate window functions, we also have one of these.
@@ -350,7 +351,7 @@ advance_windowaggregate(WindowAggState *winstate,
 	if (fcinfo->isnull && OidIsValid(peraggstate->invtransfn_oid))
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-		errmsg("moving-aggregate transition function must not return null")));
+				 errmsg("moving-aggregate transition function must not return null")));
 
 	/*
 	 * We must track the number of rows included in transValue, since to
@@ -599,7 +600,7 @@ finalize_windowaggregate(WindowAggState *winstate,
 								 perfuncstate->winCollation,
 								 (void *) winstate, NULL);
 		fcinfo.arg[0] = MakeExpandedObjectReadOnly(peraggstate->transValue,
-											   peraggstate->transValueIsNull,
+												   peraggstate->transValueIsNull,
 												   peraggstate->transtypeLen);
 		fcinfo.argnull[0] = peraggstate->transValueIsNull;
 		anynull = peraggstate->transValueIsNull;
@@ -1142,7 +1143,7 @@ begin_partition(WindowAggState *winstate)
 			winobj->markptr = tuplestore_alloc_read_pointer(winstate->buffer,
 															0);
 			winobj->readptr = tuplestore_alloc_read_pointer(winstate->buffer,
-														 EXEC_FLAG_BACKWARD);
+															EXEC_FLAG_BACKWARD);
 			winobj->markpos = -1;
 			winobj->seekpos = -1;
 		}
@@ -1587,12 +1588,15 @@ update_frametailpos(WindowObject winobj, TupleTableSlot *slot)
  *	returned rows is exactly the same as its outer subplan's result.
  * -----------------
  */
-TupleTableSlot *
-ExecWindowAgg(WindowAggState *winstate)
+static TupleTableSlot *
+ExecWindowAgg(PlanState *pstate)
 {
+	WindowAggState *winstate = castNode(WindowAggState, pstate);
 	ExprContext *econtext;
 	int			i;
 	int			numfuncs;
+
+	CHECK_FOR_INTERRUPTS();
 
 	if (winstate->all_done)
 		return NULL;
@@ -1631,7 +1635,7 @@ ExecWindowAgg(WindowAggState *winstate)
 				if (offset < 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					  errmsg("frame starting offset must not be negative")));
+							 errmsg("frame starting offset must not be negative")));
 			}
 		}
 		if (frameOptions & FRAMEOPTION_END_VALUE)
@@ -1656,7 +1660,7 @@ ExecWindowAgg(WindowAggState *winstate)
 				if (offset < 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("frame ending offset must not be negative")));
+							 errmsg("frame ending offset must not be negative")));
 			}
 		}
 		winstate->all_first = false;
@@ -1732,8 +1736,8 @@ ExecWindowAgg(WindowAggState *winstate)
 		if (perfuncstate->plain_agg)
 			continue;
 		eval_windowfunction(winstate, perfuncstate,
-			  &(econtext->ecxt_aggvalues[perfuncstate->wfuncstate->wfuncno]),
-			  &(econtext->ecxt_aggnulls[perfuncstate->wfuncstate->wfuncno]));
+							&(econtext->ecxt_aggvalues[perfuncstate->wfuncstate->wfuncno]),
+							&(econtext->ecxt_aggnulls[perfuncstate->wfuncstate->wfuncno]));
 	}
 
 	/*
@@ -1788,6 +1792,7 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 	winstate = makeNode(WindowAggState);
 	winstate->ss.ps.plan = (Plan *) node;
 	winstate->ss.ps.state = estate;
+	winstate->ss.ps.ExecProcNode = ExecWindowAgg;
 
 	/*
 	 * Create expression contexts.  We need two, one for per-input-tuple
@@ -1863,7 +1868,7 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 	/* Set up data for comparing tuples */
 	if (node->partNumCols > 0)
 		winstate->partEqfunctions = execTuplesMatchPrepare(node->partNumCols,
-														node->partOperators);
+														   node->partOperators);
 	if (node->ordNumCols > 0)
 		winstate->ordEqfunctions = execTuplesMatchPrepare(node->ordNumCols,
 														  node->ordOperators);
@@ -1895,7 +1900,7 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 		AclResult	aclresult;
 		int			i;
 
-		if (wfunc->winref != node->winref)		/* planner screwed up? */
+		if (wfunc->winref != node->winref)	/* planner screwed up? */
 			elog(ERROR, "WindowFunc with winref %u assigned to WindowAgg with winref %u",
 				 wfunc->winref, node->winref);
 
@@ -2092,10 +2097,12 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	Oid			aggtranstype;
 	AttrNumber	initvalAttNo;
 	AclResult	aclresult;
+	bool		use_ma_code;
 	Oid			transfn_oid,
 				invtransfn_oid,
 				finalfn_oid;
 	bool		finalextra;
+	char		finalmodify;
 	Expr	   *transfnexpr,
 			   *invtransfnexpr,
 			   *finalfnexpr;
@@ -2121,20 +2128,32 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	 * Figure out whether we want to use the moving-aggregate implementation,
 	 * and collect the right set of fields from the pg_attribute entry.
 	 *
-	 * If the frame head can't move, we don't need moving-aggregate code. Even
-	 * if we'd like to use it, don't do so if the aggregate's arguments (and
-	 * FILTER clause if any) contain any calls to volatile functions.
-	 * Otherwise, the difference between restarting and not restarting the
-	 * aggregation would be user-visible.
+	 * It's possible that an aggregate would supply a safe moving-aggregate
+	 * implementation and an unsafe normal one, in which case our hand is
+	 * forced.  Otherwise, if the frame head can't move, we don't need
+	 * moving-aggregate code.  Even if we'd like to use it, don't do so if the
+	 * aggregate's arguments (and FILTER clause if any) contain any calls to
+	 * volatile functions.  Otherwise, the difference between restarting and
+	 * not restarting the aggregation would be user-visible.
 	 */
-	if (OidIsValid(aggform->aggminvtransfn) &&
-		!(winstate->frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING) &&
-		!contain_volatile_functions((Node *) wfunc))
+	if (!OidIsValid(aggform->aggminvtransfn))
+		use_ma_code = false;	/* sine qua non */
+	else if (aggform->aggmfinalmodify == AGGMODIFY_READ_ONLY &&
+			 aggform->aggfinalmodify != AGGMODIFY_READ_ONLY)
+		use_ma_code = true;		/* decision forced by safety */
+	else if (winstate->frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING)
+		use_ma_code = false;	/* non-moving frame head */
+	else if (contain_volatile_functions((Node *) wfunc))
+		use_ma_code = false;	/* avoid possible behavioral change */
+	else
+		use_ma_code = true;		/* yes, let's use it */
+	if (use_ma_code)
 	{
 		peraggstate->transfn_oid = transfn_oid = aggform->aggmtransfn;
 		peraggstate->invtransfn_oid = invtransfn_oid = aggform->aggminvtransfn;
 		peraggstate->finalfn_oid = finalfn_oid = aggform->aggmfinalfn;
 		finalextra = aggform->aggmfinalextra;
+		finalmodify = aggform->aggmfinalmodify;
 		aggtranstype = aggform->aggmtranstype;
 		initvalAttNo = Anum_pg_aggregate_aggminitval;
 	}
@@ -2144,6 +2163,7 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 		peraggstate->invtransfn_oid = invtransfn_oid = InvalidOid;
 		peraggstate->finalfn_oid = finalfn_oid = aggform->aggfinalfn;
 		finalextra = aggform->aggfinalextra;
+		finalmodify = aggform->aggfinalmodify;
 		aggtranstype = aggform->aggtranstype;
 		initvalAttNo = Anum_pg_aggregate_agginitval;
 	}
@@ -2194,6 +2214,17 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 		}
 	}
 
+	/*
+	 * If the selected finalfn isn't read-only, we can't run this aggregate as
+	 * a window function.  This is a user-facing error, so we take a bit more
+	 * care with the error message than elsewhere in this function.
+	 */
+	if (finalmodify != AGGMODIFY_READ_ONLY)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("aggregate function %s does not support use as a window function",
+						format_procedure(wfunc->winfnoid))));
+
 	/* Detect how many arguments to pass to the finalfn */
 	if (finalextra)
 		peraggstate->numFinalArgs = numArguments + 1;
@@ -2209,7 +2240,7 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	/* build expression trees using actual argument & result types */
 	build_aggregate_transfn_expr(inputTypes,
 								 numArguments,
-								 0,		/* no ordered-set window functions yet */
+								 0, /* no ordered-set window functions yet */
 								 false, /* no variadic window functions yet */
 								 aggtranstype,
 								 wfunc->inputcollid,
@@ -2370,6 +2401,9 @@ window_gettupleslot(WindowObject winobj, int64 pos, TupleTableSlot *slot)
 {
 	WindowAggState *winstate = winobj->winstate;
 	MemoryContext oldcontext;
+
+	/* often called repeatedly in a row */
+	CHECK_FOR_INTERRUPTS();
 
 	/* Don't allow passing -1 to spool_tuples here */
 	if (pos < 0)

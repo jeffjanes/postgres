@@ -58,12 +58,12 @@ inet_cidr_ntop(int af, const void *src, int bits, char *dst, size_t size)
 	switch (af)
 	{
 		case PGSQL_AF_INET:
-			return (inet_cidr_ntop_ipv4(src, bits, dst, size));
+			return inet_cidr_ntop_ipv4(src, bits, dst, size);
 		case PGSQL_AF_INET6:
-			return (inet_cidr_ntop_ipv6(src, bits, dst, size));
+			return inet_cidr_ntop_ipv6(src, bits, dst, size);
 		default:
 			errno = EAFNOSUPPORT;
-			return (NULL);
+			return NULL;
 	}
 }
 
@@ -92,7 +92,7 @@ inet_cidr_ntop_ipv4(const u_char *src, int bits, char *dst, size_t size)
 	if (bits < 0 || bits > 32)
 	{
 		errno = EINVAL;
-		return (NULL);
+		return NULL;
 	}
 
 	if (bits == 0)
@@ -137,11 +137,11 @@ inet_cidr_ntop_ipv4(const u_char *src, int bits, char *dst, size_t size)
 	if (size <= sizeof "/32")
 		goto emsgsize;
 	dst += SPRINTF((dst, "/%u", bits));
-	return (odst);
+	return odst;
 
 emsgsize:
 	errno = EMSGSIZE;
-	return (NULL);
+	return NULL;
 }
 
 /*
@@ -182,7 +182,7 @@ inet_cidr_ntop_ipv6(const u_char *src, int bits, char *dst, size_t size)
 	if (bits < 0 || bits > 128)
 	{
 		errno = EINVAL;
-		return (NULL);
+		return NULL;
 	}
 
 	cp = outbuf;
@@ -241,8 +241,8 @@ inet_cidr_ntop_ipv6(const u_char *src, int bits, char *dst, size_t size)
 		}
 
 		if (zero_l != words && zero_s == 0 && ((zero_l == 6) ||
-						  ((zero_l == 5 && s[10] == 0xff && s[11] == 0xff) ||
-						   ((zero_l == 7 && s[14] != 0 && s[15] != 1)))))
+											   ((zero_l == 5 && s[10] == 0xff && s[11] == 0xff) ||
+												((zero_l == 7 && s[14] != 0 && s[15] != 1)))))
 			is_ipv4 = 1;
 
 		/* Format whole words. */
@@ -286,9 +286,9 @@ inet_cidr_ntop_ipv6(const u_char *src, int bits, char *dst, size_t size)
 		goto emsgsize;
 	strcpy(dst, outbuf);
 
-	return (dst);
+	return dst;
 
 emsgsize:
 	errno = EMSGSIZE;
-	return (NULL);
+	return NULL;
 }

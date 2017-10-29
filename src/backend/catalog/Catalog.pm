@@ -19,7 +19,7 @@ use warnings;
 require Exporter;
 our @ISA       = qw(Exporter);
 our @EXPORT    = ();
-our @EXPORT_OK = qw(Catalogs SplitDataLine RenameTempFile);
+our @EXPORT_OK = qw(Catalogs SplitDataLine RenameTempFile FindDefinedSymbol);
 
 # Call this function with an array of names of header files to parse.
 # Returns a nested data structure describing the data in the headers.
@@ -80,10 +80,11 @@ sub Catalogs
 			{
 				$catalog{natts} = $1;
 			}
-			elsif (/^DATA\(insert(\s+OID\s+=\s+(\d+))?\s+\(\s*(.*)\s*\)\s*\)$/)
+			elsif (
+				/^DATA\(insert(\s+OID\s+=\s+(\d+))?\s+\(\s*(.*)\s*\)\s*\)$/)
 			{
-				check_natts($filename, $catalog{natts}, $3,
-							$input_file, $input_line_number);
+				check_natts($filename, $catalog{natts}, $3, $input_file,
+					$input_line_number);
 
 				push @{ $catalog{data} }, { oid => $2, bki_values => $3 };
 			}
@@ -251,19 +252,53 @@ sub RenameTempFile
 	rename($temp_name, $final_name) || die "rename: $temp_name: $!";
 }
 
+
+# Find a symbol defined in a particular header file and extract the value.
+#
+# The include path has to be passed as a reference to an array.
+sub FindDefinedSymbol
+{
+	my ($catalog_header, $include_path, $symbol) = @_;
+
+	for my $path (@$include_path)
+	{
+
+		# Make sure include path ends in a slash.
+		if (substr($path, -1) ne '/')
+		{
+			$path .= '/';
+		}
+		my $file = $path . $catalog_header;
+		next if !-f $file;
+		open(my $find_defined_symbol, '<', $file) || die "$file: $!";
+		while (<$find_defined_symbol>)
+		{
+			if (/^#define\s+\Q$symbol\E\s+(\S+)/)
+			{
+				return $1;
+			}
+		}
+		close $find_defined_symbol;
+		die "$file: no definition found for $symbol\n";
+	}
+	die "$catalog_header: not found in any include directory\n";
+}
+
+
 # verify the number of fields in the passed-in DATA line
 sub check_natts
 {
 	my ($catname, $natts, $bki_val, $file, $line) = @_;
 
-	die "Could not find definition for Natts_${catname} before start of DATA() in $file\n"
-		unless defined $natts;
+	die
+"Could not find definition for Natts_${catname} before start of DATA() in $file\n"
+	  unless defined $natts;
 
 	my $nfields = scalar(SplitDataLine($bki_val));
 
 	die sprintf
-		"Wrong number of attributes in DATA() entry at %s:%d (expected %d but got %d)\n",
-		$file, $line, $natts, $nfields
+"Wrong number of attributes in DATA() entry at %s:%d (expected %d but got %d)\n",
+	  $file, $line, $natts, $nfields
 	  unless $natts == $nfields;
 }
 

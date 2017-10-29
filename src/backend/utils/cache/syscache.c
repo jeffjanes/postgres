@@ -419,7 +419,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		8
 	},
-	{ForeignDataWrapperRelationId,		/* FOREIGNDATAWRAPPERNAME */
+	{ForeignDataWrapperRelationId,	/* FOREIGNDATAWRAPPERNAME */
 		ForeignDataWrapperNameIndexId,
 		1,
 		{
@@ -430,7 +430,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		2
 	},
-	{ForeignDataWrapperRelationId,		/* FOREIGNDATAWRAPPEROID */
+	{ForeignDataWrapperRelationId,	/* FOREIGNDATAWRAPPEROID */
 		ForeignDataWrapperOidIndexId,
 		1,
 		{
@@ -606,6 +606,50 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		128
 	},
+	{PublicationRelationId,		/* PUBLICATIONNAME */
+		PublicationNameIndexId,
+		1,
+		{
+			Anum_pg_publication_pubname,
+			0,
+			0,
+			0
+		},
+		8
+	},
+	{PublicationRelationId,		/* PUBLICATIONOID */
+		PublicationObjectIndexId,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		8
+	},
+	{PublicationRelRelationId,	/* PUBLICATIONREL */
+		PublicationRelObjectIndexId,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		64
+	},
+	{PublicationRelRelationId,	/* PUBLICATIONRELMAP */
+		PublicationRelPrrelidPrpubidIndexId,
+		2,
+		{
+			Anum_pg_publication_rel_prrelid,
+			Anum_pg_publication_rel_prpubid,
+			0,
+			0
+		},
+		64
+	},
 	{RangeRelationId,			/* RANGETYPE */
 		RangeTypidIndexId,
 		1,
@@ -639,7 +683,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		128
 	},
-	{ReplicationOriginRelationId,		/* REPLORIGIDENT */
+	{ReplicationOriginRelationId,	/* REPLORIGIDENT */
 		ReplicationOriginIdentIndex,
 		1,
 		{
@@ -650,7 +694,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		16
 	},
-	{ReplicationOriginRelationId,		/* REPLORIGNAME */
+	{ReplicationOriginRelationId,	/* REPLORIGNAME */
 		ReplicationOriginNameIndex,
 		1,
 		{
@@ -660,50 +704,6 @@ static const struct cachedesc cacheinfo[] = {
 			0
 		},
 		16
-	},
-	{PublicationRelationId,			/* PUBLICATIONOID */
-		PublicationObjectIndexId,
-		1,
-		{
-			ObjectIdAttributeNumber,
-			0,
-			0,
-			0
-		},
-		8
-	},
-	{PublicationRelationId,			/* PUBLICATIONNAME */
-		PublicationNameIndexId,
-		1,
-		{
-			Anum_pg_publication_pubname,
-			0,
-			0,
-			0
-		},
-		8
-	},
-	{PublicationRelRelationId,		/* PUBLICATIONREL */
-		PublicationRelObjectIndexId,
-		1,
-		{
-			ObjectIdAttributeNumber,
-			0,
-			0,
-			0
-		},
-		64
-	},
-	{PublicationRelRelationId,		/* PUBLICATIONRELMAP */
-		PublicationRelPrrelidPrpubidIndexId,
-		2,
-		{
-			Anum_pg_publication_rel_prrelid,
-			Anum_pg_publication_rel_prpubid,
-			0,
-			0
-		},
-		64
 	},
 	{RewriteRelationId,			/* RULERELNAME */
 		RewriteRelRulenameIndexId,
@@ -716,7 +716,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		8
 	},
-	{SequenceRelationId,			/* SEQRELID */
+	{SequenceRelationId,		/* SEQRELID */
 		SequenceRelidIndexId,
 		1,
 		{
@@ -760,18 +760,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		128
 	},
-	{SubscriptionRelationId,		/* SUBSCRIPTIONOID */
-		SubscriptionObjectIndexId,
-		1,
-		{
-			ObjectIdAttributeNumber,
-			0,
-			0,
-			0
-		},
-		4
-	},
-	{SubscriptionRelationId,		/* SUBSCRIPTIONNAME */
+	{SubscriptionRelationId,	/* SUBSCRIPTIONNAME */
 		SubscriptionNameIndexId,
 		2,
 		{
@@ -782,7 +771,18 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		4
 	},
-	{SubscriptionRelRelationId,		/* SUBSCRIPTIONRELMAP */
+	{SubscriptionRelationId,	/* SUBSCRIPTIONOID */
+		SubscriptionObjectIndexId,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		4
+	},
+	{SubscriptionRelRelationId, /* SUBSCRIPTIONRELMAP */
 		SubscriptionRelSrrelidSrsubidIndexId,
 		2,
 		{
@@ -971,8 +971,6 @@ static const struct cachedesc cacheinfo[] = {
 	}
 };
 
-#define SysCacheSize	((int) lengthof(cacheinfo))
-
 static CatCache *SysCache[SysCacheSize];
 
 static bool CacheInitialized = false;
@@ -1002,6 +1000,9 @@ InitCatalogCache(void)
 	int			cacheId;
 	int			i,
 				j;
+
+	StaticAssertStmt(SysCacheSize == (int) lengthof(cacheinfo),
+					 "SysCacheSize does not match syscache.c's array");
 
 	Assert(!CacheInitialized);
 
@@ -1101,11 +1102,54 @@ SearchSysCache(int cacheId,
 			   Datum key3,
 			   Datum key4)
 {
-	if (cacheId < 0 || cacheId >= SysCacheSize ||
-		!PointerIsValid(SysCache[cacheId]))
-		elog(ERROR, "invalid cache ID: %d", cacheId);
+	Assert(cacheId >= 0 && cacheId < SysCacheSize &&
+		   PointerIsValid(SysCache[cacheId]));
 
 	return SearchCatCache(SysCache[cacheId], key1, key2, key3, key4);
+}
+
+HeapTuple
+SearchSysCache1(int cacheId,
+				Datum key1)
+{
+	Assert(cacheId >= 0 && cacheId < SysCacheSize &&
+		   PointerIsValid(SysCache[cacheId]));
+	Assert(SysCache[cacheId]->cc_nkeys == 1);
+
+	return SearchCatCache1(SysCache[cacheId], key1);
+}
+
+HeapTuple
+SearchSysCache2(int cacheId,
+				Datum key1, Datum key2)
+{
+	Assert(cacheId >= 0 && cacheId < SysCacheSize &&
+		   PointerIsValid(SysCache[cacheId]));
+	Assert(SysCache[cacheId]->cc_nkeys == 2);
+
+	return SearchCatCache2(SysCache[cacheId], key1, key2);
+}
+
+HeapTuple
+SearchSysCache3(int cacheId,
+				Datum key1, Datum key2, Datum key3)
+{
+	Assert(cacheId >= 0 && cacheId < SysCacheSize &&
+		   PointerIsValid(SysCache[cacheId]));
+	Assert(SysCache[cacheId]->cc_nkeys == 3);
+
+	return SearchCatCache3(SysCache[cacheId], key1, key2, key3);
+}
+
+HeapTuple
+SearchSysCache4(int cacheId,
+				Datum key1, Datum key2, Datum key3, Datum key4)
+{
+	Assert(cacheId >= 0 && cacheId < SysCacheSize &&
+		   PointerIsValid(SysCache[cacheId]));
+	Assert(SysCache[cacheId]->cc_nkeys == 4);
+
+	return SearchCatCache4(SysCache[cacheId], key1, key2, key3, key4);
 }
 
 /*
@@ -1256,6 +1300,52 @@ SearchSysCacheExistsAttName(Oid relid, const char *attname)
 
 
 /*
+ * SearchSysCacheAttNum
+ *
+ * This routine is equivalent to SearchSysCache on the ATTNUM cache,
+ * except that it will return NULL if the found attribute is marked
+ * attisdropped.  This is convenient for callers that want to act as
+ * though dropped attributes don't exist.
+ */
+HeapTuple
+SearchSysCacheAttNum(Oid relid, int16 attnum)
+{
+	HeapTuple	tuple;
+
+	tuple = SearchSysCache2(ATTNUM,
+							ObjectIdGetDatum(relid),
+							Int16GetDatum(attnum));
+	if (!HeapTupleIsValid(tuple))
+		return NULL;
+	if (((Form_pg_attribute) GETSTRUCT(tuple))->attisdropped)
+	{
+		ReleaseSysCache(tuple);
+		return NULL;
+	}
+	return tuple;
+}
+
+/*
+ * SearchSysCacheCopyAttNum
+ *
+ * As above, an attisdropped-aware version of SearchSysCacheCopy.
+ */
+HeapTuple
+SearchSysCacheCopyAttNum(Oid relid, int16 attnum)
+{
+	HeapTuple	tuple,
+				newtuple;
+
+	tuple = SearchSysCacheAttNum(relid, attnum);
+	if (!HeapTupleIsValid(tuple))
+		return NULL;
+	newtuple = heap_copytuple(tuple);
+	ReleaseSysCache(tuple);
+	return newtuple;
+}
+
+
+/*
  * SysCacheGetAttr
  *
  *		Given a tuple previously fetched by SearchSysCache(),
@@ -1336,6 +1426,27 @@ SearchSysCacheList(int cacheId, int nkeys,
 
 	return SearchCatCacheList(SysCache[cacheId], nkeys,
 							  key1, key2, key3, key4);
+}
+
+/*
+ * SysCacheInvalidate
+ *
+ *	Invalidate entries in the specified cache, given a hash value.
+ *	See CatCacheInvalidate() for more info.
+ *
+ *	This routine is only quasi-public: it should only be used by inval.c.
+ */
+void
+SysCacheInvalidate(int cacheId, uint32 hashValue)
+{
+	if (cacheId < 0 || cacheId >= SysCacheSize)
+		elog(ERROR, "invalid cache ID: %d", cacheId);
+
+	/* if this cache isn't initialized yet, no need to do anything */
+	if (!PointerIsValid(SysCache[cacheId]))
+		return;
+
+	CatCacheInvalidate(SysCache[cacheId], hashValue);
 }
 
 /*

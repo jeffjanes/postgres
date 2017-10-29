@@ -41,6 +41,9 @@ typedef struct
 	int			num_vars;		/* number of plain Var tlist entries */
 	bool		has_ph_vars;	/* are there PlaceHolderVar entries? */
 	bool		has_non_vars;	/* are there other entries? */
+	bool		has_conv_whole_rows;	/* are there ConvertRowtypeExpr
+										 * entries encapsulating a whole-row
+										 * Var? */
 	tlist_vinfo vars[FLEXIBLE_ARRAY_MEMBER];	/* has num_vars entries */
 } indexed_tlist;
 
@@ -139,6 +142,7 @@ static List *set_returning_clause_references(PlannerInfo *root,
 								int rtoffset);
 static bool extract_query_dependencies_walker(Node *node,
 								  PlannerInfo *context);
+static bool is_converted_whole_row_reference(Node *node);
 
 /*****************************************************************************
  *
@@ -297,7 +301,7 @@ add_rtes_to_flat_rtable(PlannerInfo *root, bool recursing)
 
 			if (rel != NULL)
 			{
-				Assert(rel->relid == rti);		/* sanity check on array */
+				Assert(rel->relid == rti);	/* sanity check on array */
 
 				/*
 				 * The subquery might never have been planned at all, if it
@@ -882,11 +886,23 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				/*
 				 * If the main target relation is a partitioned table, the
 				 * following list contains the RT indexes of partitioned child
-				 * relations, which are not included in the above list.
+				 * relations including the root, which are not included in the
+				 * above list.  We also keep RT indexes of the roots
+				 * separately to be identitied as such during the executor
+				 * initialization.
 				 */
-				root->glob->nonleafResultRelations =
-					list_concat(root->glob->nonleafResultRelations,
-								list_copy(splan->partitioned_rels));
+				if (splan->partitioned_rels != NIL)
+				{
+					root->glob->nonleafResultRelations =
+						list_concat(root->glob->nonleafResultRelations,
+									list_copy(splan->partitioned_rels));
+					/* Remember where this root will be in the global list. */
+					splan->rootResultRelIndex =
+						list_length(root->glob->rootResultRelations);
+					root->glob->rootResultRelations =
+						lappend_int(root->glob->rootResultRelations,
+									linitial_int(splan->partitioned_rels));
+				}
 			}
 			break;
 		case T_Append:
@@ -1381,13 +1397,7 @@ fix_expr_common(PlannerInfo *root, Node *node)
 	{
 		set_sa_opfuncid((ScalarArrayOpExpr *) node);
 		record_plan_function_dependency(root,
-									 ((ScalarArrayOpExpr *) node)->opfuncid);
-	}
-	else if (IsA(node, ArrayCoerceExpr))
-	{
-		if (OidIsValid(((ArrayCoerceExpr *) node)->elemfuncid))
-			record_plan_function_dependency(root,
-									 ((ArrayCoerceExpr *) node)->elemfuncid);
+										((ScalarArrayOpExpr *) node)->opfuncid);
 	}
 	else if (IsA(node, Const))
 	{
@@ -1734,8 +1744,8 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 		TargetEntry *tle = (TargetEntry *) lfirst(l);
 		Node	   *newexpr;
 
-		/* If it's a non-Var sort/group item, first try to match by sortref */
-		if (tle->ressortgroupref != 0 && !IsA(tle->expr, Var))
+		/* If it's a sort/group item, first try to match by sortref */
+		if (tle->ressortgroupref != 0)
 		{
 			newexpr = (Node *)
 				search_indexed_tlist_for_sortgroupref(tle->expr,
@@ -1896,7 +1906,7 @@ set_dummy_tlist_references(Plan *plan, int rtoffset)
 		}
 		else
 		{
-			newvar->varnoold = 0;		/* wasn't ever a plain Var */
+			newvar->varnoold = 0;	/* wasn't ever a plain Var */
 			newvar->varoattno = 0;
 		}
 
@@ -1938,6 +1948,7 @@ build_tlist_index(List *tlist)
 	itlist->tlist = tlist;
 	itlist->has_ph_vars = false;
 	itlist->has_non_vars = false;
+	itlist->has_conv_whole_rows = false;
 
 	/* Find the Vars and fill in the index array */
 	vinfo = itlist->vars;
@@ -1956,6 +1967,8 @@ build_tlist_index(List *tlist)
 		}
 		else if (tle->expr && IsA(tle->expr, PlaceHolderVar))
 			itlist->has_ph_vars = true;
+		else if (is_converted_whole_row_reference((Node *) tle->expr))
+			itlist->has_conv_whole_rows = true;
 		else
 			itlist->has_non_vars = true;
 	}
@@ -1971,7 +1984,10 @@ build_tlist_index(List *tlist)
  * This is like build_tlist_index, but we only index tlist entries that
  * are Vars belonging to some rel other than the one specified.  We will set
  * has_ph_vars (allowing PlaceHolderVars to be matched), but not has_non_vars
- * (so nothing other than Vars and PlaceHolderVars can be matched).
+ * (so nothing other than Vars and PlaceHolderVars can be matched). In case of
+ * DML, where this function will be used, returning lists from child relations
+ * will be appended similar to a simple append relation. That does not require
+ * fixing ConvertRowtypeExpr references. So, those are not considered here.
  */
 static indexed_tlist *
 build_tlist_index_other_vars(List *tlist, Index ignore_rel)
@@ -1988,6 +2004,7 @@ build_tlist_index_other_vars(List *tlist, Index ignore_rel)
 	itlist->tlist = tlist;
 	itlist->has_ph_vars = false;
 	itlist->has_non_vars = false;
+	itlist->has_conv_whole_rows = false;
 
 	/* Find the desired Vars and fill in the index array */
 	vinfo = itlist->vars;
@@ -2096,7 +2113,6 @@ search_indexed_tlist_for_non_var(Expr *node,
 
 /*
  * search_indexed_tlist_for_sortgroupref --- find a sort/group expression
- *		(which is assumed not to be just a Var)
  *
  * If a match is found, return a Var constructed to reference the tlist item.
  * If no match, return NULL.
@@ -2125,7 +2141,7 @@ search_indexed_tlist_for_sortgroupref(Expr *node,
 			Var		   *newvar;
 
 			newvar = makeVarFromTargetEntry(newvarno, tle);
-			newvar->varnoold = 0;		/* wasn't ever a plain Var */
+			newvar->varnoold = 0;	/* wasn't ever a plain Var */
 			newvar->varoattno = 0;
 			return newvar;
 		}
@@ -2191,6 +2207,7 @@ static Node *
 fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 {
 	Var		   *newvar;
+	bool		converted_whole_row;
 
 	if (node == NULL)
 		return NULL;
@@ -2260,8 +2277,12 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 	}
 	if (IsA(node, Param))
 		return fix_param_node(context->root, (Param *) node);
+
 	/* Try matching more complex expressions too, if tlists have any */
-	if (context->outer_itlist && context->outer_itlist->has_non_vars)
+	converted_whole_row = is_converted_whole_row_reference(node);
+	if (context->outer_itlist &&
+		(context->outer_itlist->has_non_vars ||
+		 (context->outer_itlist->has_conv_whole_rows && converted_whole_row)))
 	{
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->outer_itlist,
@@ -2269,7 +2290,9 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
 		if (newvar)
 			return (Node *) newvar;
 	}
-	if (context->inner_itlist && context->inner_itlist->has_non_vars)
+	if (context->inner_itlist &&
+		(context->inner_itlist->has_non_vars ||
+		 (context->inner_itlist->has_conv_whole_rows && converted_whole_row)))
 	{
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->inner_itlist,
@@ -2389,7 +2412,9 @@ fix_upper_expr_mutator(Node *node, fix_upper_expr_context *context)
 		/* If no match, just fall through to process it normally */
 	}
 	/* Try matching more complex expressions too, if tlist has any */
-	if (context->subplan_itlist->has_non_vars)
+	if (context->subplan_itlist->has_non_vars ||
+		(context->subplan_itlist->has_conv_whole_rows &&
+		 is_converted_whole_row_reference(node)))
 	{
 		newvar = search_indexed_tlist_for_non_var((Expr *) node,
 												  context->subplan_itlist,
@@ -2502,7 +2527,7 @@ record_plan_function_dependency(PlannerInfo *root, Oid funcid)
 		 */
 		inval_item->cacheId = PROCOID;
 		inval_item->hashValue = GetSysCacheHashValue1(PROCOID,
-												   ObjectIdGetDatum(funcid));
+													  ObjectIdGetDatum(funcid));
 
 		root->glob->invalItems = lappend(root->glob->invalItems, inval_item);
 	}
@@ -2595,4 +2620,34 @@ extract_query_dependencies_walker(Node *node, PlannerInfo *context)
 	}
 	return expression_tree_walker(node, extract_query_dependencies_walker,
 								  (void *) context);
+}
+
+/*
+ * is_converted_whole_row_reference
+ *		If the given node is a ConvertRowtypeExpr encapsulating a whole-row
+ *		reference as implicit cast, return true. Otherwise return false.
+ */
+static bool
+is_converted_whole_row_reference(Node *node)
+{
+	ConvertRowtypeExpr *convexpr;
+
+	if (!node || !IsA(node, ConvertRowtypeExpr))
+		return false;
+
+	/* Traverse nested ConvertRowtypeExpr's. */
+	convexpr = castNode(ConvertRowtypeExpr, node);
+	while (convexpr->convertformat == COERCE_IMPLICIT_CAST &&
+		   IsA(convexpr->arg, ConvertRowtypeExpr))
+		convexpr = castNode(ConvertRowtypeExpr, convexpr->arg);
+
+	if (IsA(convexpr->arg, Var))
+	{
+		Var		   *var = castNode(Var, convexpr->arg);
+
+		if (var->varattno == 0)
+			return true;
+	}
+
+	return false;
 }

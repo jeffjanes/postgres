@@ -190,7 +190,8 @@ brininsert(Relation idxRel, Datum *values, bool *nulls,
 				AutoVacuumRequestWork(AVW_BRINSummarizeRange,
 									  RelationGetRelid(idxRel),
 									  lastPageRange);
-			brin_free_tuple(lastPageTuple);
+			else
+				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 		}
 
 		brtup = brinGetTupleForHeapBlock(revmap, heapBlk, &buf, &off,
@@ -364,7 +365,7 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 	MemoryContext oldcxt;
 	MemoryContext perRangeCxt;
 	BrinMemTuple *dtup;
-	BrinTuple    *btup = NULL;
+	BrinTuple  *btup = NULL;
 	Size		btupsz = 0;
 
 	opaque = (BrinOpaque *) scan->opaque;
@@ -472,7 +473,8 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 					 */
 					Assert((key->sk_flags & SK_ISNULL) ||
 						   (key->sk_collation ==
-					  bdesc->bd_tupdesc->attrs[keyattno - 1]->attcollation));
+							TupleDescAttr(bdesc->bd_tupdesc,
+										  keyattno - 1)->attcollation));
 
 					/* First time this column? look up consistent function */
 					if (consistentFn[keyattno - 1].fn_oid == InvalidOid)
@@ -621,6 +623,7 @@ brinbuildCallback(Relation index,
 	{
 		FmgrInfo   *addValue;
 		BrinValues *col;
+		Form_pg_attribute attr = TupleDescAttr(state->bs_bdesc->bd_tupdesc, i);
 
 		col = &state->bs_dtuple->bt_columns[i];
 		addValue = index_getprocinfo(index, i + 1,
@@ -630,7 +633,7 @@ brinbuildCallback(Relation index,
 		 * Update dtuple state, if and as necessary.
 		 */
 		FunctionCall4Coll(addValue,
-						  state->bs_bdesc->bd_tupdesc->attrs[i]->attcollation,
+						  attr->attcollation,
 						  PointerGetDatum(state->bs_bdesc),
 						  PointerGetDatum(col),
 						  values[i], isnull[i]);
@@ -920,13 +923,13 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 Datum
 brin_desummarize_range(PG_FUNCTION_ARGS)
 {
-	Oid		indexoid = PG_GETARG_OID(0);
-	int64	heapBlk64 = PG_GETARG_INT64(1);
+	Oid			indexoid = PG_GETARG_OID(0);
+	int64		heapBlk64 = PG_GETARG_INT64(1);
 	BlockNumber heapBlk;
-	Oid		heapoid;
-	Relation heapRel;
-	Relation indexRel;
-	bool	done;
+	Oid			heapoid;
+	Relation	heapRel;
+	Relation	indexRel;
+	bool		done;
 
 	if (heapBlk64 > MaxBlockNumber || heapBlk64 < 0)
 	{
@@ -977,7 +980,8 @@ brin_desummarize_range(PG_FUNCTION_ARGS)
 						RelationGetRelationName(indexRel))));
 
 	/* the revmap does the hard work */
-	do {
+	do
+	{
 		done = brinRevmapDesummarizeRange(indexRel, heapBlk);
 	}
 	while (!done);
@@ -1017,12 +1021,12 @@ brin_build_desc(Relation rel)
 	for (keyno = 0; keyno < tupdesc->natts; keyno++)
 	{
 		FmgrInfo   *opcInfoFn;
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, keyno);
 
 		opcInfoFn = index_getprocinfo(rel, keyno + 1, BRIN_PROCNUM_OPCINFO);
 
 		opcinfo[keyno] = (BrinOpcInfo *)
-			DatumGetPointer(FunctionCall1(opcInfoFn,
-										  tupdesc->attrs[keyno]->atttypid));
+			DatumGetPointer(FunctionCall1(opcInfoFn, attr->atttypid));
 		totalstored += opcinfo[keyno]->oi_nstored;
 	}
 
@@ -1114,7 +1118,7 @@ terminate_brin_buildstate(BrinBuildState *state)
 
 		page = BufferGetPage(state->bs_currentInsertBuf);
 		RecordPageWithFreeSpace(state->bs_irel,
-							BufferGetBlockNumber(state->bs_currentInsertBuf),
+								BufferGetBlockNumber(state->bs_currentInsertBuf),
 								PageGetFreeSpace(page));
 		ReleaseBuffer(state->bs_currentInsertBuf);
 	}

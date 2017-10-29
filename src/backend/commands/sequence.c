@@ -93,15 +93,17 @@ static HTAB *seqhashtab = NULL; /* hash table for SeqTable items */
 static SeqTableData *last_used_seq = NULL;
 
 static void fill_seq_with_data(Relation rel, HeapTuple tuple);
-static Relation open_share_lock(SeqTable seq);
+static Relation lock_and_open_sequence(SeqTable seq);
 static void create_seq_hashtable(void);
 static void init_sequence(Oid relid, SeqTable *p_elm, Relation *p_rel);
 static Form_pg_sequence_data read_seq_tuple(Relation rel,
 			   Buffer *buf, HeapTuple seqdatatuple);
 static void init_params(ParseState *pstate, List *options, bool for_identity,
-						bool isInit,
-						Form_pg_sequence seqform,
-						Form_pg_sequence_data seqdataform, List **owned_by);
+			bool isInit,
+			Form_pg_sequence seqform,
+			Form_pg_sequence_data seqdataform,
+			bool *need_seq_rewrite,
+			List **owned_by);
 static void do_setval(Oid relid, int64 next, bool iscalled);
 static void process_owned_by(Relation seqrel, List *owned_by, bool for_identity);
 
@@ -115,6 +117,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 {
 	FormData_pg_sequence seqform;
 	FormData_pg_sequence_data seqdataform;
+	bool		need_seq_rewrite;
 	List	   *owned_by;
 	CreateStmt *stmt = makeNode(CreateStmt);
 	Oid			seqoid;
@@ -153,7 +156,9 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 	}
 
 	/* Check and set all option values */
-	init_params(pstate, seq->options, seq->for_identity, true, &seqform, &seqdataform, &owned_by);
+	init_params(pstate, seq->options, seq->for_identity, true,
+				&seqform, &seqdataform,
+				&need_seq_rewrite, &owned_by);
 
 	/*
 	 * Create relation (and fill value[] and null[] for the tuple)
@@ -167,6 +172,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 		coldef->is_local = true;
 		coldef->is_not_null = true;
 		coldef->is_from_type = false;
+		coldef->is_from_parent = false;
 		coldef->storage = 0;
 		coldef->raw_default = NULL;
 		coldef->cooked_default = NULL;
@@ -413,17 +419,23 @@ AlterSequence(ParseState *pstate, AlterSeqStmt *stmt)
 	SeqTable	elm;
 	Relation	seqrel;
 	Buffer		buf;
-	HeapTupleData seqdatatuple;
+	HeapTupleData datatuple;
 	Form_pg_sequence seqform;
-	Form_pg_sequence_data seqdata;
-	FormData_pg_sequence_data newseqdata;
+	Form_pg_sequence_data newdataform;
+	bool		need_seq_rewrite;
 	List	   *owned_by;
 	ObjectAddress address;
 	Relation	rel;
-	HeapTuple	tuple;
+	HeapTuple	seqtuple;
+	HeapTuple	newdatatuple;
 
-	/* Open and lock sequence. */
-	relid = RangeVarGetRelid(stmt->sequence, AccessShareLock, stmt->missing_ok);
+	/* Open and lock sequence, and check for ownership along the way. */
+	relid = RangeVarGetRelidExtended(stmt->sequence,
+									 ShareRowExclusiveLock,
+									 stmt->missing_ok,
+									 false,
+									 RangeVarCallbackOwnsRelation,
+									 NULL);
 	if (relid == InvalidOid)
 	{
 		ereport(NOTICE,
@@ -434,80 +446,68 @@ AlterSequence(ParseState *pstate, AlterSeqStmt *stmt)
 
 	init_sequence(relid, &elm, &seqrel);
 
-	/* allow ALTER to sequence owner only */
-	if (!pg_class_ownercheck(relid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
-					   stmt->sequence->relname);
-
-	/* lock page' buffer and read tuple into new sequence structure */
-	seqdata = read_seq_tuple(seqrel, &buf, &seqdatatuple);
-
-	/* Copy old values of options into workspace */
-	memcpy(&newseqdata, seqdata, sizeof(FormData_pg_sequence_data));
-
 	rel = heap_open(SequenceRelationId, RowExclusiveLock);
-	tuple = SearchSysCacheCopy1(SEQRELID,
-								ObjectIdGetDatum(relid));
-	if (!HeapTupleIsValid(tuple))
+	seqtuple = SearchSysCacheCopy1(SEQRELID,
+								   ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(seqtuple))
 		elog(ERROR, "cache lookup failed for sequence %u",
 			 relid);
 
-	seqform = (Form_pg_sequence) GETSTRUCT(tuple);
+	seqform = (Form_pg_sequence) GETSTRUCT(seqtuple);
+
+	/* lock page's buffer and read tuple into new sequence structure */
+	(void) read_seq_tuple(seqrel, &buf, &datatuple);
+
+	/* copy the existing sequence data tuple, so it can be modified locally */
+	newdatatuple = heap_copytuple(&datatuple);
+	newdataform = (Form_pg_sequence_data) GETSTRUCT(newdatatuple);
+
+	UnlockReleaseBuffer(buf);
 
 	/* Check and set new values */
-	init_params(pstate, stmt->options, stmt->for_identity, false, seqform, &newseqdata, &owned_by);
+	init_params(pstate, stmt->options, stmt->for_identity, false,
+				seqform, newdataform,
+				&need_seq_rewrite, &owned_by);
 
 	/* Clear local cache so that we don't think we have cached numbers */
 	/* Note that we do not change the currval() state */
 	elm->cached = elm->last;
 
-	/* check the comment above nextval_internal()'s equivalent call. */
-	if (RelationNeedsWAL(seqrel))
-		GetTopTransactionId();
-
-	/* Now okay to update the on-disk tuple */
-	START_CRIT_SECTION();
-
-	memcpy(seqdata, &newseqdata, sizeof(FormData_pg_sequence_data));
-
-	MarkBufferDirty(buf);
-
-	/* XLOG stuff */
-	if (RelationNeedsWAL(seqrel))
+	/* If needed, rewrite the sequence relation itself */
+	if (need_seq_rewrite)
 	{
-		xl_seq_rec	xlrec;
-		XLogRecPtr	recptr;
-		Page		page = BufferGetPage(buf);
+		/* check the comment above nextval_internal()'s equivalent call. */
+		if (RelationNeedsWAL(seqrel))
+			GetTopTransactionId();
 
-		XLogBeginInsert();
-		XLogRegisterBuffer(0, buf, REGBUF_WILL_INIT);
+		/*
+		 * Create a new storage file for the sequence, making the state
+		 * changes transactional.  We want to keep the sequence's relfrozenxid
+		 * at 0, since it won't contain any unfrozen XIDs.  Same with
+		 * relminmxid, since a sequence will never contain multixacts.
+		 */
+		RelationSetNewRelfilenode(seqrel, seqrel->rd_rel->relpersistence,
+								  InvalidTransactionId, InvalidMultiXactId);
 
-		xlrec.node = seqrel->rd_node;
-		XLogRegisterData((char *) &xlrec, sizeof(xl_seq_rec));
-
-		XLogRegisterData((char *) seqdatatuple.t_data, seqdatatuple.t_len);
-
-		recptr = XLogInsert(RM_SEQ_ID, XLOG_SEQ_LOG);
-
-		PageSetLSN(page, recptr);
+		/*
+		 * Insert the modified tuple into the new storage file.
+		 */
+		fill_seq_with_data(seqrel, newdatatuple);
 	}
-
-	END_CRIT_SECTION();
-
-	UnlockReleaseBuffer(buf);
 
 	/* process OWNED BY if given */
 	if (owned_by)
 		process_owned_by(seqrel, owned_by, stmt->for_identity);
 
+	/* update the pg_sequence tuple (we could skip this in some cases...) */
+	CatalogTupleUpdate(rel, &seqtuple->t_self, seqtuple);
+
 	InvokeObjectPostAlterHook(RelationRelationId, relid, 0);
 
 	ObjectAddressSet(address, RelationRelationId, relid);
 
-	relation_close(seqrel, NoLock);
-
-	CatalogTupleUpdate(rel, &tuple->t_self, tuple);
 	heap_close(rel, RowExclusiveLock);
+	relation_close(seqrel, NoLock);
 
 	return address;
 }
@@ -589,7 +589,7 @@ nextval_internal(Oid relid, bool check_permissions)
 	bool		cycle;
 	bool		logit = false;
 
-	/* open and AccessShareLock sequence */
+	/* open and lock sequence */
 	init_sequence(relid, &elm, &seqrel);
 
 	if (check_permissions &&
@@ -611,7 +611,7 @@ nextval_internal(Oid relid, bool check_permissions)
 	 */
 	PreventCommandIfParallelMode("nextval()");
 
-	if (elm->last != elm->cached)		/* some numbers were cached */
+	if (elm->last != elm->cached)	/* some numbers were cached */
 	{
 		Assert(elm->last_valid);
 		Assert(elm->increment != 0);
@@ -695,9 +695,9 @@ nextval_internal(Oid relid, bool check_permissions)
 
 					snprintf(buf, sizeof(buf), INT64_FORMAT, maxv);
 					ereport(ERROR,
-						  (errcode(ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED),
-						   errmsg("nextval: reached maximum value of sequence \"%s\" (%s)",
-								  RelationGetRelationName(seqrel), buf)));
+							(errcode(ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED),
+							 errmsg("nextval: reached maximum value of sequence \"%s\" (%s)",
+									RelationGetRelationName(seqrel), buf)));
 				}
 				next = minv;
 			}
@@ -718,9 +718,9 @@ nextval_internal(Oid relid, bool check_permissions)
 
 					snprintf(buf, sizeof(buf), INT64_FORMAT, minv);
 					ereport(ERROR,
-						  (errcode(ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED),
-						   errmsg("nextval: reached minimum value of sequence \"%s\" (%s)",
-								  RelationGetRelationName(seqrel), buf)));
+							(errcode(ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED),
+							 errmsg("nextval: reached minimum value of sequence \"%s\" (%s)",
+									RelationGetRelationName(seqrel), buf)));
 				}
 				next = maxv;
 			}
@@ -824,7 +824,7 @@ currval_oid(PG_FUNCTION_ARGS)
 	SeqTable	elm;
 	Relation	seqrel;
 
-	/* open and AccessShareLock sequence */
+	/* open and lock sequence */
 	init_sequence(relid, &elm, &seqrel);
 
 	if (pg_class_aclcheck(elm->relid, GetUserId(),
@@ -864,7 +864,7 @@ lastval(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("lastval is not yet defined in this session")));
 
-	seqrel = open_share_lock(last_used_seq);
+	seqrel = lock_and_open_sequence(last_used_seq);
 
 	/* nextval() must have already been called for this sequence */
 	Assert(last_used_seq->last_valid);
@@ -908,7 +908,7 @@ do_setval(Oid relid, int64 next, bool iscalled)
 	int64		maxv,
 				minv;
 
-	/* open and AccessShareLock sequence */
+	/* open and lock sequence */
 	init_sequence(relid, &elm, &seqrel);
 
 	if (pg_class_aclcheck(elm->relid, GetUserId(), ACL_UPDATE) != ACLCHECK_OK)
@@ -1037,15 +1037,15 @@ setval3_oid(PG_FUNCTION_ARGS)
 
 
 /*
- * Open the sequence and acquire AccessShareLock if needed
+ * Open the sequence and acquire lock if needed
  *
  * If we haven't touched the sequence already in this transaction,
- * we need to acquire AccessShareLock.  We arrange for the lock to
+ * we need to acquire a lock.  We arrange for the lock to
  * be owned by the top transaction, so that we don't need to do it
  * more than once per xact.
  */
 static Relation
-open_share_lock(SeqTable seq)
+lock_and_open_sequence(SeqTable seq)
 {
 	LocalTransactionId thislxid = MyProc->lxid;
 
@@ -1055,25 +1055,17 @@ open_share_lock(SeqTable seq)
 		ResourceOwner currentOwner;
 
 		currentOwner = CurrentResourceOwner;
-		PG_TRY();
-		{
-			CurrentResourceOwner = TopTransactionResourceOwner;
-			LockRelationOid(seq->relid, AccessShareLock);
-		}
-		PG_CATCH();
-		{
-			/* Ensure CurrentResourceOwner is restored on error */
-			CurrentResourceOwner = currentOwner;
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+		CurrentResourceOwner = TopTransactionResourceOwner;
+
+		LockRelationOid(seq->relid, RowExclusiveLock);
+
 		CurrentResourceOwner = currentOwner;
 
 		/* Flag that we have a lock in the current xact */
 		seq->lxid = thislxid;
 	}
 
-	/* We now know we have AccessShareLock, and can safely open the rel */
+	/* We now know we have the lock, and can safely open the rel */
 	return relation_open(seq->relid, NoLock);
 }
 
@@ -1130,7 +1122,7 @@ init_sequence(Oid relid, SeqTable *p_elm, Relation *p_rel)
 	/*
 	 * Open the sequence relation.
 	 */
-	seqrel = open_share_lock(elm);
+	seqrel = lock_and_open_sequence(elm);
 
 	if (seqrel->rd_rel->relkind != RELKIND_SEQUENCE)
 		ereport(ERROR,
@@ -1212,18 +1204,31 @@ read_seq_tuple(Relation rel, Buffer *buf, HeapTuple seqdatatuple)
 }
 
 /*
- * init_params: process the options list of CREATE or ALTER SEQUENCE,
- * and store the values into appropriate fields of *new.  Also set
- * *owned_by to any OWNED BY option, or to NIL if there is none.
+ * init_params: process the options list of CREATE or ALTER SEQUENCE, and
+ * store the values into appropriate fields of seqform, for changes that go
+ * into the pg_sequence catalog, and fields of seqdataform for changes to the
+ * sequence relation itself.  Set *need_seq_rewrite to true if we changed any
+ * parameters that require rewriting the sequence's relation (interesting for
+ * ALTER SEQUENCE).  Also set *owned_by to any OWNED BY option, or to NIL if
+ * there is none.
  *
  * If isInit is true, fill any unspecified options with default values;
  * otherwise, do not change existing options that aren't explicitly overridden.
+ *
+ * Note: we force a sequence rewrite whenever we change parameters that affect
+ * generation of future sequence values, even if the seqdataform per se is not
+ * changed.  This allows ALTER SEQUENCE to behave transactionally.  Currently,
+ * the only option that doesn't cause that is OWNED BY.  It's *necessary* for
+ * ALTER SEQUENCE OWNED BY to not rewrite the sequence, because that would
+ * break pg_upgrade by causing unwanted changes in the sequence's relfilenode.
  */
 static void
 init_params(ParseState *pstate, List *options, bool for_identity,
 			bool isInit,
 			Form_pg_sequence seqform,
-			Form_pg_sequence_data seqdataform, List **owned_by)
+			Form_pg_sequence_data seqdataform,
+			bool *need_seq_rewrite,
+			List **owned_by)
 {
 	DefElem    *as_type = NULL;
 	DefElem    *start_value = NULL;
@@ -1237,6 +1242,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 	bool		reset_max_value = false;
 	bool		reset_min_value = false;
 
+	*need_seq_rewrite = false;
 	*owned_by = NIL;
 
 	foreach(option, options)
@@ -1251,6 +1257,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			as_type = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "increment") == 0)
 		{
@@ -1260,6 +1267,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			increment_by = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "start") == 0)
 		{
@@ -1269,6 +1277,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			start_value = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "restart") == 0)
 		{
@@ -1278,6 +1287,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			restart_value = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "maxvalue") == 0)
 		{
@@ -1287,6 +1297,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			max_value = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "minvalue") == 0)
 		{
@@ -1296,6 +1307,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			min_value = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "cache") == 0)
 		{
@@ -1305,6 +1317,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			cache_value = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "cycle") == 0)
 		{
@@ -1314,6 +1327,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 						 errmsg("conflicting or redundant options"),
 						 parser_errposition(pstate, defel->location)));
 			is_cycled = defel;
+			*need_seq_rewrite = true;
 		}
 		else if (strcmp(defel->defname, "owned_by") == 0)
 		{
@@ -1351,7 +1365,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 	/* AS type */
 	if (as_type != NULL)
 	{
-		Oid		newtypid = typenameTypeId(pstate, defGetTypeName(as_type));
+		Oid			newtypid = typenameTypeId(pstate, defGetTypeName(as_type));
 
 		if (newtypid != INT2OID &&
 			newtypid != INT4OID &&
@@ -1383,7 +1397,9 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		seqform->seqtypid = newtypid;
 	}
 	else if (isInit)
+	{
 		seqform->seqtypid = INT8OID;
+	}
 
 	/* INCREMENT BY */
 	if (increment_by != NULL)
@@ -1396,7 +1412,9 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		seqdataform->log_cnt = 0;
 	}
 	else if (isInit)
+	{
 		seqform->seqincrement = 1;
+	}
 
 	/* CYCLE */
 	if (is_cycled != NULL)
@@ -1406,7 +1424,9 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		seqdataform->log_cnt = 0;
 	}
 	else if (isInit)
+	{
 		seqform->seqcycle = false;
+	}
 
 	/* MAXVALUE (null arg means NO MAXVALUE) */
 	if (max_value != NULL && max_value->arg)
@@ -1464,7 +1484,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 				seqform->seqmin = PG_INT64_MIN;
 		}
 		else
-			seqform->seqmin = 1; /* ascending seq */
+			seqform->seqmin = 1;	/* ascending seq */
 		seqdataform->log_cnt = 0;
 	}
 
@@ -1498,7 +1518,9 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 
 	/* START WITH */
 	if (start_value != NULL)
+	{
 		seqform->seqstart = defGetInt64(start_value);
+	}
 	else if (isInit)
 	{
 		if (seqform->seqincrement > 0)
@@ -1529,8 +1551,8 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		snprintf(bufm, sizeof(bufm), INT64_FORMAT, seqform->seqmax);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			  errmsg("START value (%s) cannot be greater than MAXVALUE (%s)",
-					 bufs, bufm)));
+				 errmsg("START value (%s) cannot be greater than MAXVALUE (%s)",
+						bufs, bufm)));
 	}
 
 	/* RESTART [WITH] */
@@ -1559,8 +1581,8 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		snprintf(bufm, sizeof(bufm), INT64_FORMAT, seqform->seqmin);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			   errmsg("RESTART value (%s) cannot be less than MINVALUE (%s)",
-					  bufs, bufm)));
+				 errmsg("RESTART value (%s) cannot be less than MINVALUE (%s)",
+						bufs, bufm)));
 	}
 	if (seqdataform->last_value > seqform->seqmax)
 	{
@@ -1571,8 +1593,8 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		snprintf(bufm, sizeof(bufm), INT64_FORMAT, seqform->seqmax);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			errmsg("RESTART value (%s) cannot be greater than MAXVALUE (%s)",
-				   bufs, bufm)));
+				 errmsg("RESTART value (%s) cannot be greater than MAXVALUE (%s)",
+						bufs, bufm)));
 	}
 
 	/* CACHE */
@@ -1592,7 +1614,9 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 		seqdataform->log_cnt = 0;
 	}
 	else if (isInit)
+	{
 		seqform->seqcache = 1;
+	}
 }
 
 /*
@@ -1622,7 +1646,7 @@ process_owned_by(Relation seqrel, List *owned_by, bool for_identity)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("invalid OWNED BY option"),
-				errhint("Specify OWNED BY table.column or OWNED BY NONE.")));
+					 errhint("Specify OWNED BY table.column or OWNED BY NONE.")));
 		tablerel = NULL;
 		attnum = 0;
 	}
@@ -1814,7 +1838,7 @@ pg_sequence_last_value(PG_FUNCTION_ARGS)
 	bool		is_called;
 	int64		result;
 
-	/* open and AccessShareLock sequence */
+	/* open and lock sequence */
 	init_sequence(relid, &elm, &seqrel);
 
 	if (pg_class_aclcheck(relid, GetUserId(), ACL_SELECT | ACL_USAGE) != ACLCHECK_OK)
@@ -1909,7 +1933,7 @@ ResetSequenceCaches(void)
 void
 seq_mask(char *page, BlockNumber blkno)
 {
-	mask_page_lsn(page);
+	mask_page_lsn_and_checksum(page);
 
 	mask_unused_space(page);
 }

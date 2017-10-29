@@ -45,6 +45,8 @@
  *		  like HeapTupleSatisfiesSelf(), but includes open transactions
  *	 HeapTupleSatisfiesVacuum()
  *		  visible to any running transaction, used by VACUUM
+ *	 HeapTupleSatisfiesNonVacuumable()
+ *		  Snapshot-style API for HeapTupleSatisfiesVacuum
  *	 HeapTupleSatisfiesToast()
  *		  visible unless part of interrupted vacuum, used for TOAST
  *	 HeapTupleSatisfiesAny()
@@ -79,8 +81,6 @@
 SnapshotData SnapshotSelfData = {HeapTupleSatisfiesSelf};
 SnapshotData SnapshotAnyData = {HeapTupleSatisfiesAny};
 
-/* local functions */
-static bool XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot);
 
 /*
  * SetHintBits()
@@ -512,7 +512,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 		else if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmin(tuple)))
 		{
 			if (HeapTupleHeaderGetCmin(tuple) >= curcid)
-				return HeapTupleInvisible;		/* inserted after scan started */
+				return HeapTupleInvisible;	/* inserted after scan started */
 
 			if (tuple->t_infomask & HEAP_XMAX_INVALID)	/* xid invalid */
 				return HeapTupleMayBeUpdated;
@@ -571,8 +571,8 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 						return HeapTupleSelfUpdated;	/* updated after scan
 														 * started */
 					else
-						return HeapTupleInvisible;		/* updated before scan
-														 * started */
+						return HeapTupleInvisible;	/* updated before scan
+													 * started */
 				}
 			}
 
@@ -587,7 +587,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 			if (HeapTupleHeaderGetCmax(tuple) >= curcid)
 				return HeapTupleSelfUpdated;	/* updated after scan started */
 			else
-				return HeapTupleInvisible;		/* updated before scan started */
+				return HeapTupleInvisible;	/* updated before scan started */
 		}
 		else if (TransactionIdIsInProgress(HeapTupleHeaderGetRawXmin(tuple)))
 			return HeapTupleInvisible;
@@ -646,7 +646,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 			if (HeapTupleHeaderGetCmax(tuple) >= curcid)
 				return HeapTupleSelfUpdated;	/* updated after scan started */
 			else
-				return HeapTupleInvisible;		/* updated before scan started */
+				return HeapTupleInvisible;	/* updated before scan started */
 		}
 
 		if (MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), false))
@@ -682,7 +682,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 		if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
 			return HeapTupleBeingUpdated;
 		if (HeapTupleHeaderGetCmax(tuple) >= curcid)
-			return HeapTupleSelfUpdated;		/* updated after scan started */
+			return HeapTupleSelfUpdated;	/* updated after scan started */
 		else
 			return HeapTupleInvisible;	/* updated before scan started */
 	}
@@ -1038,7 +1038,7 @@ HeapTupleSatisfiesMVCC(HeapTuple htup, Snapshot snapshot,
 				else if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
 					return true;	/* updated after scan started */
 				else
-					return false;		/* updated before scan started */
+					return false;	/* updated before scan started */
 			}
 
 			if (!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
@@ -1392,6 +1392,26 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 	return HEAPTUPLE_DEAD;
 }
 
+
+/*
+ * HeapTupleSatisfiesNonVacuumable
+ *
+ *	True if tuple might be visible to some transaction; false if it's
+ *	surely dead to everyone, ie, vacuumable.
+ *
+ *	This is an interface to HeapTupleSatisfiesVacuum that meets the
+ *	SnapshotSatisfiesFunc API, so it can be used through a Snapshot.
+ *	snapshot->xmin must have been set up with the xmin horizon to use.
+ */
+bool
+HeapTupleSatisfiesNonVacuumable(HeapTuple htup, Snapshot snapshot,
+								Buffer buffer)
+{
+	return HeapTupleSatisfiesVacuum(htup, snapshot->xmin, buffer)
+		!= HEAPTUPLE_DEAD;
+}
+
+
 /*
  * HeapTupleIsSurelyDead
  *
@@ -1457,10 +1477,10 @@ HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin)
  * Note: GetSnapshotData never stores either top xid or subxids of our own
  * backend into a snapshot, so these xids will not be reported as "running"
  * by this function.  This is OK for current uses, because we always check
- * TransactionIdIsCurrentTransactionId first, except for known-committed
- * XIDs which could not be ours anyway.
+ * TransactionIdIsCurrentTransactionId first, except when it's known the
+ * XID could not be ours anyway.
  */
-static bool
+bool
 XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot)
 {
 	uint32		i;

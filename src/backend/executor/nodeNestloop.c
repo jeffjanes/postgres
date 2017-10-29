@@ -23,6 +23,7 @@
 
 #include "executor/execdebug.h"
 #include "executor/nodeNestloop.h"
+#include "miscadmin.h"
 #include "utils/memutils.h"
 
 
@@ -56,9 +57,10 @@
  *			   are prepared to return the first tuple.
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecNestLoop(NestLoopState *node)
+static TupleTableSlot *
+ExecNestLoop(PlanState *pstate)
 {
+	NestLoopState *node = castNode(NestLoopState, pstate);
 	NestLoop   *nl;
 	PlanState  *innerPlan;
 	PlanState  *outerPlan;
@@ -68,6 +70,8 @@ ExecNestLoop(NestLoopState *node)
 	ExprState  *otherqual;
 	ExprContext *econtext;
 	ListCell   *lc;
+
+	CHECK_FOR_INTERRUPTS();
 
 	/*
 	 * get information from the node
@@ -272,6 +276,7 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 	nlstate = makeNode(NestLoopState);
 	nlstate->js.ps.plan = (Plan *) node;
 	nlstate->js.ps.state = estate;
+	nlstate->js.ps.ExecProcNode = ExecNestLoop;
 
 	/*
 	 * Miscellaneous initialization
@@ -326,7 +331,7 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 		case JOIN_ANTI:
 			nlstate->nl_NullInnerTupleSlot =
 				ExecInitNullTupleSlot(estate,
-								 ExecGetResultType(innerPlanState(nlstate)));
+									  ExecGetResultType(innerPlanState(nlstate)));
 			break;
 		default:
 			elog(ERROR, "unrecognized join type: %d",

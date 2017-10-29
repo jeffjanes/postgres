@@ -253,7 +253,7 @@ page_header(PG_FUNCTION_ARGS)
 	lsn = PageGetLSN(page);
 
 	/* pageinspect >= 1.2 uses pg_lsn instead of text for the LSN field. */
-	if (tupdesc->attrs[0]->atttypid == TEXTOID)
+	if (TupleDescAttr(tupdesc, 0)->atttypid == TEXTOID)
 	{
 		char		lsnchar[64];
 
@@ -315,5 +315,5 @@ page_checksum(PG_FUNCTION_ARGS)
 
 	page = (PageHeader) VARDATA(raw_page);
 
-	PG_RETURN_INT16(pg_checksum_page((char *)page, blkno));
+	PG_RETURN_INT16(pg_checksum_page((char *) page, blkno));
 }

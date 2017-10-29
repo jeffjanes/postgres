@@ -147,14 +147,14 @@ static Expr *inline_function(Oid funcid, Oid result_type, Oid result_collid,
 static Node *substitute_actual_parameters(Node *expr, int nargs, List *args,
 							 int *usecounts);
 static Node *substitute_actual_parameters_mutator(Node *node,
-							  substitute_actual_parameters_context *context);
+									 substitute_actual_parameters_context *context);
 static void sql_inline_error_callback(void *arg);
 static Expr *evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod,
 			  Oid result_collation);
 static Query *substitute_actual_srf_parameters(Query *expr,
 								 int nargs, List *args);
 static Node *substitute_actual_srf_parameters_mutator(Node *node,
-						  substitute_actual_srf_parameters_context *context);
+										 substitute_actual_srf_parameters_context *context);
 static bool tlist_matches_coltypelist(List *tlist, List *coltypelist);
 
 
@@ -902,6 +902,12 @@ contain_mutable_functions_walker(Node *node, void *context)
 		return true;
 	}
 
+	if (IsA(node, NextValueExpr))
+	{
+		/* NextValueExpr is volatile */
+		return true;
+	}
+
 	/*
 	 * It should be safe to treat MinMaxExpr as immutable, because it will
 	 * depend on a non-cross-type btree comparison function, and those should
@@ -969,6 +975,12 @@ contain_volatile_functions_walker(Node *node, void *context)
 								context))
 		return true;
 
+	if (IsA(node, NextValueExpr))
+	{
+		/* NextValueExpr is volatile */
+		return true;
+	}
+
 	/*
 	 * See notes in contain_mutable_functions_walker about why we treat
 	 * MinMaxExpr, XmlExpr, and CoerceToDomain as immutable, while
@@ -1011,7 +1023,7 @@ contain_volatile_functions_not_nextval_walker(Node *node, void *context)
 		return false;
 	/* Check for volatile functions in node itself */
 	if (check_functions_in_node(node,
-							  contain_volatile_functions_not_nextval_checker,
+								contain_volatile_functions_not_nextval_checker,
 								context))
 		return true;
 
@@ -1019,6 +1031,8 @@ contain_volatile_functions_not_nextval_walker(Node *node, void *context)
 	 * See notes in contain_mutable_functions_walker about why we treat
 	 * MinMaxExpr, XmlExpr, and CoerceToDomain as immutable, while
 	 * SQLValueFunction is stable.  Hence, none of them are of interest here.
+	 * Also, since we're intentionally ignoring nextval(), presumably we
+	 * should ignore NextValueExpr.
 	 */
 
 	/* Recurse to check arguments */
@@ -1026,11 +1040,11 @@ contain_volatile_functions_not_nextval_walker(Node *node, void *context)
 	{
 		/* Recurse into subselects */
 		return query_tree_walker((Query *) node,
-							   contain_volatile_functions_not_nextval_walker,
+								 contain_volatile_functions_not_nextval_walker,
 								 context, 0);
 	}
 	return expression_tree_walker(node,
-							   contain_volatile_functions_not_nextval_walker,
+								  contain_volatile_functions_not_nextval_walker,
 								  context);
 }
 
@@ -1146,11 +1160,17 @@ max_parallel_hazard_walker(Node *node, max_parallel_hazard_context *context)
 	 * contain a parallel-unsafe function; but useful constraints probably
 	 * never would have such, and assuming they do would cripple use of
 	 * parallel query in the presence of domain types.)  SQLValueFunction
-	 * should be safe in all cases.
+	 * should be safe in all cases.  NextValueExpr is parallel-unsafe.
 	 */
 	if (IsA(node, CoerceToDomain))
 	{
 		if (max_parallel_hazard_test(PROPARALLEL_RESTRICTED, context))
+			return true;
+	}
+
+	if (IsA(node, NextValueExpr))
+	{
+		if (max_parallel_hazard_test(PROPARALLEL_UNSAFE, context))
 			return true;
 	}
 
@@ -1203,12 +1223,16 @@ max_parallel_hazard_walker(Node *node, max_parallel_hazard_context *context)
 
 	/*
 	 * We can't pass Params to workers at the moment either, so they are also
-	 * parallel-restricted, unless they are PARAM_EXEC Params listed in
-	 * safe_param_ids, meaning they could be generated within the worker.
+	 * parallel-restricted, unless they are PARAM_EXTERN Params or are
+	 * PARAM_EXEC Params listed in safe_param_ids, meaning they could be
+	 * generated within the worker.
 	 */
 	else if (IsA(node, Param))
 	{
 		Param	   *param = (Param *) node;
+
+		if (param->paramkind == PARAM_EXTERN)
+			return false;
 
 		if (param->paramkind != PARAM_EXEC ||
 			!list_member_int(context->safe_param_ids, param->paramid))
@@ -1341,6 +1365,17 @@ contain_nonstrict_functions_walker(Node *node, void *context)
 		return true;
 	if (IsA(node, FieldStore))
 		return true;
+	if (IsA(node, ArrayCoerceExpr))
+	{
+		/*
+		 * ArrayCoerceExpr is strict at the array level, regardless of what
+		 * the per-element expression is; so we should ignore elemexpr and
+		 * recurse only into the arg.
+		 */
+		return expression_tree_walker((Node *) ((ArrayCoerceExpr *) node)->arg,
+									  contain_nonstrict_functions_walker,
+									  context);
+	}
 	if (IsA(node, CaseExpr))
 		return true;
 	if (IsA(node, ArrayExpr))
@@ -1360,14 +1395,11 @@ contain_nonstrict_functions_walker(Node *node, void *context)
 	if (IsA(node, BooleanTest))
 		return true;
 
-	/*
-	 * Check other function-containing nodes; but ArrayCoerceExpr is strict at
-	 * the array level, regardless of elemfunc.
-	 */
-	if (!IsA(node, ArrayCoerceExpr) &&
-		check_functions_in_node(node, contain_nonstrict_functions_checker,
+	/* Check other function-containing nodes */
+	if (check_functions_in_node(node, contain_nonstrict_functions_checker,
 								context))
 		return true;
+
 	return expression_tree_walker(node, contain_nonstrict_functions_walker,
 								  context);
 }
@@ -1399,7 +1431,7 @@ contain_context_dependent_node(Node *clause)
 	return contain_context_dependent_node_walker(clause, &flags);
 }
 
-#define CCDN_IN_CASEEXPR	0x0001		/* CaseTestExpr okay here? */
+#define CCDN_IN_CASEEXPR	0x0001	/* CaseTestExpr okay here? */
 
 static bool
 contain_context_dependent_node_walker(Node *node, int *flags)
@@ -1432,7 +1464,7 @@ contain_context_dependent_node_walker(Node *node, int *flags)
 			 */
 			*flags |= CCDN_IN_CASEEXPR;
 			res = expression_tree_walker(node,
-									   contain_context_dependent_node_walker,
+										 contain_context_dependent_node_walker,
 										 (void *) flags);
 			*flags = save_flags;
 			return res;
@@ -1495,6 +1527,7 @@ contain_leaked_vars_walker(Node *node, void *context)
 		case T_SQLValueFunction:
 		case T_NullTest:
 		case T_BooleanTest:
+		case T_NextValueExpr:
 		case T_List:
 
 			/*
@@ -1736,7 +1769,7 @@ find_nonnullable_rels_walker(Node *node, bool top_level)
 	}
 	else if (IsA(node, ArrayCoerceExpr))
 	{
-		/* ArrayCoerceExpr is strict at the array level */
+		/* ArrayCoerceExpr is strict at the array level; ignore elemexpr */
 		ArrayCoerceExpr *expr = (ArrayCoerceExpr *) node;
 
 		result = find_nonnullable_rels_walker((Node *) expr->arg, top_level);
@@ -1944,7 +1977,7 @@ find_nonnullable_vars_walker(Node *node, bool top_level)
 	}
 	else if (IsA(node, ArrayCoerceExpr))
 	{
-		/* ArrayCoerceExpr is strict at the array level */
+		/* ArrayCoerceExpr is strict at the array level; ignore elemexpr */
 		ArrayCoerceExpr *expr = (ArrayCoerceExpr *) node;
 
 		result = find_nonnullable_vars_walker((Node *) expr->arg, top_level);
@@ -2327,6 +2360,10 @@ CommuteRowCompareExpr(RowCompareExpr *clause)
  * is still what it was when the expression was parsed.  This is needed to
  * guard against improper simplification after ALTER COLUMN TYPE.  (XXX we
  * may well need to make similar checks elsewhere?)
+ *
+ * rowtypeid may come from a whole-row Var, and therefore it can be a domain
+ * over composite, but for this purpose we only care about checking the type
+ * of a contained field.
  */
 static bool
 rowtype_field_matches(Oid rowtypeid, int fieldnum,
@@ -2339,13 +2376,13 @@ rowtype_field_matches(Oid rowtypeid, int fieldnum,
 	/* No issue for RECORD, since there is no way to ALTER such a type */
 	if (rowtypeid == RECORDOID)
 		return true;
-	tupdesc = lookup_rowtype_tupdesc(rowtypeid, -1);
+	tupdesc = lookup_rowtype_tupdesc_domain(rowtypeid, -1, false);
 	if (fieldnum <= 0 || fieldnum > tupdesc->natts)
 	{
 		ReleaseTupleDesc(tupdesc);
 		return false;
 	}
-	attr = tupdesc->attrs[fieldnum - 1];
+	attr = TupleDescAttr(tupdesc, fieldnum - 1);
 	if (attr->attisdropped ||
 		attr->atttypid != expectedtype ||
 		attr->atttypmod != expectedtypmod ||
@@ -2434,7 +2471,7 @@ estimate_expression_value(PlannerInfo *root, Node *node)
 {
 	eval_const_expressions_context context;
 
-	context.boundParams = root->glob->boundParams;		/* bound Params */
+	context.boundParams = root->glob->boundParams;	/* bound Params */
 	/* we do not need to mark the plan as depending on inlined functions */
 	context.root = NULL;
 	context.active_fns = NIL;	/* nothing being recursively simplified */
@@ -2675,7 +2712,7 @@ eval_const_expressions_mutator(Node *node,
 				 * self.
 				 */
 				args = (List *) expression_tree_mutator((Node *) expr->args,
-											  eval_const_expressions_mutator,
+														eval_const_expressions_mutator,
 														(void *) context);
 
 				/*
@@ -2712,8 +2749,8 @@ eval_const_expressions_mutator(Node *node,
 					 * Need to get OID of underlying function.  Okay to
 					 * scribble on input to this extent.
 					 */
-					set_opfuncid((OpExpr *) expr);		/* rely on struct
-														 * equivalence */
+					set_opfuncid((OpExpr *) expr);	/* rely on struct
+													 * equivalence */
 
 					/*
 					 * Code for op/func reduction is pretty bulky, so split it
@@ -2943,7 +2980,7 @@ eval_const_expressions_mutator(Node *node,
 												-1,
 												InvalidOid,
 												sizeof(Oid),
-											  ObjectIdGetDatum(intypioparam),
+												ObjectIdGetDatum(intypioparam),
 												false,
 												true),
 									  makeConst(INT4OID,
@@ -2984,32 +3021,38 @@ eval_const_expressions_mutator(Node *node,
 			{
 				ArrayCoerceExpr *expr = (ArrayCoerceExpr *) node;
 				Expr	   *arg;
+				Expr	   *elemexpr;
 				ArrayCoerceExpr *newexpr;
 
 				/*
-				 * Reduce constants in the ArrayCoerceExpr's argument, then
-				 * build a new ArrayCoerceExpr.
+				 * Reduce constants in the ArrayCoerceExpr's argument and
+				 * per-element expressions, then build a new ArrayCoerceExpr.
 				 */
 				arg = (Expr *) eval_const_expressions_mutator((Node *) expr->arg,
 															  context);
+				elemexpr = (Expr *) eval_const_expressions_mutator((Node *) expr->elemexpr,
+																   context);
 
 				newexpr = makeNode(ArrayCoerceExpr);
 				newexpr->arg = arg;
-				newexpr->elemfuncid = expr->elemfuncid;
+				newexpr->elemexpr = elemexpr;
 				newexpr->resulttype = expr->resulttype;
 				newexpr->resulttypmod = expr->resulttypmod;
 				newexpr->resultcollid = expr->resultcollid;
-				newexpr->isExplicit = expr->isExplicit;
 				newexpr->coerceformat = expr->coerceformat;
 				newexpr->location = expr->location;
 
 				/*
-				 * If constant argument and it's a binary-coercible or
-				 * immutable conversion, we can simplify it to a constant.
+				 * If constant argument and per-element expression is
+				 * immutable, we can simplify the whole thing to a constant.
+				 * Exception: although contain_mutable_functions considers
+				 * CoerceToDomain immutable for historical reasons, let's not
+				 * do so here; this ensures coercion to an array-over-domain
+				 * does not apply the domain's constraints until runtime.
 				 */
 				if (arg && IsA(arg, Const) &&
-					(!OidIsValid(newexpr->elemfuncid) ||
-				func_volatile(newexpr->elemfuncid) == PROVOLATILE_IMMUTABLE))
+					elemexpr && !IsA(elemexpr, CoerceToDomain) &&
+					!contain_mutable_functions((Node *) elemexpr))
 					return (Node *) evaluate_expr((Expr *) newexpr,
 												  newexpr->resulttype,
 												  newexpr->resulttypmod,
@@ -3114,7 +3157,7 @@ eval_const_expressions_mutator(Node *node,
 				if (newarg && IsA(newarg, Const))
 				{
 					context->case_val = newarg;
-					newarg = NULL;		/* not needed anymore, see above */
+					newarg = NULL;	/* not needed anymore, see above */
 				}
 				else
 					context->case_val = NULL;
@@ -3286,7 +3329,7 @@ eval_const_expressions_mutator(Node *node,
 				if (newargs == NIL)
 					return (Node *) makeNullConst(coalesceexpr->coalescetype,
 												  -1,
-											   coalesceexpr->coalescecollid);
+												  coalesceexpr->coalescecollid);
 
 				newcoalesce = makeNode(CoalesceExpr);
 				newcoalesce->coalescetype = coalesceexpr->coalescetype;
@@ -3365,7 +3408,7 @@ eval_const_expressions_mutator(Node *node,
 						fselect->fieldnum <= list_length(rowexpr->args))
 					{
 						Node	   *fld = (Node *) list_nth(rowexpr->args,
-													  fselect->fieldnum - 1);
+															fselect->fieldnum - 1);
 
 						if (rowtype_field_matches(rowexpr->row_typeid,
 												  fselect->fieldnum,
@@ -3463,7 +3506,7 @@ eval_const_expressions_mutator(Node *node,
 						default:
 							elog(ERROR, "unrecognized nulltesttype: %d",
 								 (int) ntest->nulltesttype);
-							result = false;		/* keep compiler quiet */
+							result = false; /* keep compiler quiet */
 							break;
 					}
 
@@ -3517,7 +3560,7 @@ eval_const_expressions_mutator(Node *node,
 						default:
 							elog(ERROR, "unrecognized booltesttype: %d",
 								 (int) btest->booltesttype);
-							result = false;		/* keep compiler quiet */
+							result = false; /* keep compiler quiet */
 							break;
 					}
 
@@ -3900,7 +3943,7 @@ simplify_function(Oid funcid, Oid result_type, int32 result_typmod,
 	{
 		args = expand_function_arguments(args, result_type, func_tuple);
 		args = (List *) expression_tree_mutator((Node *) args,
-											  eval_const_expressions_mutator,
+												eval_const_expressions_mutator,
 												(void *) context);
 		/* Argument processing done, give it back to the caller */
 		*args_p = args;
@@ -4263,7 +4306,7 @@ evaluate_function(Oid funcid, Oid result_type, int32 result_typmod,
 	newexpr->funcretset = false;
 	newexpr->funcvariadic = funcvariadic;
 	newexpr->funcformat = COERCE_EXPLICIT_CALL; /* doesn't matter */
-	newexpr->funccollid = result_collid;		/* doesn't matter */
+	newexpr->funccollid = result_collid;	/* doesn't matter */
 	newexpr->inputcollid = input_collid;
 	newexpr->args = args;
 	newexpr->location = -1;
@@ -4424,6 +4467,11 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 
 	/*
 	 * The single command must be a simple "SELECT expression".
+	 *
+	 * Note: if you change the tests involved in this, see also plpgsql's
+	 * exec_simple_check_plan().  That generally needs to have the same idea
+	 * of what's a "simple expression", so that inlining a function that
+	 * previously wasn't inlined won't change plpgsql's conclusion.
 	 */
 	if (!IsA(querytree, Query) ||
 		querytree->commandType != CMD_SELECT ||
@@ -4623,7 +4671,7 @@ substitute_actual_parameters(Node *expr, int nargs, List *args,
 
 static Node *
 substitute_actual_parameters_mutator(Node *node,
-							   substitute_actual_parameters_context *context)
+									 substitute_actual_parameters_context *context)
 {
 	if (node == NULL)
 		return NULL;
@@ -4943,7 +4991,7 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 
 	querytree_list = pg_analyze_and_rewrite_params(linitial(raw_parsetree_list),
 												   src,
-									   (ParserSetupHook) sql_fn_parser_setup,
+												   (ParserSetupHook) sql_fn_parser_setup,
 												   pinfo, NULL);
 	if (list_length(querytree_list) != 1)
 		goto fail;
@@ -4965,7 +5013,9 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	 *
 	 * If the function returns a composite type, don't inline unless the check
 	 * shows it's returning a whole tuple result; otherwise what it's
-	 * returning is a single composite column which is not what we need.
+	 * returning is a single composite column which is not what we need. (Like
+	 * check_sql_fn_retval, we deliberately exclude domains over composite
+	 * here.)
 	 */
 	if (!check_sql_fn_retval(func_oid, fexpr->funcresulttype,
 							 querytree_list,
@@ -5066,7 +5116,7 @@ substitute_actual_srf_parameters(Query *expr, int nargs, List *args)
 
 static Node *
 substitute_actual_srf_parameters_mutator(Node *node,
-						   substitute_actual_srf_parameters_context *context)
+										 substitute_actual_srf_parameters_context *context)
 {
 	Node	   *result;
 
@@ -5076,7 +5126,7 @@ substitute_actual_srf_parameters_mutator(Node *node,
 	{
 		context->sublevels_up++;
 		result = (Node *) query_tree_mutator((Query *) node,
-									substitute_actual_srf_parameters_mutator,
+											 substitute_actual_srf_parameters_mutator,
 											 (void *) context,
 											 0);
 		context->sublevels_up--;

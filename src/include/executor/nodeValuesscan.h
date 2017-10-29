@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern ValuesScanState *ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecValuesScan(ValuesScanState *node);
 extern void ExecEndValuesScan(ValuesScanState *node);
 extern void ExecReScanValuesScan(ValuesScanState *node);
 
-#endif   /* NODEVALUESSCAN_H */
+#endif							/* NODEVALUESSCAN_H */

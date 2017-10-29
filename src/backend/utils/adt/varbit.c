@@ -161,8 +161,8 @@ bit_in(PG_FUNCTION_ARGS)
 		if (slen > VARBITMAXLEN / 4)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("bit string length exceeds the maximum allowed (%d)",
-						VARBITMAXLEN)));
+					 errmsg("bit string length exceeds the maximum allowed (%d)",
+							VARBITMAXLEN)));
 		bitlen = slen * 4;
 	}
 
@@ -473,8 +473,8 @@ varbit_in(PG_FUNCTION_ARGS)
 		if (slen > VARBITMAXLEN / 4)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("bit string length exceeds the maximum allowed (%d)",
-						VARBITMAXLEN)));
+					 errmsg("bit string length exceeds the maximum allowed (%d)",
+							VARBITMAXLEN)));
 		bitlen = slen * 4;
 	}
 
@@ -665,7 +665,7 @@ varbit_send(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	pq_begintypsend(&buf);
-	pq_sendint(&buf, VARBITLEN(s), sizeof(int32));
+	pq_sendint32(&buf, VARBITLEN(s));
 	pq_sendbytes(&buf, (char *) VARBITS(s), VARBITBYTES(s));
 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
 }
@@ -1131,8 +1131,8 @@ bitoverlay(PG_FUNCTION_ARGS)
 {
 	VarBit	   *t1 = PG_GETARG_VARBIT_P(0);
 	VarBit	   *t2 = PG_GETARG_VARBIT_P(1);
-	int			sp = PG_GETARG_INT32(2);		/* substring start position */
-	int			sl = PG_GETARG_INT32(3);		/* substring length */
+	int			sp = PG_GETARG_INT32(2);	/* substring start position */
+	int			sl = PG_GETARG_INT32(3);	/* substring length */
 
 	PG_RETURN_VARBIT_P(bit_overlay(t1, t2, sp, sl));
 }
@@ -1142,7 +1142,7 @@ bitoverlay_no_len(PG_FUNCTION_ARGS)
 {
 	VarBit	   *t1 = PG_GETARG_VARBIT_P(0);
 	VarBit	   *t2 = PG_GETARG_VARBIT_P(1);
-	int			sp = PG_GETARG_INT32(2);		/* substring start position */
+	int			sp = PG_GETARG_INT32(2);	/* substring start position */
 	int			sl;
 
 	sl = VARBITLEN(t2);			/* defaults to length(t2) */

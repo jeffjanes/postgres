@@ -17,6 +17,7 @@
 #include "access/transam.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
+#include "funcapi.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
@@ -323,7 +324,7 @@ makeJsonLexContextCstringLen(char *json, int len, bool need_escapes)
  * Publicly visible entry point for the JSON parser.
  *
  * lex is a lexing context, set up for the json to be processed by calling
- * makeJsonLexContext(). sem is a strucure of function pointers to semantic
+ * makeJsonLexContext(). sem is a structure of function pointers to semantic
  * action routines to be called at appropriate spots during parsing, and a
  * pointer to a state object to be passed to those routines.
  */
@@ -347,7 +348,7 @@ pg_parse_json(JsonLexContext *lex, JsonSemAction *sem)
 			parse_array(lex, sem);
 			break;
 		default:
-			parse_scalar(lex, sem);		/* json can be a bare scalar */
+			parse_scalar(lex, sem); /* json can be a bare scalar */
 	}
 
 	lex_expect(JSON_PARSE_END, lex, JSON_TOKEN_END);
@@ -837,11 +838,11 @@ json_lex_string(JsonLexContext *lex)
 					{
 						if (hi_surrogate != -1)
 							ereport(ERROR,
-							   (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-								errmsg("invalid input syntax for type %s",
-									   "json"),
-								errdetail("Unicode high surrogate must not follow a high surrogate."),
-								report_json_context(lex)));
+									(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+									 errmsg("invalid input syntax for type %s",
+											"json"),
+									 errdetail("Unicode high surrogate must not follow a high surrogate."),
+									 report_json_context(lex)));
 						hi_surrogate = (ch & 0x3ff) << 10;
 						continue;
 					}
@@ -849,10 +850,10 @@ json_lex_string(JsonLexContext *lex)
 					{
 						if (hi_surrogate == -1)
 							ereport(ERROR,
-							   (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-								errmsg("invalid input syntax for type %s", "json"),
-								errdetail("Unicode low surrogate must follow a high surrogate."),
-								report_json_context(lex)));
+									(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+									 errmsg("invalid input syntax for type %s", "json"),
+									 errdetail("Unicode low surrogate must follow a high surrogate."),
+									 report_json_context(lex)));
 						ch = 0x10000 + hi_surrogate + (ch & 0x3ff);
 						hi_surrogate = -1;
 					}
@@ -860,7 +861,7 @@ json_lex_string(JsonLexContext *lex)
 					if (hi_surrogate != -1)
 						ereport(ERROR,
 								(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						  errmsg("invalid input syntax for type %s", "json"),
+								 errmsg("invalid input syntax for type %s", "json"),
 								 errdetail("Unicode low surrogate must follow a high surrogate."),
 								 report_json_context(lex)));
 
@@ -876,8 +877,8 @@ json_lex_string(JsonLexContext *lex)
 						/* We can't allow this, since our TEXT type doesn't */
 						ereport(ERROR,
 								(errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
-							   errmsg("unsupported Unicode escape sequence"),
-						   errdetail("\\u0000 cannot be converted to text."),
+								 errmsg("unsupported Unicode escape sequence"),
+								 errdetail("\\u0000 cannot be converted to text."),
 								 report_json_context(lex)));
 					}
 					else if (GetDatabaseEncoding() == PG_UTF8)
@@ -899,7 +900,7 @@ json_lex_string(JsonLexContext *lex)
 					{
 						ereport(ERROR,
 								(errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
-							   errmsg("unsupported Unicode escape sequence"),
+								 errmsg("unsupported Unicode escape sequence"),
 								 errdetail("Unicode escape values cannot be used for code point values above 007F when the server encoding is not UTF8."),
 								 report_json_context(lex)));
 					}
@@ -945,8 +946,8 @@ json_lex_string(JsonLexContext *lex)
 								(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 								 errmsg("invalid input syntax for type %s",
 										"json"),
-							errdetail("Escape sequence \"\\%s\" is invalid.",
-									  extract_mb_char(s)),
+								 errdetail("Escape sequence \"\\%s\" is invalid.",
+										   extract_mb_char(s)),
 								 report_json_context(lex)));
 				}
 			}
@@ -987,7 +988,7 @@ json_lex_string(JsonLexContext *lex)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 				 errmsg("invalid input syntax for type %s", "json"),
-			errdetail("Unicode low surrogate must follow a high surrogate."),
+				 errdetail("Unicode low surrogate must follow a high surrogate."),
 				 report_json_context(lex)));
 
 	/* Hooray, we found the end of the string! */
@@ -1181,16 +1182,16 @@ report_parse_error(JsonParseContext ctx, JsonLexContext *lex)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("invalid input syntax for type %s", "json"),
-					  errdetail("Expected \",\" or \"]\", but found \"%s\".",
-								token),
+						 errdetail("Expected \",\" or \"]\", but found \"%s\".",
+								   token),
 						 report_json_context(lex)));
 				break;
 			case JSON_PARSE_OBJECT_START:
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("invalid input syntax for type %s", "json"),
-					 errdetail("Expected string or \"}\", but found \"%s\".",
-							   token),
+						 errdetail("Expected string or \"}\", but found \"%s\".",
+								   token),
 						 report_json_context(lex)));
 				break;
 			case JSON_PARSE_OBJECT_LABEL:
@@ -1205,8 +1206,8 @@ report_parse_error(JsonParseContext ctx, JsonLexContext *lex)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("invalid input syntax for type %s", "json"),
-					  errdetail("Expected \",\" or \"}\", but found \"%s\".",
-								token),
+						 errdetail("Expected \",\" or \"}\", but found \"%s\".",
+								   token),
 						 report_json_context(lex)));
 				break;
 			case JSON_PARSE_OBJECT_COMMA:
@@ -1400,7 +1401,7 @@ json_categorize_type(Oid typoid,
 			if (OidIsValid(get_element_type(typoid)) || typoid == ANYARRAYOID
 				|| typoid == RECORDARRAYOID)
 				*tcategory = JSONTYPE_ARRAY;
-			else if (type_is_rowtype(typoid)) /* includes RECORDOID */
+			else if (type_is_rowtype(typoid))	/* includes RECORDOID */
 				*tcategory = JSONTYPE_COMPOSITE;
 			else
 			{
@@ -1471,7 +1472,7 @@ datum_to_json(Datum val, bool is_null, StringInfo result,
 		 tcategory == JSONTYPE_CAST))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		 errmsg("key value must be scalar, not array, composite, or json")));
+				 errmsg("key value must be scalar, not array, composite, or json")));
 
 	switch (tcategory)
 	{
@@ -1714,15 +1715,16 @@ composite_to_json(Datum composite, StringInfo result, bool use_line_feeds)
 		char	   *attname;
 		JsonTypeCategory tcategory;
 		Oid			outfuncoid;
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
 
-		if (tupdesc->attrs[i]->attisdropped)
+		if (att->attisdropped)
 			continue;
 
 		if (needsep)
 			appendStringInfoString(result, sep);
 		needsep = true;
 
-		attname = NameStr(tupdesc->attrs[i]->attname);
+		attname = NameStr(att->attname);
 		escape_json(result, attname);
 		appendStringInfoChar(result, ':');
 
@@ -1734,8 +1736,7 @@ composite_to_json(Datum composite, StringInfo result, bool use_line_feeds)
 			outfuncoid = InvalidOid;
 		}
 		else
-			json_categorize_type(tupdesc->attrs[i]->atttypid,
-								 &tcategory, &outfuncoid);
+			json_categorize_type(att->atttypid, &tcategory, &outfuncoid);
 
 		datum_to_json(val, isnull, result, tcategory, outfuncoid, false);
 	}
@@ -2008,7 +2009,7 @@ json_object_agg_transfn(PG_FUNCTION_ARGS)
 		if (arg_type == InvalidOid)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not determine data type for argument 1")));
+					 errmsg("could not determine data type for argument %d", 1)));
 
 		json_categorize_type(arg_type, &state->key_category,
 							 &state->key_output_func);
@@ -2018,7 +2019,7 @@ json_object_agg_transfn(PG_FUNCTION_ARGS)
 		if (arg_type == InvalidOid)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not determine data type for argument 2")));
+					 errmsg("could not determine data type for argument %d", 2)));
 
 		json_categorize_type(arg_type, &state->val_category,
 							 &state->val_output_func);
@@ -2111,10 +2112,17 @@ json_build_object(PG_FUNCTION_ARGS)
 {
 	int			nargs = PG_NARGS();
 	int			i;
-	Datum		arg;
 	const char *sep = "";
 	StringInfo	result;
-	Oid			val_type;
+	Datum	   *args;
+	bool	   *nulls;
+	Oid		   *types;
+
+	/* fetch argument values to build the object */
+	nargs = extract_variadic_args(fcinfo, 0, false, &args, &types, &nulls);
+
+	if (nargs < 0)
+		PG_RETURN_NULL();
 
 	if (nargs % 2 != 0)
 		ereport(ERROR,
@@ -2128,52 +2136,22 @@ json_build_object(PG_FUNCTION_ARGS)
 
 	for (i = 0; i < nargs; i += 2)
 	{
-		/*
-		 * Note: since json_build_object() is declared as taking type "any",
-		 * the parser will not do any type conversion on unknown-type literals
-		 * (that is, undecorated strings or NULLs).  Such values will arrive
-		 * here as type UNKNOWN, which fortunately does not matter to us,
-		 * since unknownout() works fine.
-		 */
 		appendStringInfoString(result, sep);
 		sep = ", ";
 
 		/* process key */
-		val_type = get_fn_expr_argtype(fcinfo->flinfo, i);
-
-		if (val_type == InvalidOid)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not determine data type for argument %d",
-							i + 1)));
-
-		if (PG_ARGISNULL(i))
+		if (nulls[i])
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("argument %d cannot be null", i + 1),
 					 errhint("Object keys should be text.")));
 
-		arg = PG_GETARG_DATUM(i);
-
-		add_json(arg, false, result, val_type, true);
+		add_json(args[i], false, result, types[i], true);
 
 		appendStringInfoString(result, " : ");
 
 		/* process value */
-		val_type = get_fn_expr_argtype(fcinfo->flinfo, i + 1);
-
-		if (val_type == InvalidOid)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not determine data type for argument %d",
-							i + 2)));
-
-		if (PG_ARGISNULL(i + 1))
-			arg = (Datum) 0;
-		else
-			arg = PG_GETARG_DATUM(i + 1);
-
-		add_json(arg, PG_ARGISNULL(i + 1), result, val_type, false);
+		add_json(args[i + 1], nulls[i + 1], result, types[i + 1], false);
 	}
 
 	appendStringInfoChar(result, '}');
@@ -2196,12 +2174,19 @@ json_build_object_noargs(PG_FUNCTION_ARGS)
 Datum
 json_build_array(PG_FUNCTION_ARGS)
 {
-	int			nargs = PG_NARGS();
+	int			nargs;
 	int			i;
-	Datum		arg;
 	const char *sep = "";
 	StringInfo	result;
-	Oid			val_type;
+	Datum	   *args;
+	bool	   *nulls;
+	Oid		   *types;
+
+	/* fetch argument values to build the array */
+	nargs = extract_variadic_args(fcinfo, 0, false, &args, &types, &nulls);
+
+	if (nargs < 0)
+		PG_RETURN_NULL();
 
 	result = makeStringInfo();
 
@@ -2209,30 +2194,9 @@ json_build_array(PG_FUNCTION_ARGS)
 
 	for (i = 0; i < nargs; i++)
 	{
-		/*
-		 * Note: since json_build_array() is declared as taking type "any",
-		 * the parser will not do any type conversion on unknown-type literals
-		 * (that is, undecorated strings or NULLs).  Such values will arrive
-		 * here as type UNKNOWN, which fortunately does not matter to us,
-		 * since unknownout() works fine.
-		 */
 		appendStringInfoString(result, sep);
 		sep = ", ";
-
-		val_type = get_fn_expr_argtype(fcinfo->flinfo, i);
-
-		if (val_type == InvalidOid)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("could not determine data type for argument %d",
-							i + 1)));
-
-		if (PG_ARGISNULL(i))
-			arg = (Datum) 0;
-		else
-			arg = PG_GETARG_DATUM(i);
-
-		add_json(arg, PG_ARGISNULL(i), result, val_type, false);
+		add_json(args[i], nulls[i], result, types[i], false);
 	}
 
 	appendStringInfoChar(result, ']');

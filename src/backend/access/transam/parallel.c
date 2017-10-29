@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "access/session.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "catalog/namespace.h"
@@ -36,6 +37,7 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
+#include "utils/typcache.h"
 
 
 /*
@@ -51,8 +53,9 @@
 #define PARALLEL_MAGIC						0x50477c7c
 
 /*
- * Magic numbers for parallel state sharing.  Higher-level code should use
- * smaller values, leaving these very large ones for use by this module.
+ * Magic numbers for per-context parallel state sharing.  Higher-level code
+ * should use smaller values, leaving these very large ones for use by this
+ * module.
  */
 #define PARALLEL_KEY_FIXED					UINT64CONST(0xFFFFFFFFFFFF0001)
 #define PARALLEL_KEY_ERROR_QUEUE			UINT64CONST(0xFFFFFFFFFFFF0002)
@@ -63,6 +66,7 @@
 #define PARALLEL_KEY_ACTIVE_SNAPSHOT		UINT64CONST(0xFFFFFFFFFFFF0007)
 #define PARALLEL_KEY_TRANSACTION_STATE		UINT64CONST(0xFFFFFFFFFFFF0008)
 #define PARALLEL_KEY_ENTRYPOINT				UINT64CONST(0xFFFFFFFFFFFF0009)
+#define PARALLEL_KEY_SESSION_DSM			UINT64CONST(0xFFFFFFFFFFFF000A)
 
 /* Fixed-size parallel state. */
 typedef struct FixedParallelState
@@ -113,7 +117,7 @@ static const struct
 {
 	const char *fn_name;
 	parallel_worker_main_type fn_addr;
-}	InternalParallelWorkers[] =
+}			InternalParallelWorkers[] =
 
 {
 	{
@@ -197,6 +201,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	Size		segsize = 0;
 	int			i;
 	FixedParallelState *fps;
+	dsm_handle	session_dsm_handle = DSM_HANDLE_INVALID;
 	Snapshot	transaction_snapshot = GetTransactionSnapshot();
 	Snapshot	active_snapshot = GetActiveSnapshot();
 
@@ -213,6 +218,21 @@ InitializeParallelDSM(ParallelContext *pcxt)
 	 */
 	if (pcxt->nworkers > 0)
 	{
+		/* Get (or create) the per-session DSM segment's handle. */
+		session_dsm_handle = GetSessionDsmHandle();
+
+		/*
+		 * If we weren't able to create a per-session DSM segment, then we can
+		 * continue but we can't safely launch any workers because their
+		 * record typmods would be incompatible so they couldn't exchange
+		 * tuples.
+		 */
+		if (session_dsm_handle == DSM_HANDLE_INVALID)
+			pcxt->nworkers = 0;
+	}
+
+	if (pcxt->nworkers > 0)
+	{
 		/* Estimate space for various kinds of state sharing. */
 		library_len = EstimateLibraryStateSpace();
 		shm_toc_estimate_chunk(&pcxt->estimator, library_len);
@@ -226,8 +246,9 @@ InitializeParallelDSM(ParallelContext *pcxt)
 		shm_toc_estimate_chunk(&pcxt->estimator, asnaplen);
 		tstatelen = EstimateTransactionStateSpace();
 		shm_toc_estimate_chunk(&pcxt->estimator, tstatelen);
+		shm_toc_estimate_chunk(&pcxt->estimator, sizeof(dsm_handle));
 		/* If you add more chunks here, you probably need to add keys. */
-		shm_toc_estimate_keys(&pcxt->estimator, 6);
+		shm_toc_estimate_keys(&pcxt->estimator, 7);
 
 		/* Estimate space need for error queues. */
 		StaticAssertStmt(BUFFERALIGN(PARALLEL_ERROR_QUEUE_SIZE) ==
@@ -295,6 +316,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 		char	   *asnapspace;
 		char	   *tstatespace;
 		char	   *error_queue_space;
+		char	   *session_dsm_handle_space;
 		char	   *entrypointstate;
 		Size		lnamelen;
 
@@ -321,6 +343,13 @@ InitializeParallelDSM(ParallelContext *pcxt)
 		asnapspace = shm_toc_allocate(pcxt->toc, asnaplen);
 		SerializeSnapshot(active_snapshot, asnapspace);
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_ACTIVE_SNAPSHOT, asnapspace);
+
+		/* Provide the handle for per-session segment. */
+		session_dsm_handle_space = shm_toc_allocate(pcxt->toc,
+													sizeof(dsm_handle));
+		*(dsm_handle *) session_dsm_handle_space = session_dsm_handle;
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_SESSION_DSM,
+					   session_dsm_handle_space);
 
 		/* Serialize transaction state. */
 		tstatespace = shm_toc_allocate(pcxt->toc, tstatelen);
@@ -392,12 +421,12 @@ ReinitializeParallelDSM(ParallelContext *pcxt)
 	}
 
 	/* Reset a few bits of fixed parallel state to a clean state. */
-	fps = shm_toc_lookup(pcxt->toc, PARALLEL_KEY_FIXED);
+	fps = shm_toc_lookup(pcxt->toc, PARALLEL_KEY_FIXED, false);
 	fps->last_xlog_end = 0;
 
 	/* Recreate error queues. */
 	error_queue_space =
-		shm_toc_lookup(pcxt->toc, PARALLEL_KEY_ERROR_QUEUE);
+		shm_toc_lookup(pcxt->toc, PARALLEL_KEY_ERROR_QUEUE, false);
 	for (i = 0; i < pcxt->nworkers; ++i)
 	{
 		char	   *start;
@@ -438,6 +467,7 @@ LaunchParallelWorkers(ParallelContext *pcxt)
 	memset(&worker, 0, sizeof(worker));
 	snprintf(worker.bgw_name, BGW_MAXLEN, "parallel worker for PID %d",
 			 MyProcPid);
+	snprintf(worker.bgw_type, BGW_MAXLEN, "parallel worker");
 	worker.bgw_flags =
 		BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION
 		| BGWORKER_CLASS_PARALLEL;
@@ -480,7 +510,7 @@ LaunchParallelWorkers(ParallelContext *pcxt)
 			 */
 			any_registrations_failed = true;
 			pcxt->worker[i].bgwhandle = NULL;
-			pfree(pcxt->worker[i].error_mqh);
+			shm_mq_detach(pcxt->worker[i].error_mqh);
 			pcxt->worker[i].error_mqh = NULL;
 		}
 	}
@@ -527,16 +557,16 @@ WaitForParallelWorkersToFinish(ParallelContext *pcxt)
 		if (!anyone_alive)
 			break;
 
-		WaitLatch(&MyProc->procLatch, WL_LATCH_SET, -1,
+		WaitLatch(MyLatch, WL_LATCH_SET, -1,
 				  WAIT_EVENT_PARALLEL_FINISH);
-		ResetLatch(&MyProc->procLatch);
+		ResetLatch(MyLatch);
 	}
 
 	if (pcxt->toc != NULL)
 	{
 		FixedParallelState *fps;
 
-		fps = shm_toc_lookup(pcxt->toc, PARALLEL_KEY_FIXED);
+		fps = shm_toc_lookup(pcxt->toc, PARALLEL_KEY_FIXED, false);
 		if (fps->last_xlog_end > XactLastRecEnd)
 			XactLastRecEnd = fps->last_xlog_end;
 	}
@@ -574,7 +604,7 @@ WaitForParallelWorkersToExit(ParallelContext *pcxt)
 		if (status == BGWH_POSTMASTER_DIED)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
-				 errmsg("postmaster exited during a parallel transaction")));
+					 errmsg("postmaster exited during a parallel transaction")));
 
 		/* Release memory. */
 		pfree(pcxt->worker[i].bgwhandle);
@@ -612,7 +642,7 @@ DestroyParallelContext(ParallelContext *pcxt)
 			{
 				TerminateBackgroundWorker(pcxt->worker[i].bgwhandle);
 
-				pfree(pcxt->worker[i].error_mqh);
+				shm_mq_detach(pcxt->worker[i].error_mqh);
 				pcxt->worker[i].error_mqh = NULL;
 			}
 		}
@@ -760,8 +790,8 @@ HandleParallelMessages(void)
 				}
 				else
 					ereport(ERROR,
-						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						   errmsg("lost connection to parallel worker")));
+							(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							 errmsg("lost connection to parallel worker")));
 			}
 		}
 	}
@@ -861,7 +891,7 @@ HandleParallelMessage(ParallelContext *pcxt, int i, StringInfo msg)
 
 		case 'X':				/* Terminate, indicating clean exit */
 			{
-				pfree(pcxt->worker[i].error_mqh);
+				shm_mq_detach(pcxt->worker[i].error_mqh);
 				pcxt->worker[i].error_mqh = NULL;
 				break;
 			}
@@ -938,6 +968,7 @@ ParallelWorkerMain(Datum main_arg)
 	char	   *asnapspace;
 	char	   *tstatespace;
 	StringInfoData msgbuf;
+	char	   *session_dsm_handle_space;
 
 	/* Set flag to indicate that we're initializing a parallel worker. */
 	InitializingParallelWorker = true;
@@ -970,11 +1001,10 @@ ParallelWorkerMain(Datum main_arg)
 	if (toc == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-		   errmsg("invalid magic number in dynamic shared memory segment")));
+				 errmsg("invalid magic number in dynamic shared memory segment")));
 
 	/* Look up fixed parallel state. */
-	fps = shm_toc_lookup(toc, PARALLEL_KEY_FIXED);
-	Assert(fps != NULL);
+	fps = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false);
 	MyFixedParallelState = fps;
 
 	/*
@@ -983,7 +1013,7 @@ ParallelWorkerMain(Datum main_arg)
 	 * errors that happen here will not be reported back to the process that
 	 * requested that this worker be launched.
 	 */
-	error_queue_space = shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE);
+	error_queue_space = shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false);
 	mq = (shm_mq *) (error_queue_space +
 					 ParallelWorkerNumber * PARALLEL_ERROR_QUEUE_SIZE);
 	shm_mq_set_sender(mq, MyProc);
@@ -1000,8 +1030,8 @@ ParallelWorkerMain(Datum main_arg)
 	 * in this case.
 	 */
 	pq_beginmessage(&msgbuf, 'K');
-	pq_sendint(&msgbuf, (int32) MyProcPid, sizeof(int32));
-	pq_sendint(&msgbuf, (int32) MyCancelKey, sizeof(int32));
+	pq_sendint32(&msgbuf, (int32) MyProcPid);
+	pq_sendint32(&msgbuf, (int32) MyCancelKey);
 	pq_endmessage(&msgbuf);
 
 	/*
@@ -1027,8 +1057,7 @@ ParallelWorkerMain(Datum main_arg)
 	 * this before restoring GUCs, because the libraries might define custom
 	 * variables.
 	 */
-	libraryspace = shm_toc_lookup(toc, PARALLEL_KEY_LIBRARY);
-	Assert(libraryspace != NULL);
+	libraryspace = shm_toc_lookup(toc, PARALLEL_KEY_LIBRARY, false);
 	RestoreLibraryState(libraryspace);
 
 	/*
@@ -1036,8 +1065,7 @@ ParallelWorkerMain(Datum main_arg)
 	 * loading an additional library, though most likely the entry point is in
 	 * the core backend or in a library we just loaded.
 	 */
-	entrypointstate = shm_toc_lookup(toc, PARALLEL_KEY_ENTRYPOINT);
-	Assert(entrypointstate != NULL);
+	entrypointstate = shm_toc_lookup(toc, PARALLEL_KEY_ENTRYPOINT, false);
 	library_name = entrypointstate;
 	function_name = entrypointstate + strlen(library_name) + 1;
 
@@ -1054,30 +1082,31 @@ ParallelWorkerMain(Datum main_arg)
 	SetClientEncoding(GetDatabaseEncoding());
 
 	/* Restore GUC values from launching backend. */
-	gucspace = shm_toc_lookup(toc, PARALLEL_KEY_GUC);
-	Assert(gucspace != NULL);
+	gucspace = shm_toc_lookup(toc, PARALLEL_KEY_GUC, false);
 	StartTransactionCommand();
 	RestoreGUCState(gucspace);
 	CommitTransactionCommand();
 
 	/* Crank up a transaction state appropriate to a parallel worker. */
-	tstatespace = shm_toc_lookup(toc, PARALLEL_KEY_TRANSACTION_STATE);
+	tstatespace = shm_toc_lookup(toc, PARALLEL_KEY_TRANSACTION_STATE, false);
 	StartParallelWorkerTransaction(tstatespace);
 
 	/* Restore combo CID state. */
-	combocidspace = shm_toc_lookup(toc, PARALLEL_KEY_COMBO_CID);
-	Assert(combocidspace != NULL);
+	combocidspace = shm_toc_lookup(toc, PARALLEL_KEY_COMBO_CID, false);
 	RestoreComboCIDState(combocidspace);
 
+	/* Attach to the per-session DSM segment and contained objects. */
+	session_dsm_handle_space =
+		shm_toc_lookup(toc, PARALLEL_KEY_SESSION_DSM, false);
+	AttachSession(*(dsm_handle *) session_dsm_handle_space);
+
 	/* Restore transaction snapshot. */
-	tsnapspace = shm_toc_lookup(toc, PARALLEL_KEY_TRANSACTION_SNAPSHOT);
-	Assert(tsnapspace != NULL);
+	tsnapspace = shm_toc_lookup(toc, PARALLEL_KEY_TRANSACTION_SNAPSHOT, false);
 	RestoreTransactionSnapshot(RestoreSnapshot(tsnapspace),
 							   fps->parallel_master_pgproc);
 
 	/* Restore active snapshot. */
-	asnapspace = shm_toc_lookup(toc, PARALLEL_KEY_ACTIVE_SNAPSHOT);
-	Assert(asnapspace != NULL);
+	asnapspace = shm_toc_lookup(toc, PARALLEL_KEY_ACTIVE_SNAPSHOT, false);
 	PushActiveSnapshot(RestoreSnapshot(asnapspace));
 
 	/*
@@ -1116,6 +1145,9 @@ ParallelWorkerMain(Datum main_arg)
 
 	/* Shut down the parallel-worker transaction. */
 	EndParallelWorkerTransaction();
+
+	/* Detach from the per-session DSM segment. */
+	DetachSession();
 
 	/* Report success. */
 	pq_putmessage('X', NULL, 0);

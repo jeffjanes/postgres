@@ -181,7 +181,7 @@ ALTER FOREIGN TABLE ft1 ALTER COLUMN c1 OPTIONS (column_name 'C 1');
 ALTER FOREIGN TABLE ft2 ALTER COLUMN c1 OPTIONS (column_name 'C 1');
 \det+
                                       List of foreign tables
- Schema |   Table    |  Server   |                   FDW Options                    | Description 
+ Schema |   Table    |  Server   |                   FDW options                    | Description 
 --------+------------+-----------+--------------------------------------------------+-------------
  public | ft1        | loopback  | (schema_name 'S 1', table_name 'T 1')            | 
  public | ft2        | loopback  | (schema_name 'S 1', table_name 'T 1')            | 
@@ -191,6 +191,44 @@ ALTER FOREIGN TABLE ft2 ALTER COLUMN c1 OPTIONS (column_name 'C 1');
  public | ft_pg_type | loopback  | (schema_name 'pg_catalog', table_name 'pg_type') | 
 (6 rows)
 
+-- Test that alteration of server options causes reconnection
+-- Remote's errors might be non-English, so hide them to ensure stable results
+\set VERBOSITY terse
+SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work
+  c3   |              c4              
+-------+------------------------------
+ 00001 | Fri Jan 02 00:00:00 1970 PST
+(1 row)
+
+ALTER SERVER loopback OPTIONS (SET dbname 'no such database');
+SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should fail
+ERROR:  could not connect to server "loopback"
+DO $d$
+    BEGIN
+        EXECUTE $$ALTER SERVER loopback
+            OPTIONS (SET dbname '$$||current_database()||$$')$$;
+    END;
+$d$;
+SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
+  c3   |              c4              
+-------+------------------------------
+ 00001 | Fri Jan 02 00:00:00 1970 PST
+(1 row)
+
+-- Test that alteration of user mapping options causes reconnection
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback
+  OPTIONS (ADD user 'no such user');
+SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should fail
+ERROR:  could not connect to server "loopback"
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback
+  OPTIONS (DROP user);
+SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
+  c3   |              c4              
+-------+------------------------------
+ 00001 | Fri Jan 02 00:00:00 1970 PST
+(1 row)
+
+\set VERBOSITY default
 -- Now we should be able to run ANALYZE.
 -- To exercise multiple code paths, we use local stats on ft1
 -- and remote-estimate mode on ft2.
@@ -1620,6 +1658,35 @@ SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1
     | 21
 (10 rows)
 
+-- full outer join + WHERE clause with shippable extensions set
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c2, t1.c3 FROM ft1 t1 FULL JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE postgres_fdw_abs(t1.c1) > 0 OFFSET 10 LIMIT 10;
+                                                                                  QUERY PLAN                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: t1.c1, t2.c2, t1.c3
+   ->  Foreign Scan
+         Output: t1.c1, t2.c2, t1.c3
+         Relations: (public.ft1 t1) FULL JOIN (public.ft2 t2)
+         Remote SQL: SELECT r1."C 1", r1.c3, r2.c2 FROM ("S 1"."T 1" r1 FULL JOIN "S 1"."T 1" r2 ON (((r1."C 1" = r2."C 1")))) WHERE ((public.postgres_fdw_abs(r1."C 1") > 0))
+(6 rows)
+
+ALTER SERVER loopback OPTIONS (DROP extensions);
+-- full outer join + WHERE clause with shippable extensions not set
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c2, t1.c3 FROM ft1 t1 FULL JOIN ft2 t2 ON (t1.c1 = t2.c1) WHERE postgres_fdw_abs(t1.c1) > 0 OFFSET 10 LIMIT 10;
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: t1.c1, t2.c2, t1.c3
+   ->  Foreign Scan
+         Output: t1.c1, t2.c2, t1.c3
+         Filter: (postgres_fdw_abs(t1.c1) > 0)
+         Relations: (public.ft1 t1) FULL JOIN (public.ft2 t2)
+         Remote SQL: SELECT r1."C 1", r1.c3, r2.c2 FROM ("S 1"."T 1" r1 FULL JOIN "S 1"."T 1" r2 ON (((r1."C 1" = r2."C 1"))))
+(7 rows)
+
+ALTER SERVER loopback OPTIONS (ADD extensions 'postgres_fdw');
 -- join two tables with FOR UPDATE clause
 -- tests whole-row reference for row marks
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -5827,6 +5894,66 @@ INSERT INTO ft1(c1, c2) VALUES(1111, 2);
 UPDATE ft1 SET c2 = c2 + 1 WHERE c1 = 1;
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT ft1_c2negative;
 -- ===================================================================
+-- test WITH CHECK OPTION constraints
+-- ===================================================================
+CREATE TABLE base_tbl (a int, b int);
+CREATE FOREIGN TABLE foreign_tbl (a int, b int)
+  SERVER loopback OPTIONS(table_name 'base_tbl');
+CREATE VIEW rw_view AS SELECT * FROM foreign_tbl
+  WHERE a < b WITH CHECK OPTION;
+\d+ rw_view
+                           View "public.rw_view"
+ Column |  Type   | Collation | Nullable | Default | Storage | Description 
+--------+---------+-----------+----------+---------+---------+-------------
+ a      | integer |           |          |         | plain   | 
+ b      | integer |           |          |         | plain   | 
+View definition:
+ SELECT foreign_tbl.a,
+    foreign_tbl.b
+   FROM foreign_tbl
+  WHERE foreign_tbl.a < foreign_tbl.b;
+Options: check_option=cascaded
+
+INSERT INTO rw_view VALUES (0, 10); -- ok
+INSERT INTO rw_view VALUES (10, 0); -- should fail
+ERROR:  new row violates check option for view "rw_view"
+DETAIL:  Failing row contains (10, 0).
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE rw_view SET b = 20 WHERE a = 0; -- not pushed down
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Update on public.foreign_tbl
+   Remote SQL: UPDATE public.base_tbl SET b = $2 WHERE ctid = $1
+   ->  Foreign Scan on public.foreign_tbl
+         Output: foreign_tbl.a, 20, foreign_tbl.ctid
+         Remote SQL: SELECT a, ctid FROM public.base_tbl WHERE ((a < b)) AND ((a = 0)) FOR UPDATE
+(5 rows)
+
+UPDATE rw_view SET b = 20 WHERE a = 0; -- ok
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE rw_view SET b = -20 WHERE a = 0; -- not pushed down
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Update on public.foreign_tbl
+   Remote SQL: UPDATE public.base_tbl SET b = $2 WHERE ctid = $1
+   ->  Foreign Scan on public.foreign_tbl
+         Output: foreign_tbl.a, '-20'::integer, foreign_tbl.ctid
+         Remote SQL: SELECT a, ctid FROM public.base_tbl WHERE ((a < b)) AND ((a = 0)) FOR UPDATE
+(5 rows)
+
+UPDATE rw_view SET b = -20 WHERE a = 0; -- should fail
+ERROR:  new row violates check option for view "rw_view"
+DETAIL:  Failing row contains (0, -20).
+SELECT * FROM foreign_tbl;
+ a | b  
+---+----
+ 0 | 20
+(1 row)
+
+DROP FOREIGN TABLE foreign_tbl CASCADE;
+NOTICE:  drop cascades to view rw_view
+DROP TABLE base_tbl;
+-- ===================================================================
 -- test serial columns (ie, sequence-based defaults)
 -- ===================================================================
 create table loc1 (f1 serial, f2 text);
@@ -6919,7 +7046,7 @@ CREATE SCHEMA import_dest1;
 IMPORT FOREIGN SCHEMA import_source FROM SERVER loopback INTO import_dest1;
 \det+ import_dest1.*
                                      List of foreign tables
-    Schema    | Table |  Server  |                   FDW Options                   | Description 
+    Schema    | Table |  Server  |                   FDW options                   | Description 
 --------------+-------+----------+-------------------------------------------------+-------------
  import_dest1 | t1    | loopback | (schema_name 'import_source', table_name 't1')  | 
  import_dest1 | t2    | loopback | (schema_name 'import_source', table_name 't2')  | 
@@ -6931,51 +7058,51 @@ IMPORT FOREIGN SCHEMA import_source FROM SERVER loopback INTO import_dest1;
 
 \d import_dest1.*
                          Foreign table "import_dest1.t1"
- Column |       Type        | Collation | Nullable | Default |    FDW Options     
+ Column |       Type        | Collation | Nullable | Default |    FDW options     
 --------+-------------------+-----------+----------+---------+--------------------
  c1     | integer           |           |          |         | (column_name 'c1')
  c2     | character varying |           | not null |         | (column_name 'c2')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't1')
+FDW options: (schema_name 'import_source', table_name 't1')
 
                          Foreign table "import_dest1.t2"
- Column |       Type        | Collation | Nullable | Default |    FDW Options     
+ Column |       Type        | Collation | Nullable | Default |    FDW options     
 --------+-------------------+-----------+----------+---------+--------------------
  c1     | integer           |           |          |         | (column_name 'c1')
  c2     | character varying |           |          |         | (column_name 'c2')
  c3     | text              | POSIX     |          |         | (column_name 'c3')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't2')
+FDW options: (schema_name 'import_source', table_name 't2')
 
                              Foreign table "import_dest1.t3"
- Column |           Type           | Collation | Nullable | Default |    FDW Options     
+ Column |           Type           | Collation | Nullable | Default |    FDW options     
 --------+--------------------------+-----------+----------+---------+--------------------
  c1     | timestamp with time zone |           |          |         | (column_name 'c1')
  c2     | typ1                     |           |          |         | (column_name 'c2')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't3')
+FDW options: (schema_name 'import_source', table_name 't3')
 
                     Foreign table "import_dest1.t4"
- Column |  Type   | Collation | Nullable | Default |    FDW Options     
+ Column |  Type   | Collation | Nullable | Default |    FDW options     
 --------+---------+-----------+----------+---------+--------------------
- c1     | integer |           | not null |         | (column_name 'c1')
+ c1     | integer |           |          |         | (column_name 'c1')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't4')
+FDW options: (schema_name 'import_source', table_name 't4')
 
                            Foreign table "import_dest1.x 4"
- Column |         Type          | Collation | Nullable | Default |     FDW Options     
+ Column |         Type          | Collation | Nullable | Default |     FDW options     
 --------+-----------------------+-----------+----------+---------+---------------------
  c1     | double precision      |           |          |         | (column_name 'c1')
  C 2    | text                  |           |          |         | (column_name 'C 2')
  c3     | character varying(42) |           |          |         | (column_name 'c3')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 'x 4')
+FDW options: (schema_name 'import_source', table_name 'x 4')
 
                Foreign table "import_dest1.x 5"
- Column | Type | Collation | Nullable | Default | FDW Options 
+ Column | Type | Collation | Nullable | Default | FDW options 
 --------+------+-----------+----------+---------+-------------
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 'x 5')
+FDW options: (schema_name 'import_source', table_name 'x 5')
 
 -- Options
 CREATE SCHEMA import_dest2;
@@ -6983,7 +7110,7 @@ IMPORT FOREIGN SCHEMA import_source FROM SERVER loopback INTO import_dest2
   OPTIONS (import_default 'true');
 \det+ import_dest2.*
                                      List of foreign tables
-    Schema    | Table |  Server  |                   FDW Options                   | Description 
+    Schema    | Table |  Server  |                   FDW options                   | Description 
 --------------+-------+----------+-------------------------------------------------+-------------
  import_dest2 | t1    | loopback | (schema_name 'import_source', table_name 't1')  | 
  import_dest2 | t2    | loopback | (schema_name 'import_source', table_name 't2')  | 
@@ -6995,58 +7122,58 @@ IMPORT FOREIGN SCHEMA import_source FROM SERVER loopback INTO import_dest2
 
 \d import_dest2.*
                          Foreign table "import_dest2.t1"
- Column |       Type        | Collation | Nullable | Default |    FDW Options     
+ Column |       Type        | Collation | Nullable | Default |    FDW options     
 --------+-------------------+-----------+----------+---------+--------------------
  c1     | integer           |           |          |         | (column_name 'c1')
  c2     | character varying |           | not null |         | (column_name 'c2')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't1')
+FDW options: (schema_name 'import_source', table_name 't1')
 
                          Foreign table "import_dest2.t2"
- Column |       Type        | Collation | Nullable | Default |    FDW Options     
+ Column |       Type        | Collation | Nullable | Default |    FDW options     
 --------+-------------------+-----------+----------+---------+--------------------
  c1     | integer           |           |          | 42      | (column_name 'c1')
  c2     | character varying |           |          |         | (column_name 'c2')
  c3     | text              | POSIX     |          |         | (column_name 'c3')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't2')
+FDW options: (schema_name 'import_source', table_name 't2')
 
                              Foreign table "import_dest2.t3"
- Column |           Type           | Collation | Nullable | Default |    FDW Options     
+ Column |           Type           | Collation | Nullable | Default |    FDW options     
 --------+--------------------------+-----------+----------+---------+--------------------
  c1     | timestamp with time zone |           |          | now()   | (column_name 'c1')
  c2     | typ1                     |           |          |         | (column_name 'c2')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't3')
+FDW options: (schema_name 'import_source', table_name 't3')
 
                     Foreign table "import_dest2.t4"
- Column |  Type   | Collation | Nullable | Default |    FDW Options     
+ Column |  Type   | Collation | Nullable | Default |    FDW options     
 --------+---------+-----------+----------+---------+--------------------
- c1     | integer |           | not null |         | (column_name 'c1')
+ c1     | integer |           |          |         | (column_name 'c1')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't4')
+FDW options: (schema_name 'import_source', table_name 't4')
 
                            Foreign table "import_dest2.x 4"
- Column |         Type          | Collation | Nullable | Default |     FDW Options     
+ Column |         Type          | Collation | Nullable | Default |     FDW options     
 --------+-----------------------+-----------+----------+---------+---------------------
  c1     | double precision      |           |          |         | (column_name 'c1')
  C 2    | text                  |           |          |         | (column_name 'C 2')
  c3     | character varying(42) |           |          |         | (column_name 'c3')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 'x 4')
+FDW options: (schema_name 'import_source', table_name 'x 4')
 
                Foreign table "import_dest2.x 5"
- Column | Type | Collation | Nullable | Default | FDW Options 
+ Column | Type | Collation | Nullable | Default | FDW options 
 --------+------+-----------+----------+---------+-------------
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 'x 5')
+FDW options: (schema_name 'import_source', table_name 'x 5')
 
 CREATE SCHEMA import_dest3;
 IMPORT FOREIGN SCHEMA import_source FROM SERVER loopback INTO import_dest3
   OPTIONS (import_collate 'false', import_not_null 'false');
 \det+ import_dest3.*
                                      List of foreign tables
-    Schema    | Table |  Server  |                   FDW Options                   | Description 
+    Schema    | Table |  Server  |                   FDW options                   | Description 
 --------------+-------+----------+-------------------------------------------------+-------------
  import_dest3 | t1    | loopback | (schema_name 'import_source', table_name 't1')  | 
  import_dest3 | t2    | loopback | (schema_name 'import_source', table_name 't2')  | 
@@ -7058,51 +7185,51 @@ IMPORT FOREIGN SCHEMA import_source FROM SERVER loopback INTO import_dest3
 
 \d import_dest3.*
                          Foreign table "import_dest3.t1"
- Column |       Type        | Collation | Nullable | Default |    FDW Options     
+ Column |       Type        | Collation | Nullable | Default |    FDW options     
 --------+-------------------+-----------+----------+---------+--------------------
  c1     | integer           |           |          |         | (column_name 'c1')
  c2     | character varying |           |          |         | (column_name 'c2')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't1')
+FDW options: (schema_name 'import_source', table_name 't1')
 
                          Foreign table "import_dest3.t2"
- Column |       Type        | Collation | Nullable | Default |    FDW Options     
+ Column |       Type        | Collation | Nullable | Default |    FDW options     
 --------+-------------------+-----------+----------+---------+--------------------
  c1     | integer           |           |          |         | (column_name 'c1')
  c2     | character varying |           |          |         | (column_name 'c2')
  c3     | text              |           |          |         | (column_name 'c3')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't2')
+FDW options: (schema_name 'import_source', table_name 't2')
 
                              Foreign table "import_dest3.t3"
- Column |           Type           | Collation | Nullable | Default |    FDW Options     
+ Column |           Type           | Collation | Nullable | Default |    FDW options     
 --------+--------------------------+-----------+----------+---------+--------------------
  c1     | timestamp with time zone |           |          |         | (column_name 'c1')
  c2     | typ1                     |           |          |         | (column_name 'c2')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't3')
+FDW options: (schema_name 'import_source', table_name 't3')
 
                     Foreign table "import_dest3.t4"
- Column |  Type   | Collation | Nullable | Default |    FDW Options     
+ Column |  Type   | Collation | Nullable | Default |    FDW options     
 --------+---------+-----------+----------+---------+--------------------
  c1     | integer |           |          |         | (column_name 'c1')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 't4')
+FDW options: (schema_name 'import_source', table_name 't4')
 
                            Foreign table "import_dest3.x 4"
- Column |         Type          | Collation | Nullable | Default |     FDW Options     
+ Column |         Type          | Collation | Nullable | Default |     FDW options     
 --------+-----------------------+-----------+----------+---------+---------------------
  c1     | double precision      |           |          |         | (column_name 'c1')
  C 2    | text                  |           |          |         | (column_name 'C 2')
  c3     | character varying(42) |           |          |         | (column_name 'c3')
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 'x 4')
+FDW options: (schema_name 'import_source', table_name 'x 4')
 
                Foreign table "import_dest3.x 5"
- Column | Type | Collation | Nullable | Default | FDW Options 
+ Column | Type | Collation | Nullable | Default | FDW options 
 --------+------+-----------+----------+---------+-------------
 Server: loopback
-FDW Options: (schema_name 'import_source', table_name 'x 5')
+FDW options: (schema_name 'import_source', table_name 'x 5')
 
 -- Check LIMIT TO and EXCEPT
 CREATE SCHEMA import_dest4;
@@ -7110,7 +7237,7 @@ IMPORT FOREIGN SCHEMA import_source LIMIT TO (t1, nonesuch)
   FROM SERVER loopback INTO import_dest4;
 \det+ import_dest4.*
                                      List of foreign tables
-    Schema    | Table |  Server  |                  FDW Options                   | Description 
+    Schema    | Table |  Server  |                  FDW options                   | Description 
 --------------+-------+----------+------------------------------------------------+-------------
  import_dest4 | t1    | loopback | (schema_name 'import_source', table_name 't1') | 
 (1 row)
@@ -7119,7 +7246,7 @@ IMPORT FOREIGN SCHEMA import_source EXCEPT (t1, "x 4", nonesuch)
   FROM SERVER loopback INTO import_dest4;
 \det+ import_dest4.*
                                      List of foreign tables
-    Schema    | Table |  Server  |                   FDW Options                   | Description 
+    Schema    | Table |  Server  |                   FDW options                   | Description 
 --------------+-------+----------+-------------------------------------------------+-------------
  import_dest4 | t1    | loopback | (schema_name 'import_source', table_name 't1')  | 
  import_dest4 | t2    | loopback | (schema_name 'import_source', table_name 't2')  | 
@@ -7219,3 +7346,123 @@ AND ftoptions @> array['fetch_size=60000'];
 (1 row)
 
 ROLLBACK;
+-- ===================================================================
+-- test partition-wise-joins
+-- ===================================================================
+SET enable_partition_wise_join=on;
+CREATE TABLE fprt1 (a int, b int, c varchar) PARTITION BY RANGE(a);
+CREATE TABLE fprt1_p1 (LIKE fprt1);
+CREATE TABLE fprt1_p2 (LIKE fprt1);
+INSERT INTO fprt1_p1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 249, 2) i;
+INSERT INTO fprt1_p2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(250, 499, 2) i;
+CREATE FOREIGN TABLE ftprt1_p1 PARTITION OF fprt1 FOR VALUES FROM (0) TO (250)
+	SERVER loopback OPTIONS (table_name 'fprt1_p1', use_remote_estimate 'true');
+CREATE FOREIGN TABLE ftprt1_p2 PARTITION OF fprt1 FOR VALUES FROM (250) TO (500)
+	SERVER loopback OPTIONS (TABLE_NAME 'fprt1_p2');
+ANALYZE fprt1;
+ANALYZE fprt1_p1;
+ANALYZE fprt1_p2;
+CREATE TABLE fprt2 (a int, b int, c varchar) PARTITION BY RANGE(b);
+CREATE TABLE fprt2_p1 (LIKE fprt2);
+CREATE TABLE fprt2_p2 (LIKE fprt2);
+INSERT INTO fprt2_p1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 249, 3) i;
+INSERT INTO fprt2_p2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(250, 499, 3) i;
+CREATE FOREIGN TABLE ftprt2_p1 PARTITION OF fprt2 FOR VALUES FROM (0) TO (250)
+	SERVER loopback OPTIONS (table_name 'fprt2_p1', use_remote_estimate 'true');
+CREATE FOREIGN TABLE ftprt2_p2 PARTITION OF fprt2 FOR VALUES FROM (250) TO (500)
+	SERVER loopback OPTIONS (table_name 'fprt2_p2', use_remote_estimate 'true');
+ANALYZE fprt2;
+ANALYZE fprt2_p1;
+ANALYZE fprt2_p2;
+-- inner join three tables
+EXPLAIN (COSTS OFF)
+SELECT t1.a,t2.b,t3.c FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) INNER JOIN fprt1 t3 ON (t2.b = t3.a) WHERE t1.a % 25 =0 ORDER BY 1,2,3;
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: t1.a, t3.c
+   ->  Append
+         ->  Foreign Scan
+               Relations: ((public.ftprt1_p1 t1) INNER JOIN (public.ftprt2_p1 t2)) INNER JOIN (public.ftprt1_p1 t3)
+         ->  Foreign Scan
+               Relations: ((public.ftprt1_p2 t1) INNER JOIN (public.ftprt2_p2 t2)) INNER JOIN (public.ftprt1_p2 t3)
+(7 rows)
+
+SELECT t1.a,t2.b,t3.c FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) INNER JOIN fprt1 t3 ON (t2.b = t3.a) WHERE t1.a % 25 =0 ORDER BY 1,2,3;
+  a  |  b  |  c   
+-----+-----+------
+   0 |   0 | 0000
+ 150 | 150 | 0003
+ 250 | 250 | 0005
+ 400 | 400 | 0008
+(4 rows)
+
+-- left outer join + nullable clasue
+EXPLAIN (COSTS OFF)
+SELECT t1.a,t2.b,t2.c FROM fprt1 t1 LEFT JOIN (SELECT * FROM fprt2 WHERE a < 10) t2 ON (t1.a = t2.b and t1.b = t2.a) WHERE t1.a < 10 ORDER BY 1,2,3;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Sort
+   Sort Key: t1.a, ftprt2_p1.b, ftprt2_p1.c
+   ->  Append
+         ->  Foreign Scan
+               Relations: (public.ftprt1_p1 t1) LEFT JOIN (public.ftprt2_p1 fprt2)
+(5 rows)
+
+SELECT t1.a,t2.b,t2.c FROM fprt1 t1 LEFT JOIN (SELECT * FROM fprt2 WHERE a < 10) t2 ON (t1.a = t2.b and t1.b = t2.a) WHERE t1.a < 10 ORDER BY 1,2,3;
+ a | b |  c   
+---+---+------
+ 0 | 0 | 0000
+ 2 |   | 
+ 4 |   | 
+ 6 | 6 | 0000
+ 8 |   | 
+(5 rows)
+
+-- with whole-row reference
+EXPLAIN (COSTS OFF)
+SELECT t1,t2 FROM fprt1 t1 JOIN fprt2 t2 ON (t1.a = t2.b and t1.b = t2.a) WHERE t1.a % 25 =0 ORDER BY 1,2;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Sort
+   Sort Key: ((t1.*)::fprt1), ((t2.*)::fprt2)
+   ->  Append
+         ->  Foreign Scan
+               Relations: (public.ftprt1_p1 t1) INNER JOIN (public.ftprt2_p1 t2)
+         ->  Foreign Scan
+               Relations: (public.ftprt1_p2 t1) INNER JOIN (public.ftprt2_p2 t2)
+(7 rows)
+
+SELECT t1,t2 FROM fprt1 t1 JOIN fprt2 t2 ON (t1.a = t2.b and t1.b = t2.a) WHERE t1.a % 25 =0 ORDER BY 1,2;
+       t1       |       t2       
+----------------+----------------
+ (0,0,0000)     | (0,0,0000)
+ (150,150,0003) | (150,150,0003)
+ (250,250,0005) | (250,250,0005)
+ (400,400,0008) | (400,400,0008)
+(4 rows)
+
+-- join with lateral reference
+EXPLAIN (COSTS OFF)
+SELECT t1.a,t1.b FROM fprt1 t1, LATERAL (SELECT t2.a, t2.b FROM fprt2 t2 WHERE t1.a = t2.b AND t1.b = t2.a) q WHERE t1.a%25 = 0 ORDER BY 1,2;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Sort
+   Sort Key: t1.a, t1.b
+   ->  Append
+         ->  Foreign Scan
+               Relations: (public.ftprt1_p1 t1) INNER JOIN (public.ftprt2_p1 t2)
+         ->  Foreign Scan
+               Relations: (public.ftprt1_p2 t1) INNER JOIN (public.ftprt2_p2 t2)
+(7 rows)
+
+SELECT t1.a,t1.b FROM fprt1 t1, LATERAL (SELECT t2.a, t2.b FROM fprt2 t2 WHERE t1.a = t2.b AND t1.b = t2.a) q WHERE t1.a%25 = 0 ORDER BY 1,2;
+  a  |  b  
+-----+-----
+   0 |   0
+ 150 | 150
+ 250 | 250
+ 400 | 400
+(4 rows)
+
+RESET enable_partition_wise_join;

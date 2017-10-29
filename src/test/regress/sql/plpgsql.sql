@@ -4639,8 +4639,14 @@ AS $$
   END;
 $$;
 
-CREATE TRIGGER transition_table_level2_ri_child_insupd_trigger
-  AFTER INSERT OR UPDATE ON transition_table_level2
+CREATE TRIGGER transition_table_level2_ri_child_ins_trigger
+  AFTER INSERT ON transition_table_level2
+  REFERENCING NEW TABLE AS i
+  FOR EACH STATEMENT EXECUTE PROCEDURE
+    transition_table_level2_ri_child_insupd_func();
+
+CREATE TRIGGER transition_table_level2_ri_child_upd_trigger
+  AFTER UPDATE ON transition_table_level2
   REFERENCING NEW TABLE AS i
   FOR EACH STATEMENT EXECUTE PROCEDURE
     transition_table_level2_ri_child_insupd_func();
@@ -4672,14 +4678,14 @@ CREATE FUNCTION transition_table_level2_bad_usage_func()
   LANGUAGE plpgsql
 AS $$
   BEGIN
-    INSERT INTO d VALUES (1000000, 1000000, 'x');
+    INSERT INTO dx VALUES (1000000, 1000000, 'x');
     RETURN NULL;
   END;
 $$;
 
 CREATE TRIGGER transition_table_level2_bad_usage_trigger
   AFTER DELETE ON transition_table_level2
-  REFERENCING OLD TABLE AS d
+  REFERENCING OLD TABLE AS dx
   FOR EACH STATEMENT EXECUTE PROCEDURE
     transition_table_level2_bad_usage_func();
 
@@ -4736,6 +4742,14 @@ BEGIN
 END;
 $$;
 
+-- should fail, TRUNCATE is not compatible with transition tables
+CREATE TRIGGER alter_table_under_transition_tables_upd_trigger
+  AFTER TRUNCATE OR UPDATE ON alter_table_under_transition_tables
+  REFERENCING OLD TABLE AS d NEW TABLE AS i
+  FOR EACH STATEMENT EXECUTE PROCEDURE
+    alter_table_under_transition_tables_upd_func();
+
+-- should work
 CREATE TRIGGER alter_table_under_transition_tables_upd_trigger
   AFTER UPDATE ON alter_table_under_transition_tables
   REFERENCING OLD TABLE AS d NEW TABLE AS i
@@ -4758,3 +4772,51 @@ ALTER TABLE alter_table_under_transition_tables
   DROP column name;
 UPDATE alter_table_under_transition_tables
   SET id = id;
+
+--
+-- Check type parsing and record fetching from partitioned tables
+--
+
+CREATE TABLE partitioned_table (a int, b text) PARTITION BY LIST (a);
+CREATE TABLE pt_part1 PARTITION OF partitioned_table FOR VALUES IN (1);
+CREATE TABLE pt_part2 PARTITION OF partitioned_table FOR VALUES IN (2);
+
+INSERT INTO partitioned_table VALUES (1, 'Row 1');
+INSERT INTO partitioned_table VALUES (2, 'Row 2');
+
+CREATE OR REPLACE FUNCTION get_from_partitioned_table(partitioned_table.a%type)
+RETURNS partitioned_table AS $$
+DECLARE
+    a_val partitioned_table.a%TYPE;
+    result partitioned_table%ROWTYPE;
+BEGIN
+    a_val := $1;
+    SELECT * INTO result FROM partitioned_table WHERE a = a_val;
+    RETURN result;
+END; $$ LANGUAGE plpgsql;
+
+SELECT * FROM get_from_partitioned_table(1) AS t;
+
+CREATE OR REPLACE FUNCTION list_partitioned_table()
+RETURNS SETOF partitioned_table.a%TYPE AS $$
+DECLARE
+    row partitioned_table%ROWTYPE;
+    a_val partitioned_table.a%TYPE;
+BEGIN
+    FOR row IN SELECT * FROM partitioned_table ORDER BY a LOOP
+        a_val := row.a;
+        RETURN NEXT a_val;
+    END LOOP;
+    RETURN;
+END; $$ LANGUAGE plpgsql;
+
+SELECT * FROM list_partitioned_table() AS t;
+
+--
+-- Check argument name is used instead of $n in error message
+--
+CREATE FUNCTION fx(x WSlot) RETURNS void AS $$
+BEGIN
+  GET DIAGNOSTICS x = ROW_COUNT;
+  RETURN;
+END; $$ LANGUAGE plpgsql;

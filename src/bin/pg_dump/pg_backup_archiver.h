@@ -75,23 +75,23 @@ typedef z_stream *z_streamp;
 
 /* Historical version numbers (checked in code) */
 #define K_VERS_1_0	MAKE_ARCHIVE_VERSION(1, 0, 0)
-#define K_VERS_1_2	MAKE_ARCHIVE_VERSION(1, 2, 0)		/* Allow No ZLIB */
-#define K_VERS_1_3	MAKE_ARCHIVE_VERSION(1, 3, 0)		/* BLOBs */
-#define K_VERS_1_4	MAKE_ARCHIVE_VERSION(1, 4, 0)		/* Date & name in header */
-#define K_VERS_1_5	MAKE_ARCHIVE_VERSION(1, 5, 0)		/* Handle dependencies */
-#define K_VERS_1_6	MAKE_ARCHIVE_VERSION(1, 6, 0)		/* Schema field in TOCs */
-#define K_VERS_1_7	MAKE_ARCHIVE_VERSION(1, 7, 0)		/* File Offset size in
-														 * header */
-#define K_VERS_1_8	MAKE_ARCHIVE_VERSION(1, 8, 0)		/* change interpretation
-														 * of ID numbers and
-														 * dependencies */
-#define K_VERS_1_9	MAKE_ARCHIVE_VERSION(1, 9, 0)		/* add default_with_oids
-														 * tracking */
-#define K_VERS_1_10 MAKE_ARCHIVE_VERSION(1, 10, 0)		/* add tablespace */
-#define K_VERS_1_11 MAKE_ARCHIVE_VERSION(1, 11, 0)		/* add toc section
-														 * indicator */
-#define K_VERS_1_12 MAKE_ARCHIVE_VERSION(1, 12, 0)		/* add separate BLOB
-														 * entries */
+#define K_VERS_1_2	MAKE_ARCHIVE_VERSION(1, 2, 0)	/* Allow No ZLIB */
+#define K_VERS_1_3	MAKE_ARCHIVE_VERSION(1, 3, 0)	/* BLOBs */
+#define K_VERS_1_4	MAKE_ARCHIVE_VERSION(1, 4, 0)	/* Date & name in header */
+#define K_VERS_1_5	MAKE_ARCHIVE_VERSION(1, 5, 0)	/* Handle dependencies */
+#define K_VERS_1_6	MAKE_ARCHIVE_VERSION(1, 6, 0)	/* Schema field in TOCs */
+#define K_VERS_1_7	MAKE_ARCHIVE_VERSION(1, 7, 0)	/* File Offset size in
+													 * header */
+#define K_VERS_1_8	MAKE_ARCHIVE_VERSION(1, 8, 0)	/* change interpretation
+													 * of ID numbers and
+													 * dependencies */
+#define K_VERS_1_9	MAKE_ARCHIVE_VERSION(1, 9, 0)	/* add default_with_oids
+													 * tracking */
+#define K_VERS_1_10 MAKE_ARCHIVE_VERSION(1, 10, 0)	/* add tablespace */
+#define K_VERS_1_11 MAKE_ARCHIVE_VERSION(1, 11, 0)	/* add toc section
+													 * indicator */
+#define K_VERS_1_12 MAKE_ARCHIVE_VERSION(1, 12, 0)	/* add separate BLOB
+													 * entries */
 
 /* Current archive version number (the format we can output) */
 #define K_VERS_MAJOR 1
@@ -203,6 +203,30 @@ typedef enum
 	OUTPUT_OTHERDATA			/* writing data as INSERT commands */
 } ArchiverOutput;
 
+/*
+ * For historical reasons, ACL items are interspersed with everything else in
+ * a dump file's TOC; typically they're right after the object they're for.
+ * However, we need to restore data before ACLs, as otherwise a read-only
+ * table (ie one where the owner has revoked her own INSERT privilege) causes
+ * data restore failures.  On the other hand, matview REFRESH commands should
+ * come out after ACLs, as otherwise non-superuser-owned matviews might not
+ * be able to execute.  (If the permissions at the time of dumping would not
+ * allow a REFRESH, too bad; we won't fix that for you.)  These considerations
+ * force us to make three passes over the TOC, restoring the appropriate
+ * subset of items in each pass.  We assume that the dependency sort resulted
+ * in an appropriate ordering of items within each subset.
+ * XXX This mechanism should be superseded by tracking dependencies on ACLs
+ * properly; but we'll still need it for old dump files even after that.
+ */
+typedef enum
+{
+	RESTORE_PASS_MAIN = 0,		/* Main pass (most TOC item types) */
+	RESTORE_PASS_ACL,			/* ACL item types */
+	RESTORE_PASS_REFRESH		/* Matview REFRESH items */
+
+#define RESTORE_PASS_LAST RESTORE_PASS_REFRESH
+} RestorePass;
+
 typedef enum
 {
 	REQ_SCHEMA = 0x01,			/* want schema */
@@ -217,8 +241,8 @@ struct _archiveHandle
 
 	char	   *archiveRemoteVersion;	/* When reading an archive, the
 										 * version of the dumped DB */
-	char	   *archiveDumpVersion;		/* When reading an archive, the
-										 * version of the dumper */
+	char	   *archiveDumpVersion; /* When reading an archive, the version of
+									 * the dumper */
 
 	int			debugLevel;		/* Used for logging (currently only by
 								 * --verbose) */
@@ -244,21 +268,21 @@ struct _archiveHandle
 
 	ArchiveEntryPtrType ArchiveEntryPtr;	/* Called for each metadata object */
 	StartDataPtrType StartDataPtr;	/* Called when table data is about to be
-								 * dumped */
+									 * dumped */
 	WriteDataPtrType WriteDataPtr;	/* Called to send some table data to the
-								 * archive */
-	EndDataPtrType EndDataPtr;		/* Called when table data dump is finished */
+									 * archive */
+	EndDataPtrType EndDataPtr;	/* Called when table data dump is finished */
 	WriteBytePtrType WriteBytePtr;	/* Write a byte to output */
 	ReadBytePtrType ReadBytePtr;	/* Read a byte from an archive */
 	WriteBufPtrType WriteBufPtr;	/* Write a buffer of output to the archive */
-	ReadBufPtrType ReadBufPtr;		/* Read a buffer of input from the archive */
-	ClosePtrType ClosePtr;			/* Close the archive */
-	ReopenPtrType ReopenPtr;		/* Reopen the archive */
+	ReadBufPtrType ReadBufPtr;	/* Read a buffer of input from the archive */
+	ClosePtrType ClosePtr;		/* Close the archive */
+	ReopenPtrType ReopenPtr;	/* Reopen the archive */
 	WriteExtraTocPtrType WriteExtraTocPtr;	/* Write extra TOC entry data
-										 * associated with the current archive
-										 * format */
-	ReadExtraTocPtrType ReadExtraTocPtr;	/* Read extr info associated with
-										 * archie format */
+											 * associated with the current
+											 * archive format */
+	ReadExtraTocPtrType ReadExtraTocPtr;	/* Read extra info associated with
+											 * archive format */
 	PrintExtraTocPtrType PrintExtraTocPtr;	/* Extra TOC info for format */
 	PrintTocDataPtrType PrintTocDataPtr;
 
@@ -271,8 +295,8 @@ struct _archiveHandle
 	WorkerJobDumpPtrType WorkerJobDumpPtr;
 	WorkerJobRestorePtrType WorkerJobRestorePtr;
 
-	ClonePtrType ClonePtr;			/* Clone format-specific fields */
-	DeClonePtrType DeClonePtr;		/* Clean up cloned fields */
+	ClonePtrType ClonePtr;		/* Clone format-specific fields */
+	DeClonePtrType DeClonePtr;	/* Clean up cloned fields */
 
 	CustomOutPtrType CustomOutPtr;	/* Alternative script output routine */
 
@@ -329,6 +353,7 @@ struct _archiveHandle
 	int			noTocComments;
 	ArchiverStage stage;
 	ArchiverStage lastErrorStage;
+	RestorePass restorePass;	/* used only during parallel restore */
 	struct _tocEntry *currentTE;
 	struct _tocEntry *lastErrorTE;
 };

@@ -26,6 +26,7 @@
 #include "catalog/pg_type.h"
 #include "executor/execdebug.h"
 #include "executor/nodeTidscan.h"
+#include "miscadmin.h"
 #include "optimizer/clauses.h"
 #include "storage/bufmgr.h"
 #include "utils/array.h"
@@ -221,7 +222,7 @@ TidListEval(TidScanState *tidstate)
 
 			Assert(tidexpr->cexpr);
 			if (execCurrentOf(tidexpr->cexpr, econtext,
-						   RelationGetRelid(tidstate->ss.ss_currentRelation),
+							  RelationGetRelid(tidstate->ss.ss_currentRelation),
 							  &cursor_tid))
 			{
 				if (numTids >= numAllocTids)
@@ -382,10 +383,10 @@ TidNext(TidScanState *node)
 			 * pointers onto disk pages and were not created with palloc() and
 			 * so should not be pfree()'d.
 			 */
-			ExecStoreTuple(tuple,		/* tuple to store */
+			ExecStoreTuple(tuple,	/* tuple to store */
 						   slot,	/* slot to store in */
-						   buffer,		/* buffer associated with tuple  */
-						   false);		/* don't pfree */
+						   buffer,	/* buffer associated with tuple  */
+						   false);	/* don't pfree */
 
 			/*
 			 * At this point we have an extra pin on the buffer, because
@@ -400,6 +401,8 @@ TidNext(TidScanState *node)
 			node->tss_TidPtr--;
 		else
 			node->tss_TidPtr++;
+
+		CHECK_FOR_INTERRUPTS();
 	}
 
 	/*
@@ -442,9 +445,11 @@ TidRecheck(TidScanState *node, TupleTableSlot *slot)
  *		  -- tidPtr is -1.
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecTidScan(TidScanState *node)
+static TupleTableSlot *
+ExecTidScan(PlanState *pstate)
 {
+	TidScanState *node = castNode(TidScanState, pstate);
+
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) TidNext,
 					(ExecScanRecheckMtd) TidRecheck);
@@ -516,6 +521,7 @@ ExecInitTidScan(TidScan *node, EState *estate, int eflags)
 	tidstate = makeNode(TidScanState);
 	tidstate->ss.ps.plan = (Plan *) node;
 	tidstate->ss.ps.state = estate;
+	tidstate->ss.ps.ExecProcNode = ExecTidScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -551,7 +557,7 @@ ExecInitTidScan(TidScan *node, EState *estate, int eflags)
 	currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
 
 	tidstate->ss.ss_currentRelation = currentRelation;
-	tidstate->ss.ss_currentScanDesc = NULL;		/* no heap scan here */
+	tidstate->ss.ss_currentScanDesc = NULL; /* no heap scan here */
 
 	/*
 	 * get the scan type from the relation descriptor.

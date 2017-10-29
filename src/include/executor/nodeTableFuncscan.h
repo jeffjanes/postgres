@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern TableFuncScanState *ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecTableFuncScan(TableFuncScanState *node);
 extern void ExecEndTableFuncScan(TableFuncScanState *node);
 extern void ExecReScanTableFuncScan(TableFuncScanState *node);
 
-#endif   /* NODETABLEFUNCSCAN_H */
+#endif							/* NODETABLEFUNCSCAN_H */

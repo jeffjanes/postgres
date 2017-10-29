@@ -124,10 +124,6 @@ static void ExplainCustomChildren(CustomScanState *css,
 					  List *ancestors, ExplainState *es);
 static void ExplainProperty(const char *qlabel, const char *value,
 				bool numeric, ExplainState *es);
-static void ExplainOpenGroup(const char *objtype, const char *labelname,
-				 bool labeled, ExplainState *es);
-static void ExplainCloseGroup(const char *objtype, const char *labelname,
-				  bool labeled, ExplainState *es);
 static void ExplainDummyGroup(const char *objtype, const char *labelname,
 				  ExplainState *es);
 static void ExplainXMLTag(const char *tagname, int flags, ExplainState *es);
@@ -191,8 +187,8 @@ ExplainQuery(ParseState *pstate, ExplainStmt *stmt, const char *queryString,
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				errmsg("unrecognized value for EXPLAIN option \"%s\": \"%s\"",
-					   opt->defname, p),
+						 errmsg("unrecognized value for EXPLAIN option \"%s\": \"%s\"",
+								opt->defname, p),
 						 parser_errposition(pstate, opt->location)));
 		}
 		else
@@ -400,8 +396,6 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 		 * We have to rewrite the contained SELECT and then pass it back to
 		 * ExplainOneQuery.  It's probably not really necessary to copy the
 		 * contained parsetree another time, but let's be safe.
-		 *
-		 * Like ExecCreateTableAs, disallow parallelism in the plan.
 		 */
 		CreateTableAsStmt *ctas = (CreateTableAsStmt *) utilityStmt;
 		List	   *rewritten;
@@ -409,7 +403,7 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 		rewritten = QueryRewrite(castNode(Query, copyObject(ctas->query)));
 		Assert(list_length(rewritten) == 1);
 		ExplainOneQuery(linitial_node(Query, rewritten),
-						0, ctas->into, es,
+						CURSOR_OPT_PARALLEL_OK, ctas->into, es,
 						queryString, params, queryEnv);
 	}
 	else if (IsA(utilityStmt, DeclareCursorStmt))
@@ -445,7 +439,7 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 	{
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 			appendStringInfoString(es->str,
-							  "Utility statements have no plan structure\n");
+								   "Utility statements have no plan structure\n");
 		else
 			ExplainDummyGroup("Utility Statement", NULL, es);
 	}
@@ -656,16 +650,29 @@ ExplainPrintTriggers(ExplainState *es, QueryDesc *queryDesc)
 	ResultRelInfo *rInfo;
 	bool		show_relname;
 	int			numrels = queryDesc->estate->es_num_result_relations;
+	int			numrootrels = queryDesc->estate->es_num_root_result_relations;
+	List	   *leafrels = queryDesc->estate->es_leaf_result_relations;
 	List	   *targrels = queryDesc->estate->es_trig_target_relations;
 	int			nr;
 	ListCell   *l;
 
 	ExplainOpenGroup("Triggers", "Triggers", false, es);
 
-	show_relname = (numrels > 1 || targrels != NIL);
+	show_relname = (numrels > 1 || numrootrels > 0 ||
+					leafrels != NIL || targrels != NIL);
 	rInfo = queryDesc->estate->es_result_relations;
 	for (nr = 0; nr < numrels; rInfo++, nr++)
 		report_triggers(rInfo, show_relname, es);
+
+	rInfo = queryDesc->estate->es_root_result_relations;
+	for (nr = 0; nr < numrootrels; rInfo++, nr++)
+		report_triggers(rInfo, show_relname, es);
+
+	foreach(l, leafrels)
+	{
+		rInfo = (ResultRelInfo *) lfirst(l);
+		report_triggers(rInfo, show_relname, es);
+	}
 
 	foreach(l, targrels)
 	{
@@ -813,14 +820,14 @@ ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
 			break;
 		case T_CustomScan:
 			*rels_used = bms_add_members(*rels_used,
-									   ((CustomScan *) plan)->custom_relids);
+										 ((CustomScan *) plan)->custom_relids);
 			break;
 		case T_ModifyTable:
 			*rels_used = bms_add_member(*rels_used,
-									((ModifyTable *) plan)->nominalRelation);
+										((ModifyTable *) plan)->nominalRelation);
 			if (((ModifyTable *) plan)->exclRelRTI)
 				*rels_used = bms_add_member(*rels_used,
-										 ((ModifyTable *) plan)->exclRelRTI);
+											((ModifyTable *) plan)->exclRelRTI);
 			break;
 		default:
 			break;
@@ -1301,7 +1308,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		{
 			if (es->timing)
 				appendStringInfo(es->str,
-							" (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
+								 " (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
 								 startup_sec, total_sec, rows, nloops);
 			else
 				appendStringInfo(es->str,
@@ -1390,7 +1397,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										   planstate, es);
 			if (es->analyze)
 				ExplainPropertyLong("Heap Fetches",
-				   ((IndexOnlyScanState *) planstate)->ioss_HeapFetches, es);
+									((IndexOnlyScanState *) planstate)->ioss_HeapFetches, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
@@ -1647,7 +1654,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				appendStringInfo(es->str, "Worker %d: ", n);
 				if (es->timing)
 					appendStringInfo(es->str,
-							 "actual time=%.3f..%.3f rows=%.0f loops=%.0f\n",
+									 "actual time=%.3f..%.3f rows=%.0f loops=%.0f\n",
 									 startup_sec, total_sec, rows, nloops);
 				else
 					appendStringInfo(es->str,
@@ -2279,15 +2286,21 @@ show_tablesample(TableSampleClause *tsc, PlanState *planstate,
 static void
 show_sort_info(SortState *sortstate, ExplainState *es)
 {
-	if (es->analyze && sortstate->sort_Done &&
-		sortstate->tuplesortstate != NULL)
+	if (!es->analyze)
+		return;
+
+	if (sortstate->sort_Done && sortstate->tuplesortstate != NULL)
 	{
 		Tuplesortstate *state = (Tuplesortstate *) sortstate->tuplesortstate;
+		TuplesortInstrumentation stats;
 		const char *sortMethod;
 		const char *spaceType;
 		long		spaceUsed;
 
-		tuplesort_get_stats(state, &sortMethod, &spaceType, &spaceUsed);
+		tuplesort_get_stats(state, &stats);
+		sortMethod = tuplesort_method_name(stats.sortMethod);
+		spaceType = tuplesort_space_type_name(stats.spaceType);
+		spaceUsed = stats.spaceUsed;
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
@@ -2301,6 +2314,51 @@ show_sort_info(SortState *sortstate, ExplainState *es)
 			ExplainPropertyLong("Sort Space Used", spaceUsed, es);
 			ExplainPropertyText("Sort Space Type", spaceType, es);
 		}
+	}
+
+	if (sortstate->shared_info != NULL)
+	{
+		int			n;
+		bool		opened_group = false;
+
+		for (n = 0; n < sortstate->shared_info->num_workers; n++)
+		{
+			TuplesortInstrumentation *sinstrument;
+			const char *sortMethod;
+			const char *spaceType;
+			long		spaceUsed;
+
+			sinstrument = &sortstate->shared_info->sinstrument[n];
+			if (sinstrument->sortMethod == SORT_TYPE_STILL_IN_PROGRESS)
+				continue;		/* ignore any unfilled slots */
+			sortMethod = tuplesort_method_name(sinstrument->sortMethod);
+			spaceType = tuplesort_space_type_name(sinstrument->spaceType);
+			spaceUsed = sinstrument->spaceUsed;
+
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+								 "Worker %d:  Sort Method: %s  %s: %ldkB\n",
+								 n, sortMethod, spaceType, spaceUsed);
+			}
+			else
+			{
+				if (!opened_group)
+				{
+					ExplainOpenGroup("Workers", "Workers", false, es);
+					opened_group = true;
+				}
+				ExplainOpenGroup("Worker", NULL, true, es);
+				ExplainPropertyInteger("Worker Number", n, es);
+				ExplainPropertyText("Sort Method", sortMethod, es);
+				ExplainPropertyLong("Sort Space Used", spaceUsed, es);
+				ExplainPropertyText("Sort Space Type", spaceType, es);
+				ExplainCloseGroup("Worker", NULL, true, es);
+			}
+		}
+		if (opened_group)
+			ExplainCloseGroup("Workers", "Workers", false, es);
 	}
 }
 
@@ -2344,7 +2402,7 @@ show_hash_info(HashState *hashstate, ExplainState *es)
 		{
 			appendStringInfoSpaces(es->str, es->indent * 2);
 			appendStringInfo(es->str,
-						   "Buckets: %d  Batches: %d  Memory Usage: %ldkB\n",
+							 "Buckets: %d  Batches: %d  Memory Usage: %ldkB\n",
 							 hashtable->nbuckets, hashtable->nbatch,
 							 spacePeakKb);
 		}
@@ -2538,10 +2596,10 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 			appendStringInfoString(es->str, "I/O Timings:");
 			if (!INSTR_TIME_IS_ZERO(usage->blk_read_time))
 				appendStringInfo(es->str, " read=%0.3f",
-							  INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
+								 INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
 			if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
 				appendStringInfo(es->str, " write=%0.3f",
-							 INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
+								 INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
 			appendStringInfoChar(es->str, '\n');
 		}
 	}
@@ -2787,7 +2845,7 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 	/* Should we explicitly label target relations? */
 	labeltargets = (mtstate->mt_nplans > 1 ||
 					(mtstate->mt_nplans == 1 &&
-	   mtstate->resultRelInfo->ri_RangeTableIndex != node->nominalRelation));
+					 mtstate->resultRelInfo->ri_RangeTableIndex != node->nominalRelation));
 
 	if (labeltargets)
 		ExplainOpenGroup("Target Tables", "Target Tables", false, es);
@@ -3213,7 +3271,7 @@ ExplainPropertyBool(const char *qlabel, bool value, ExplainState *es)
  * If labeled is true, the group members will be labeled properties,
  * while if it's false, they'll be unlabeled objects.
  */
-static void
+void
 ExplainOpenGroup(const char *objtype, const char *labelname,
 				 bool labeled, ExplainState *es)
 {
@@ -3276,7 +3334,7 @@ ExplainOpenGroup(const char *objtype, const char *labelname,
  * Close a group of related objects.
  * Parameters must match the corresponding ExplainOpenGroup call.
  */
-static void
+void
 ExplainCloseGroup(const char *objtype, const char *labelname,
 				  bool labeled, ExplainState *es)
 {
@@ -3369,7 +3427,7 @@ ExplainBeginOutput(ExplainState *es)
 
 		case EXPLAIN_FORMAT_XML:
 			appendStringInfoString(es->str,
-			 "<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n");
+								   "<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n");
 			es->indent++;
 			break;
 

@@ -290,7 +290,7 @@ check_timezone(char **newval, void **extra, GucSource source)
 		 */
 		interval = DatumGetIntervalP(DirectFunctionCall3(interval_in,
 														 CStringGetDatum(val),
-												ObjectIdGetDatum(InvalidOid),
+														 ObjectIdGetDatum(InvalidOid),
 														 Int32GetDatum(-1)));
 
 		pfree(val);
@@ -472,8 +472,8 @@ show_log_timezone(void)
  * We allow idempotent changes (r/w -> r/w and r/o -> r/o) at any time, and
  * we also always allow changes from read-write to read-only.  However,
  * read-only may be changed to read-write only when in a top-level transaction
- * that has not yet taken an initial snapshot.  Can't do it in a hot standby
- * slave, either.
+ * that has not yet taken an initial snapshot.  Can't do it in a hot standby,
+ * either.
  *
  * If we are not in a transaction at all, just allow the change; it means
  * nothing since XactReadOnly will be reset by the next StartTransaction().
@@ -773,7 +773,7 @@ assign_client_encoding(const char *newval, void *extra)
 		 */
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-			  errmsg("cannot change client_encoding in a parallel worker")));
+				 errmsg("cannot change client_encoding during a parallel operation")));
 	}
 
 	/* We do not expect an error if PrepareClientEncoding succeeded */

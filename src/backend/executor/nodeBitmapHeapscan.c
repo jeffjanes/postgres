@@ -41,6 +41,7 @@
 #include "access/transam.h"
 #include "executor/execdebug.h"
 #include "executor/nodeBitmapHeapscan.h"
+#include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
@@ -129,7 +130,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				node->prefetch_pages = 0;
 				node->prefetch_target = -1;
 			}
-#endif   /* USE_PREFETCH */
+#endif							/* USE_PREFETCH */
 		}
 		else
 		{
@@ -182,7 +183,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				node->shared_prefetch_iterator =
 					tbm_attach_shared_iterate(dsa, pstate->prefetch_iterator);
 			}
-#endif   /* USE_PREFETCH */
+#endif							/* USE_PREFETCH */
 		}
 		node->initialized = true;
 	}
@@ -191,6 +192,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	{
 		Page		dp;
 		ItemId		lp;
+
+		CHECK_FOR_INTERRUPTS();
 
 		/*
 		 * Get next page of results if needed
@@ -265,7 +268,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 					pstate->prefetch_target++;
 				SpinLockRelease(&pstate->mutex);
 			}
-#endif   /* USE_PREFETCH */
+#endif							/* USE_PREFETCH */
 		}
 
 		/*
@@ -506,14 +509,15 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 			 * In case of shared mode, we can not ensure that the current
 			 * blockno of the main iterator and that of the prefetch iterator
 			 * are same.  It's possible that whatever blockno we are
-			 * prefetching will be processed by another process.  Therefore, we
-			 * don't validate the blockno here as we do in non-parallel case.
+			 * prefetching will be processed by another process.  Therefore,
+			 * we don't validate the blockno here as we do in non-parallel
+			 * case.
 			 */
 			if (prefetch_iterator)
 				tbm_shared_iterate(prefetch_iterator);
 		}
 	}
-#endif   /* USE_PREFETCH */
+#endif							/* USE_PREFETCH */
 }
 
 /*
@@ -557,7 +561,7 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
 			pstate->prefetch_target++;
 		SpinLockRelease(&pstate->mutex);
 	}
-#endif   /* USE_PREFETCH */
+#endif							/* USE_PREFETCH */
 }
 
 /*
@@ -633,7 +637,7 @@ BitmapPrefetch(BitmapHeapScanState *node, HeapScanDesc scan)
 			}
 		}
 	}
-#endif   /* USE_PREFETCH */
+#endif							/* USE_PREFETCH */
 }
 
 /*
@@ -661,9 +665,11 @@ BitmapHeapRecheck(BitmapHeapScanState *node, TupleTableSlot *slot)
  *		ExecBitmapHeapScan(node)
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecBitmapHeapScan(BitmapHeapScanState *node)
+static TupleTableSlot *
+ExecBitmapHeapScan(PlanState *pstate)
 {
+	BitmapHeapScanState *node = castNode(BitmapHeapScanState, pstate);
+
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) BitmapHeapNext,
 					(ExecScanRecheckMtd) BitmapHeapRecheck);
@@ -698,23 +704,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	node->initialized = false;
 	node->shared_tbmiterator = NULL;
 	node->shared_prefetch_iterator = NULL;
-
-	/* Reset parallel bitmap state, if present */
-	if (node->pstate)
-	{
-		dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
-
-		node->pstate->state = BM_INITIAL;
-
-		if (DsaPointerIsValid(node->pstate->tbmiterator))
-			tbm_free_shared_area(dsa, node->pstate->tbmiterator);
-
-		if (DsaPointerIsValid(node->pstate->prefetch_iterator))
-			tbm_free_shared_area(dsa, node->pstate->prefetch_iterator);
-
-		node->pstate->tbmiterator = InvalidDsaPointer;
-		node->pstate->prefetch_iterator = InvalidDsaPointer;
-	}
 
 	ExecScanReScan(&node->ss);
 
@@ -811,6 +800,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate = makeNode(BitmapHeapScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
+	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
 	scanstate->tbmiterator = NULL;
@@ -944,7 +934,8 @@ BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate)
 /* ----------------------------------------------------------------
  *		ExecBitmapHeapEstimate
  *
- *		estimates the space required to serialize bitmap scan node.
+ *		Compute the amount of space we'll need in the parallel
+ *		query DSM, and inform pcxt->estimator about our needs.
  * ----------------------------------------------------------------
  */
 void
@@ -993,6 +984,31 @@ ExecBitmapHeapInitializeDSM(BitmapHeapScanState *node,
 }
 
 /* ----------------------------------------------------------------
+ *		ExecBitmapHeapReInitializeDSM
+ *
+ *		Reset shared state before beginning a fresh scan.
+ * ----------------------------------------------------------------
+ */
+void
+ExecBitmapHeapReInitializeDSM(BitmapHeapScanState *node,
+							  ParallelContext *pcxt)
+{
+	ParallelBitmapHeapState *pstate = node->pstate;
+	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
+
+	pstate->state = BM_INITIAL;
+
+	if (DsaPointerIsValid(pstate->tbmiterator))
+		tbm_free_shared_area(dsa, pstate->tbmiterator);
+
+	if (DsaPointerIsValid(pstate->prefetch_iterator))
+		tbm_free_shared_area(dsa, pstate->prefetch_iterator);
+
+	pstate->tbmiterator = InvalidDsaPointer;
+	pstate->prefetch_iterator = InvalidDsaPointer;
+}
+
+/* ----------------------------------------------------------------
  *		ExecBitmapHeapInitializeWorker
  *
  *		Copy relevant information from TOC into planstate.
@@ -1004,7 +1020,7 @@ ExecBitmapHeapInitializeWorker(BitmapHeapScanState *node, shm_toc *toc)
 	ParallelBitmapHeapState *pstate;
 	Snapshot	snapshot;
 
-	pstate = shm_toc_lookup(toc, node->ss.ps.plan->plan_node_id);
+	pstate = shm_toc_lookup(toc, node->ss.ps.plan->plan_node_id, false);
 	node->pstate = pstate;
 
 	snapshot = RestoreSnapshot(pstate->phs_snapshot_data);

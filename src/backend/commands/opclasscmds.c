@@ -18,6 +18,7 @@
 #include <limits.h>
 
 #include "access/genam.h"
+#include "access/hash.h"
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "access/htup_details.h"
@@ -545,7 +546,7 @@ DefineOpClass(CreateOpClassStmt *stmt)
 				if (OidIsValid(storageoid))
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-						   errmsg("storage type specified more than once")));
+							 errmsg("storage type specified more than once")));
 				storageoid = typenameTypeId(NULL, item->storedtype);
 
 #ifdef NOT_USED
@@ -619,8 +620,8 @@ DefineOpClass(CreateOpClassStmt *stmt)
 						 errmsg("could not make operator class \"%s\" be default for type %s",
 								opcname,
 								TypeNameToString(stmt->datatype)),
-				   errdetail("Operator class \"%s\" already is the default.",
-							 NameStr(opclass->opcname))));
+						 errdetail("Operator class \"%s\" already is the default.",
+								   NameStr(opclass->opcname))));
 		}
 
 		systable_endscan(scan);
@@ -856,7 +857,7 @@ AlterOpFamilyAdd(AlterOpFamilyStmt *stmt, Oid amoid, Oid opfamilyoid,
 					ereport(ERROR,
 							(errcode(ERRCODE_SYNTAX_ERROR),
 							 errmsg("operator argument types must be specified in ALTER OPERATOR FAMILY")));
-					operOid = InvalidOid;		/* keep compiler quiet */
+					operOid = InvalidOid;	/* keep compiler quiet */
 				}
 
 				if (item->order_family)
@@ -1085,8 +1086,8 @@ assignOperTypes(OpFamilyMember *member, Oid amoid, Oid typeoid)
 		if (!amroutine->amcanorderbyop)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-			errmsg("access method \"%s\" does not support ordering operators",
-				   get_am_name(amoid))));
+					 errmsg("access method \"%s\" does not support ordering operators",
+							get_am_name(amoid))));
 	}
 	else
 	{
@@ -1129,7 +1130,8 @@ assignProcTypes(OpFamilyMember *member, Oid amoid, Oid typeoid)
 	/*
 	 * btree comparison procs must be 2-arg procs returning int4, while btree
 	 * sortsupport procs must take internal and return void.  hash support
-	 * procs must be 1-arg procs returning int4.  Otherwise we don't know.
+	 * proc 1 must be a 1-arg proc returning int4, while proc 2 must be a
+	 * 2-arg proc returning int8.  Otherwise we don't know.
 	 */
 	if (amoid == BTREE_AM_OID)
 	{
@@ -1142,7 +1144,7 @@ assignProcTypes(OpFamilyMember *member, Oid amoid, Oid typeoid)
 			if (procform->prorettype != INT4OID)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("btree comparison procedures must return integer")));
+						 errmsg("btree comparison procedures must return integer")));
 
 			/*
 			 * If lefttype/righttype isn't specified, use the proc's input
@@ -1163,7 +1165,7 @@ assignProcTypes(OpFamilyMember *member, Oid amoid, Oid typeoid)
 			if (procform->prorettype != VOIDOID)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				  errmsg("btree sort support procedures must return void")));
+						 errmsg("btree sort support procedures must return void")));
 
 			/*
 			 * Can't infer lefttype/righttype from proc, so use default rule
@@ -1172,14 +1174,28 @@ assignProcTypes(OpFamilyMember *member, Oid amoid, Oid typeoid)
 	}
 	else if (amoid == HASH_AM_OID)
 	{
-		if (procform->pronargs != 1)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash procedures must have one argument")));
-		if (procform->prorettype != INT4OID)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash procedures must return integer")));
+		if (member->number == HASHSTANDARD_PROC)
+		{
+			if (procform->pronargs != 1)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("hash procedure 1 must have one argument")));
+			if (procform->prorettype != INT4OID)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("hash procedure 1 must return integer")));
+		}
+		else if (member->number == HASHEXTENDED_PROC)
+		{
+			if (procform->pronargs != 2)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("hash procedure 2 must have two arguments")));
+			if (procform->prorettype != INT8OID)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("hash procedure 2 must return bigint")));
+		}
 
 		/*
 		 * If lefttype/righttype isn't specified, use the proc's input type

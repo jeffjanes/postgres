@@ -25,7 +25,7 @@ static struct
 {
 	on_exit_nicely_callback function;
 	void	   *arg;
-}	on_exit_nicely_list[MAX_ON_EXIT_NICELY];
+}			on_exit_nicely_list[MAX_ON_EXIT_NICELY];
 
 static int	on_exit_nicely_index;
 
@@ -144,8 +144,8 @@ exit_nicely(int code)
 	int			i;
 
 	for (i = on_exit_nicely_index - 1; i >= 0; i--)
-		(*on_exit_nicely_list[i].function) (code,
-											on_exit_nicely_list[i].arg);
+		on_exit_nicely_list[i].function(code,
+										on_exit_nicely_list[i].arg);
 
 #ifdef WIN32
 	if (parallel_init_done && GetCurrentThreadId() != mainThreadId)

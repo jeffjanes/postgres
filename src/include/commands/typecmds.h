@@ -26,7 +26,7 @@ extern void RemoveTypeById(Oid typeOid);
 extern ObjectAddress DefineDomain(CreateDomainStmt *stmt);
 extern ObjectAddress DefineEnum(CreateEnumStmt *stmt);
 extern ObjectAddress DefineRange(CreateRangeStmt *stmt);
-extern ObjectAddress AlterEnum(AlterEnumStmt *stmt);
+extern ObjectAddress AlterEnum(AlterEnumStmt *stmt, bool isTopLevel);
 extern ObjectAddress DefineCompositeType(RangeVar *typevar, List *coldeflist);
 extern Oid	AssignTypeArrayOid(void);
 
@@ -54,4 +54,4 @@ extern Oid AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 						   bool errorOnTableType,
 						   ObjectAddresses *objsMoved);
 
-#endif   /* TYPECMDS_H */
+#endif							/* TYPECMDS_H */

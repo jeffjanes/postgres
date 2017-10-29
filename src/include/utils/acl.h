@@ -12,9 +12,17 @@
  * NOTES
  *	  An ACL array is simply an array of AclItems, representing the union
  *	  of the privileges represented by the individual items.  A zero-length
- *	  array represents "no privileges".  There are no assumptions about the
- *	  ordering of the items, but we do expect that there are no two entries
- *	  in the array with the same grantor and grantee.
+ *	  array represents "no privileges".
+ *
+ *	  The order of items in the array is important as client utilities (in
+ *	  particular, pg_dump, though possibly other clients) expect to be able
+ *	  to issue GRANTs in the ordering of the items in the array.  The reason
+ *	  this matters is that GRANTs WITH GRANT OPTION must be before any GRANTs
+ *	  which depend on it.  This happens naturally in the backend during
+ *	  operations as we update ACLs in-place, new items are appended, and
+ *	  existing entries are only removed if there's no dependency on them (no
+ *	  GRANT can been based on it, or, if there was, those GRANTs are also
+ *	  removed).
  *
  *	  For backward-compatibility purposes we have to allow null ACL entries
  *	  in system catalogs.  A null ACL will be treated as meaning "default
@@ -127,11 +135,11 @@ typedef ArrayType Acl;
  * External representations of the privilege bits --- aclitemin/aclitemout
  * represent each possible privilege bit with a distinct 1-character code
  */
-#define ACL_INSERT_CHR			'a'		/* formerly known as "append" */
-#define ACL_SELECT_CHR			'r'		/* formerly known as "read" */
-#define ACL_UPDATE_CHR			'w'		/* formerly known as "write" */
+#define ACL_INSERT_CHR			'a' /* formerly known as "append" */
+#define ACL_SELECT_CHR			'r' /* formerly known as "read" */
+#define ACL_UPDATE_CHR			'w' /* formerly known as "write" */
 #define ACL_DELETE_CHR			'd'
-#define ACL_TRUNCATE_CHR		'D'		/* super-delete, as it were */
+#define ACL_TRUNCATE_CHR		'D' /* super-delete, as it were */
 #define ACL_REFERENCES_CHR		'x'
 #define ACL_TRIGGER_CHR			't'
 #define ACL_EXECUTE_CHR			'X'
@@ -265,7 +273,7 @@ extern AclMode pg_proc_aclmask(Oid proc_oid, Oid roleid,
 extern AclMode pg_language_aclmask(Oid lang_oid, Oid roleid,
 					AclMode mask, AclMaskHow how);
 extern AclMode pg_largeobject_aclmask_snapshot(Oid lobj_oid, Oid roleid,
-							AclMode mask, AclMaskHow how, Snapshot snapshot);
+								AclMode mask, AclMaskHow how, Snapshot snapshot);
 extern AclMode pg_namespace_aclmask(Oid nsp_oid, Oid roleid,
 					 AclMode mask, AclMaskHow how);
 extern AclMode pg_tablespace_aclmask(Oid spc_oid, Oid roleid,
@@ -327,8 +335,8 @@ extern bool pg_event_trigger_ownercheck(Oid et_oid, Oid roleid);
 extern bool pg_extension_ownercheck(Oid ext_oid, Oid roleid);
 extern bool pg_publication_ownercheck(Oid pub_oid, Oid roleid);
 extern bool pg_subscription_ownercheck(Oid sub_oid, Oid roleid);
-extern bool pg_statistics_ownercheck(Oid stat_oid, Oid roleid);
+extern bool pg_statistics_object_ownercheck(Oid stat_oid, Oid roleid);
 extern bool has_createrole_privilege(Oid roleid);
 extern bool has_bypassrls_privilege(Oid roleid);
 
-#endif   /* ACL_H */
+#endif							/* ACL_H */

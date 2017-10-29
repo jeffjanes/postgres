@@ -117,19 +117,20 @@ extern HeapScanDesc heap_beginscan_bm(Relation relation, Snapshot snapshot,
 				  int nkeys, ScanKey key);
 extern HeapScanDesc heap_beginscan_sampling(Relation relation,
 						Snapshot snapshot, int nkeys, ScanKey key,
-					 bool allow_strat, bool allow_sync, bool allow_pagemode);
+						bool allow_strat, bool allow_sync, bool allow_pagemode);
 extern void heap_setscanlimits(HeapScanDesc scan, BlockNumber startBlk,
 				   BlockNumber endBlk);
 extern void heapgetpage(HeapScanDesc scan, BlockNumber page);
 extern void heap_rescan(HeapScanDesc scan, ScanKey key);
 extern void heap_rescan_set_params(HeapScanDesc scan, ScanKey key,
-					 bool allow_strat, bool allow_sync, bool allow_pagemode);
+					   bool allow_strat, bool allow_sync, bool allow_pagemode);
 extern void heap_endscan(HeapScanDesc scan);
 extern HeapTuple heap_getnext(HeapScanDesc scan, ScanDirection direction);
 
 extern Size heap_parallelscan_estimate(Snapshot snapshot);
 extern void heap_parallelscan_initialize(ParallelHeapScanDesc target,
 							 Relation relation, Snapshot snapshot);
+extern void heap_parallelscan_reinitialize(ParallelHeapScanDesc parallel_scan);
 extern HeapScanDesc heap_beginscan_parallel(Relation, ParallelHeapScanDesc);
 
 extern bool heap_fetch(Relation relation, Snapshot snapshot,
@@ -144,6 +145,9 @@ extern bool heap_hot_search(ItemPointer tid, Relation relation,
 extern void heap_get_latest_tid(Relation relation, Snapshot snapshot,
 					ItemPointer tid);
 extern void setLastTid(const ItemPointer tid);
+
+extern bool HeapTupleUpdateXmaxMatchesXmin(TransactionId xmax,
+							   HeapTupleHeader htup);
 
 extern BulkInsertState GetBulkInsertState(void);
 extern void FreeBulkInsertState(BulkInsertState);
@@ -198,4 +202,4 @@ extern BlockNumber ss_get_location(Relation rel, BlockNumber relnblocks);
 extern void SyncScanShmemInit(void);
 extern Size SyncScanShmemSize(void);
 
-#endif   /* HEAPAM_H */
+#endif							/* HEAPAM_H */

@@ -59,12 +59,12 @@
 typedef struct VacAttrStats *VacAttrStatsP;
 
 typedef Datum (*AnalyzeAttrFetchFunc) (VacAttrStatsP stats, int rownum,
-												   bool *isNull);
+									   bool *isNull);
 
 typedef void (*AnalyzeAttrComputeStatsFunc) (VacAttrStatsP stats,
-											  AnalyzeAttrFetchFunc fetchfunc,
-														 int samplerows,
-														 double totalrows);
+											 AnalyzeAttrFetchFunc fetchfunc,
+											 int samplerows,
+											 double totalrows);
 
 typedef struct VacAttrStats
 {
@@ -136,20 +136,19 @@ typedef struct VacAttrStats
 typedef struct VacuumParams
 {
 	int			freeze_min_age; /* min freeze age, -1 to use default */
-	int			freeze_table_age;		/* age at which to scan whole table */
-	int			multixact_freeze_min_age;		/* min multixact freeze age,
-												 * -1 to use default */
-	int			multixact_freeze_table_age;		/* multixact age at which to
-												 * scan whole table */
+	int			freeze_table_age;	/* age at which to scan whole table */
+	int			multixact_freeze_min_age;	/* min multixact freeze age, -1 to
+											 * use default */
+	int			multixact_freeze_table_age; /* multixact age at which to scan
+											 * whole table */
 	bool		is_wraparound;	/* force a for-wraparound vacuum */
-	int			log_min_duration;		/* minimum execution threshold in ms
-										 * at which  verbose logs are
-										 * activated, -1 to use default */
+	int			log_min_duration;	/* minimum execution threshold in ms at
+									 * which  verbose logs are activated, -1
+									 * to use default */
 } VacuumParams;
 
 /* GUC parameters */
-extern PGDLLIMPORT int default_statistics_target;		/* PGDLLIMPORT for
-														 * PostGIS */
+extern PGDLLIMPORT int default_statistics_target;	/* PGDLLIMPORT for PostGIS */
 extern int	vacuum_freeze_min_age;
 extern int	vacuum_freeze_table_age;
 extern int	vacuum_multixact_freeze_min_age;
@@ -158,8 +157,7 @@ extern int	vacuum_multixact_freeze_table_age;
 
 /* in commands/vacuum.c */
 extern void ExecVacuum(VacuumStmt *vacstmt, bool isTopLevel);
-extern void vacuum(int options, RangeVar *relation, Oid relid,
-	   VacuumParams *params, List *va_cols,
+extern void vacuum(int options, List *relations, VacuumParams *params,
 	   BufferAccessStrategy bstrategy, bool isTopLevel);
 extern void vac_open_indexes(Relation relation, LOCKMODE lockmode,
 				 int *nindexes, Relation **Irel);
@@ -203,4 +201,4 @@ extern double anl_random_fract(void);
 extern double anl_init_selection_state(int n);
 extern double anl_get_next_S(double t, int n, double *stateptr);
 
-#endif   /* VACUUM_H */
+#endif							/* VACUUM_H */

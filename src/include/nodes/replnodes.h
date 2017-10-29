@@ -68,6 +68,7 @@ typedef struct DropReplicationSlotCmd
 {
 	NodeTag		type;
 	char	   *slotname;
+	bool		wait;
 } DropReplicationSlotCmd;
 
 
@@ -105,4 +106,4 @@ typedef struct SQLCmd
 	NodeTag		type;
 } SQLCmd;
 
-#endif   /* REPLNODES_H */
+#endif							/* REPLNODES_H */

@@ -173,14 +173,14 @@ typedef struct BTMetaPageData
  */
 #define P_LEFTMOST(opaque)		((opaque)->btpo_prev == P_NONE)
 #define P_RIGHTMOST(opaque)		((opaque)->btpo_next == P_NONE)
-#define P_ISLEAF(opaque)		((opaque)->btpo_flags & BTP_LEAF)
-#define P_ISROOT(opaque)		((opaque)->btpo_flags & BTP_ROOT)
-#define P_ISDELETED(opaque)		((opaque)->btpo_flags & BTP_DELETED)
-#define P_ISMETA(opaque)		((opaque)->btpo_flags & BTP_META)
-#define P_ISHALFDEAD(opaque)	((opaque)->btpo_flags & BTP_HALF_DEAD)
-#define P_IGNORE(opaque)		((opaque)->btpo_flags & (BTP_DELETED|BTP_HALF_DEAD))
-#define P_HAS_GARBAGE(opaque)	((opaque)->btpo_flags & BTP_HAS_GARBAGE)
-#define P_INCOMPLETE_SPLIT(opaque)	((opaque)->btpo_flags & BTP_INCOMPLETE_SPLIT)
+#define P_ISLEAF(opaque)		(((opaque)->btpo_flags & BTP_LEAF) != 0)
+#define P_ISROOT(opaque)		(((opaque)->btpo_flags & BTP_ROOT) != 0)
+#define P_ISDELETED(opaque)		(((opaque)->btpo_flags & BTP_DELETED) != 0)
+#define P_ISMETA(opaque)		(((opaque)->btpo_flags & BTP_META) != 0)
+#define P_ISHALFDEAD(opaque)	(((opaque)->btpo_flags & BTP_HALF_DEAD) != 0)
+#define P_IGNORE(opaque)		(((opaque)->btpo_flags & (BTP_DELETED|BTP_HALF_DEAD)) != 0)
+#define P_HAS_GARBAGE(opaque)	(((opaque)->btpo_flags & BTP_HAS_GARBAGE) != 0)
+#define P_INCOMPLETE_SPLIT(opaque)	(((opaque)->btpo_flags & BTP_INCOMPLETE_SPLIT) != 0)
 
 /*
  *	Lehman and Yao's algorithm requires a ``high key'' on every non-rightmost
@@ -421,9 +421,9 @@ typedef BTScanOpaqueData *BTScanOpaque;
  * to use bits 16-31 (see skey.h).  The uppermost bits are copied from the
  * index's indoption[] array entry for the index attribute.
  */
-#define SK_BT_REQFWD	0x00010000		/* required to continue forward scan */
-#define SK_BT_REQBKWD	0x00020000		/* required to continue backward scan */
-#define SK_BT_INDOPTION_SHIFT  24		/* must clear the above bits */
+#define SK_BT_REQFWD	0x00010000	/* required to continue forward scan */
+#define SK_BT_REQBKWD	0x00020000	/* required to continue backward scan */
+#define SK_BT_INDOPTION_SHIFT  24	/* must clear the above bits */
 #define SK_BT_DESC			(INDOPTION_DESC << SK_BT_INDOPTION_SHIFT)
 #define SK_BT_NULLS_FIRST	(INDOPTION_NULLS_FIRST << SK_BT_INDOPTION_SHIFT)
 
@@ -556,4 +556,4 @@ extern void _bt_spool(BTSpool *btspool, ItemPointer self,
 		  Datum *values, bool *isnull);
 extern void _bt_leafbuild(BTSpool *btspool, BTSpool *spool2);
 
-#endif   /* NBTREE_H */
+#endif							/* NBTREE_H */

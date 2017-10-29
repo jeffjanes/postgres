@@ -28,13 +28,12 @@
 #define XLOG_BTREE_INSERT_META	0x20	/* same, plus update metapage */
 #define XLOG_BTREE_SPLIT_L		0x30	/* add index tuple with split */
 #define XLOG_BTREE_SPLIT_R		0x40	/* as above, new item on right */
-#define XLOG_BTREE_SPLIT_L_ROOT 0x50	/* add tuple with split of root */
-#define XLOG_BTREE_SPLIT_R_ROOT 0x60	/* as above, new item on right */
+/* 0x50 and 0x60 are unused */
 #define XLOG_BTREE_DELETE		0x70	/* delete leaf index tuples for a page */
 #define XLOG_BTREE_UNLINK_PAGE	0x80	/* delete a half-dead page */
-#define XLOG_BTREE_UNLINK_PAGE_META 0x90		/* same, and update metapage */
+#define XLOG_BTREE_UNLINK_PAGE_META 0x90	/* same, and update metapage */
 #define XLOG_BTREE_NEWROOT		0xA0	/* new root page */
-#define XLOG_BTREE_MARK_PAGE_HALFDEAD 0xB0		/* mark a leaf as half-dead */
+#define XLOG_BTREE_MARK_PAGE_HALFDEAD 0xB0	/* mark a leaf as half-dead */
 #define XLOG_BTREE_VACUUM		0xC0	/* delete entries on a page during
 										 * vacuum */
 #define XLOG_BTREE_REUSE_PAGE	0xD0	/* old page is about to be reused from
@@ -252,4 +251,4 @@ extern void btree_desc(StringInfo buf, XLogReaderState *record);
 extern const char *btree_identify(uint8 info);
 extern void btree_mask(char *pagedata, BlockNumber blkno);
 
-#endif   /* NBXLOG_H */
+#endif							/* NBXLOG_H */

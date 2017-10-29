@@ -128,7 +128,8 @@ extern yyscan_t expr_scanner_init(PsqlScanState state,
 extern void expr_scanner_finish(yyscan_t yyscanner);
 extern int	expr_scanner_offset(PsqlScanState state);
 extern char *expr_scanner_get_substring(PsqlScanState state,
-						   int start_offset, int end_offset);
+						   int start_offset, int end_offset,
+						   bool chomp);
 extern int	expr_scanner_get_lineno(PsqlScanState state, int offset);
 
 extern void syntax_error(const char *source, int lineno, const char *line,
@@ -137,4 +138,4 @@ extern void syntax_error(const char *source, int lineno, const char *line,
 
 extern int64 strtoint64(const char *str);
 
-#endif   /* PGBENCH_H */
+#endif							/* PGBENCH_H */

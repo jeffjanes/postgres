@@ -24,10 +24,9 @@ typedef struct TupleQueueReader TupleQueueReader;
 extern DestReceiver *CreateTupleQueueDestReceiver(shm_mq_handle *handle);
 
 /* Use these to receive tuples from a shm_mq. */
-extern TupleQueueReader *CreateTupleQueueReader(shm_mq_handle *handle,
-					   TupleDesc tupledesc);
+extern TupleQueueReader *CreateTupleQueueReader(shm_mq_handle *handle);
 extern void DestroyTupleQueueReader(TupleQueueReader *reader);
 extern HeapTuple TupleQueueReaderNext(TupleQueueReader *reader,
 					 bool nowait, bool *done);
 
-#endif   /* TQUEUE_H */
+#endif							/* TQUEUE_H */

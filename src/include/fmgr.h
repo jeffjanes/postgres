@@ -82,7 +82,7 @@ typedef struct FunctionCallInfoData
 	Oid			fncollation;	/* collation for function to use */
 	bool		isnull;			/* function must set true if result is NULL */
 	short		nargs;			/* # arguments actually passed */
-	Datum		arg[FUNC_MAX_ARGS];		/* Arguments passed to function */
+	Datum		arg[FUNC_MAX_ARGS]; /* Arguments passed to function */
 	bool		argnull[FUNC_MAX_ARGS]; /* T if arg[i] is actually NULL */
 } FunctionCallInfoData;
 
@@ -196,11 +196,11 @@ extern void fmgr_info_copy(FmgrInfo *dstinfo, FmgrInfo *srcinfo,
  * Note: it'd be nice if these could be macros, but I see no way to do that
  * without evaluating the arguments multiple times, which is NOT acceptable.
  */
-extern struct varlena *pg_detoast_datum(struct varlena * datum);
-extern struct varlena *pg_detoast_datum_copy(struct varlena * datum);
-extern struct varlena *pg_detoast_datum_slice(struct varlena * datum,
+extern struct varlena *pg_detoast_datum(struct varlena *datum);
+extern struct varlena *pg_detoast_datum_copy(struct varlena *datum);
+extern struct varlena *pg_detoast_datum_slice(struct varlena *datum,
 					   int32 first, int32 count);
-extern struct varlena *pg_detoast_datum_packed(struct varlena * datum);
+extern struct varlena *pg_detoast_datum_packed(struct varlena *datum);
 
 #define PG_DETOAST_DATUM(datum) \
 	pg_detoast_datum((struct varlena *) DatumGetPointer(datum))
@@ -325,6 +325,7 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena * datum);
 #define PG_RETURN_FLOAT4(x)  return Float4GetDatum(x)
 #define PG_RETURN_FLOAT8(x)  return Float8GetDatum(x)
 #define PG_RETURN_INT64(x)	 return Int64GetDatum(x)
+#define PG_RETURN_UINT64(x)  return UInt64GetDatum(x)
 /* RETURN macros for other pass-by-ref types will typically look like this: */
 #define PG_RETURN_BYTEA_P(x)   PG_RETURN_POINTER(x)
 #define PG_RETURN_TEXT_P(x)    PG_RETURN_POINTER(x)
@@ -690,13 +691,14 @@ extern void RestoreLibraryState(char *start_address);
  */
 
 /* AggCheckCallContext can return one of the following codes, or 0: */
-#define AGG_CONTEXT_AGGREGATE	1		/* regular aggregate */
-#define AGG_CONTEXT_WINDOW		2		/* window function */
+#define AGG_CONTEXT_AGGREGATE	1	/* regular aggregate */
+#define AGG_CONTEXT_WINDOW		2	/* window function */
 
 extern int AggCheckCallContext(FunctionCallInfo fcinfo,
 					MemoryContext *aggcontext);
 extern fmAggrefPtr AggGetAggref(FunctionCallInfo fcinfo);
 extern MemoryContext AggGetTempMemoryContext(FunctionCallInfo fcinfo);
+extern bool AggStateIsShared(FunctionCallInfo fcinfo);
 extern void AggRegisterCallback(FunctionCallInfo fcinfo,
 					fmExprContextCallbackFunction func,
 					Datum arg);
@@ -720,7 +722,7 @@ typedef enum FmgrHookEventType
 typedef bool (*needs_fmgr_hook_type) (Oid fn_oid);
 
 typedef void (*fmgr_hook_type) (FmgrHookEventType event,
-											FmgrInfo *flinfo, Datum *arg);
+								FmgrInfo *flinfo, Datum *arg);
 
 extern PGDLLIMPORT needs_fmgr_hook_type needs_fmgr_hook;
 extern PGDLLIMPORT fmgr_hook_type fmgr_hook;
@@ -743,4 +745,4 @@ extern PGDLLIMPORT fmgr_hook_type fmgr_hook;
  */
 extern char *fmgr(Oid procedureId,...);
 
-#endif   /* FMGR_H */
+#endif							/* FMGR_H */

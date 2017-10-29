@@ -46,7 +46,7 @@ typedef struct
 	TransactionId fn_xmin;		/* for checking up-to-dateness */
 	ItemPointerData fn_tid;
 	PGFunction	user_fn;		/* the function's address */
-	const Pg_finfo_record *inforec;		/* address of its info record */
+	const Pg_finfo_record *inforec; /* address of its info record */
 } CFuncHashTabEntry;
 
 static HTAB *CFuncHash = NULL;
@@ -70,26 +70,21 @@ static Datum fmgr_security_definer(PG_FUNCTION_ARGS);
 static const FmgrBuiltin *
 fmgr_isbuiltin(Oid id)
 {
-	int			low = 0;
-	int			high = fmgr_nbuiltins - 1;
+	uint16		index;
+
+	/* fast lookup only possible if original oid still assigned */
+	if (id >= FirstBootstrapObjectId)
+		return NULL;
 
 	/*
-	 * Loop invariant: low is the first index that could contain target entry,
-	 * and high is the last index that could contain it.
+	 * Lookup function data. If there's a miss in that range it's likely a
+	 * nonexistant function, returning NULL here will trigger an ERROR later.
 	 */
-	while (low <= high)
-	{
-		int			i = (high + low) / 2;
-		const FmgrBuiltin *ptr = &fmgr_builtins[i];
+	index = fmgr_builtin_oid_index[id];
+	if (index == InvalidOidBuiltinMapping)
+		return NULL;
 
-		if (id == ptr->foid)
-			return ptr;
-		else if (id > ptr->foid)
-			low = i + 1;
-		else
-			high = i - 1;
-	}
-	return NULL;
+	return &fmgr_builtins[index];
 }
 
 /*
@@ -172,7 +167,7 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 		finfo->fn_nargs = fbp->nargs;
 		finfo->fn_strict = fbp->strict;
 		finfo->fn_retset = fbp->retset;
-		finfo->fn_stats = TRACK_FUNC_ALL;		/* ie, never track */
+		finfo->fn_stats = TRACK_FUNC_ALL;	/* ie, never track */
 		finfo->fn_addr = fbp->func;
 		finfo->fn_oid = functionId;
 		return;
@@ -208,7 +203,7 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 		 FmgrHookIsNeeded(functionId)))
 	{
 		finfo->fn_addr = fmgr_security_definer;
-		finfo->fn_stats = TRACK_FUNC_ALL;		/* ie, never track */
+		finfo->fn_stats = TRACK_FUNC_ALL;	/* ie, never track */
 		finfo->fn_oid = functionId;
 		ReleaseSysCache(procedureTuple);
 		return;
@@ -399,7 +394,7 @@ fetch_finfo_record(void *filehandle, const char *funcname)
 				 errmsg("could not find function information for function \"%s\"",
 						funcname),
 				 errhint("SQL-callable functions need an accompanying PG_FUNCTION_INFO_V1(funcname).")));
-		return NULL; /* silence compiler */
+		return NULL;			/* silence compiler */
 	}
 
 	/* Found, so call it */
@@ -631,7 +626,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	if (OidIsValid(fcache->userid))
 		SetUserIdAndSecContext(fcache->userid,
-							save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+							   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
 
 	if (fcache->proconfig)
 	{
@@ -1795,7 +1790,7 @@ Int64GetDatum(int64 X)
 	*retval = X;
 	return PointerGetDatum(retval);
 }
-#endif   /* USE_FLOAT8_BYVAL */
+#endif							/* USE_FLOAT8_BYVAL */
 
 #ifndef USE_FLOAT4_BYVAL
 
@@ -1828,7 +1823,7 @@ Float8GetDatum(float8 X)
  */
 
 struct varlena *
-pg_detoast_datum(struct varlena * datum)
+pg_detoast_datum(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
 		return heap_tuple_untoast_attr(datum);
@@ -1837,7 +1832,7 @@ pg_detoast_datum(struct varlena * datum)
 }
 
 struct varlena *
-pg_detoast_datum_copy(struct varlena * datum)
+pg_detoast_datum_copy(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
 		return heap_tuple_untoast_attr(datum);
@@ -1853,14 +1848,14 @@ pg_detoast_datum_copy(struct varlena * datum)
 }
 
 struct varlena *
-pg_detoast_datum_slice(struct varlena * datum, int32 first, int32 count)
+pg_detoast_datum_slice(struct varlena *datum, int32 first, int32 count)
 {
 	/* Only get the specified portion from the toast rel */
 	return heap_tuple_untoast_attr_slice(datum, first, count);
 }
 
 struct varlena *
-pg_detoast_datum_packed(struct varlena * datum)
+pg_detoast_datum_packed(struct varlena *datum)
 {
 	if (VARATT_IS_COMPRESSED(datum) || VARATT_IS_EXTERNAL(datum))
 		return heap_tuple_untoast_attr(datum);
@@ -1941,8 +1936,6 @@ get_call_expr_argtype(Node *expr, int argnum)
 		args = ((DistinctExpr *) expr)->args;
 	else if (IsA(expr, ScalarArrayOpExpr))
 		args = ((ScalarArrayOpExpr *) expr)->args;
-	else if (IsA(expr, ArrayCoerceExpr))
-		args = list_make1(((ArrayCoerceExpr *) expr)->arg);
 	else if (IsA(expr, NullIfExpr))
 		args = ((NullIfExpr *) expr)->args;
 	else if (IsA(expr, WindowFunc))
@@ -1956,15 +1949,11 @@ get_call_expr_argtype(Node *expr, int argnum)
 	argtype = exprType((Node *) list_nth(args, argnum));
 
 	/*
-	 * special hack for ScalarArrayOpExpr and ArrayCoerceExpr: what the
-	 * underlying function will actually get passed is the element type of the
-	 * array.
+	 * special hack for ScalarArrayOpExpr: what the underlying function will
+	 * actually get passed is the element type of the array.
 	 */
 	if (IsA(expr, ScalarArrayOpExpr) &&
 		argnum == 1)
-		argtype = get_base_element_type(argtype);
-	else if (IsA(expr, ArrayCoerceExpr) &&
-			 argnum == 0)
 		argtype = get_base_element_type(argtype);
 
 	return argtype;
@@ -2012,8 +2001,6 @@ get_call_expr_arg_stable(Node *expr, int argnum)
 		args = ((DistinctExpr *) expr)->args;
 	else if (IsA(expr, ScalarArrayOpExpr))
 		args = ((ScalarArrayOpExpr *) expr)->args;
-	else if (IsA(expr, ArrayCoerceExpr))
-		args = list_make1(((ArrayCoerceExpr *) expr)->arg);
 	else if (IsA(expr, NullIfExpr))
 		args = ((NullIfExpr *) expr)->args;
 	else if (IsA(expr, WindowFunc))

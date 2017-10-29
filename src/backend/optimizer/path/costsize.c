@@ -127,6 +127,7 @@ bool		enable_material = true;
 bool		enable_mergejoin = true;
 bool		enable_hashjoin = true;
 bool		enable_gathermerge = true;
+bool		enable_partition_wise_join = false;
 
 typedef struct
 {
@@ -504,10 +505,10 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		path->path.rows = path->path.param_info->ppi_rows;
 		/* qpquals come from the rel's restriction clauses and ppi_clauses */
 		qpquals = list_concat(
-				extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
-											path->indexquals),
-			  extract_nonindex_conditions(path->path.param_info->ppi_clauses,
-										  path->indexquals));
+							  extract_nonindex_conditions(path->indexinfo->indrestrictinfo,
+														  path->indexquals),
+							  extract_nonindex_conditions(path->path.param_info->ppi_clauses,
+														  path->indexquals));
 	}
 	else
 	{
@@ -664,8 +665,8 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	{
 		/*
 		 * For index only scans compute workers based on number of index pages
-		 * fetched; the number of heap pages we fetch might be so small as
-		 * to effectively rule out parallelism, which we don't want to do.
+		 * fetched; the number of heap pages we fetch might be so small as to
+		 * effectively rule out parallelism, which we don't want to do.
 		 */
 		if (indexonly)
 			rand_heap_pages = -1;
@@ -677,7 +678,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		 * order.
 		 */
 		path->path.parallel_workers = compute_parallel_worker(baserel,
-											   rand_heap_pages, index_pages);
+															  rand_heap_pages, index_pages);
 
 		/*
 		 * Fall out if workers can't be assigned for parallel scan, because in
@@ -827,7 +828,7 @@ index_pages_fetched(double tuples_fetched, BlockNumber pages,
 	Assert(T <= total_pages);
 
 	/* b is pro-rated share of effective_cache_size */
-	b = (double) effective_cache_size *T / total_pages;
+	b = (double) effective_cache_size * T / total_pages;
 
 	/* force it positive and integral */
 	if (b <= 1.0)
@@ -2188,7 +2189,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	/* For partial paths, scale row estimate. */
 	if (path->path.parallel_workers > 0)
 	{
-		double	parallel_divisor = get_parallel_divisor(&path->path);
+		double		parallel_divisor = get_parallel_divisor(&path->path);
 
 		path->path.rows =
 			clamp_row_est(path->path.rows / parallel_divisor);
@@ -2214,6 +2215,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 		Cost		inner_run_cost = workspace->inner_run_cost;
 		Cost		inner_rescan_run_cost = workspace->inner_rescan_run_cost;
 		double		outer_matched_rows;
+		double		outer_unmatched_rows;
 		Selectivity inner_scan_frac;
 
 		/*
@@ -2226,6 +2228,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 		 * least 1, no such clamp is needed now.)
 		 */
 		outer_matched_rows = rint(outer_path_rows * extra->semifactors.outer_match_frac);
+		outer_unmatched_rows = outer_path_rows - outer_matched_rows;
 		inner_scan_frac = 2.0 / (extra->semifactors.match_count + 1.0);
 
 		/*
@@ -2269,7 +2272,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 			 * of a nonempty scan.  We consider that these are all rescans,
 			 * since we used inner_run_cost once already.
 			 */
-			run_cost += (outer_path_rows - outer_matched_rows) *
+			run_cost += outer_unmatched_rows *
 				inner_rescan_run_cost / inner_path_rows;
 
 			/*
@@ -2287,20 +2290,28 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 			 * difficult to estimate whether that will happen (and it could
 			 * not happen if there are any unmatched outer rows!), so be
 			 * conservative and always charge the whole first-scan cost once.
+			 * We consider this charge to correspond to the first unmatched
+			 * outer row, unless there isn't one in our estimate, in which
+			 * case blame it on the first matched row.
 			 */
+
+			/* First, count all unmatched join tuples as being processed */
+			ntuples += outer_unmatched_rows * inner_path_rows;
+
+			/* Now add the forced full scan, and decrement appropriate count */
 			run_cost += inner_run_cost;
+			if (outer_unmatched_rows >= 1)
+				outer_unmatched_rows -= 1;
+			else
+				outer_matched_rows -= 1;
 
 			/* Add inner run cost for additional outer tuples having matches */
-			if (outer_matched_rows > 1)
-				run_cost += (outer_matched_rows - 1) * inner_rescan_run_cost * inner_scan_frac;
+			if (outer_matched_rows > 0)
+				run_cost += outer_matched_rows * inner_rescan_run_cost * inner_scan_frac;
 
-			/* Add inner run cost for unmatched outer tuples */
-			run_cost += (outer_path_rows - outer_matched_rows) *
-				inner_rescan_run_cost;
-
-			/* And count the unmatched join tuples as being processed */
-			ntuples += (outer_path_rows - outer_matched_rows) *
-				inner_path_rows;
+			/* Add inner run cost for additional unmatched outer tuples */
+			if (outer_unmatched_rows > 0)
+				run_cost += outer_unmatched_rows * inner_rescan_run_cost;
 		}
 	}
 	else
@@ -2624,7 +2635,7 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 	/* For partial paths, scale row estimate. */
 	if (path->jpath.path.parallel_workers > 0)
 	{
-		double	parallel_divisor = get_parallel_divisor(&path->jpath.path);
+		double		parallel_divisor = get_parallel_divisor(&path->jpath.path);
 
 		path->jpath.path.rows =
 			clamp_row_est(path->jpath.path.rows / parallel_divisor);
@@ -2953,7 +2964,7 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	 */
 	ExecChooseHashTableSize(inner_path_rows,
 							inner_path->pathtarget->width,
-							true,		/* useskew */
+							true,	/* useskew */
 							&numbuckets,
 							&numbatches,
 							&num_skew_mcvs);
@@ -3018,6 +3029,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	double		hashjointuples;
 	double		virtualbuckets;
 	Selectivity innerbucketsize;
+	Selectivity innermcvfreq;
 	ListCell   *hcl;
 
 	/* Mark the path with the correct row estimate */
@@ -3029,7 +3041,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	/* For partial paths, scale row estimate. */
 	if (path->jpath.path.parallel_workers > 0)
 	{
-		double	parallel_divisor = get_parallel_divisor(&path->jpath.path);
+		double		parallel_divisor = get_parallel_divisor(&path->jpath.path);
 
 		path->jpath.path.rows =
 			clamp_row_est(path->jpath.path.rows / parallel_divisor);
@@ -3047,12 +3059,12 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	path->num_batches = numbatches;
 
 	/* and compute the number of "virtual" buckets in the whole join */
-	virtualbuckets = (double) numbuckets *(double) numbatches;
+	virtualbuckets = (double) numbuckets * (double) numbatches;
 
 	/*
-	 * Determine bucketsize fraction for inner relation.  We use the smallest
-	 * bucketsize estimated for any individual hashclause; this is undoubtedly
-	 * conservative.
+	 * Determine bucketsize fraction and MCV frequency for the inner relation.
+	 * We use the smallest bucketsize or MCV frequency estimated for any
+	 * individual hashclause; this is undoubtedly conservative.
 	 *
 	 * BUT: if inner relation has been unique-ified, we can assume it's good
 	 * for hashing.  This is important both because it's the right answer, and
@@ -3060,22 +3072,27 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	 * non-unique-ified paths.
 	 */
 	if (IsA(inner_path, UniquePath))
+	{
 		innerbucketsize = 1.0 / virtualbuckets;
+		innermcvfreq = 0.0;
+	}
 	else
 	{
 		innerbucketsize = 1.0;
+		innermcvfreq = 1.0;
 		foreach(hcl, hashclauses)
 		{
 			RestrictInfo *restrictinfo = lfirst_node(RestrictInfo, hcl);
 			Selectivity thisbucketsize;
+			Selectivity thismcvfreq;
 
 			/*
 			 * First we have to figure out which side of the hashjoin clause
 			 * is the inner side.
 			 *
 			 * Since we tend to visit the same clauses over and over when
-			 * planning a large query, we cache the bucketsize estimate in the
-			 * RestrictInfo node to avoid repeated lookups of statistics.
+			 * planning a large query, we cache the bucket stats estimates in
+			 * the RestrictInfo node to avoid repeated lookups of statistics.
 			 */
 			if (bms_is_subset(restrictinfo->right_relids,
 							  inner_path->parent->relids))
@@ -3085,12 +3102,14 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 				if (thisbucketsize < 0)
 				{
 					/* not cached yet */
-					thisbucketsize =
-						estimate_hash_bucketsize(root,
-										   get_rightop(restrictinfo->clause),
-												 virtualbuckets);
-					restrictinfo->right_bucketsize = thisbucketsize;
+					estimate_hash_bucket_stats(root,
+											   get_rightop(restrictinfo->clause),
+											   virtualbuckets,
+											   &restrictinfo->right_mcvfreq,
+											   &restrictinfo->right_bucketsize);
+					thisbucketsize = restrictinfo->right_bucketsize;
 				}
+				thismcvfreq = restrictinfo->right_mcvfreq;
 			}
 			else
 			{
@@ -3101,18 +3120,35 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 				if (thisbucketsize < 0)
 				{
 					/* not cached yet */
-					thisbucketsize =
-						estimate_hash_bucketsize(root,
-											get_leftop(restrictinfo->clause),
-												 virtualbuckets);
-					restrictinfo->left_bucketsize = thisbucketsize;
+					estimate_hash_bucket_stats(root,
+											   get_leftop(restrictinfo->clause),
+											   virtualbuckets,
+											   &restrictinfo->left_mcvfreq,
+											   &restrictinfo->left_bucketsize);
+					thisbucketsize = restrictinfo->left_bucketsize;
 				}
+				thismcvfreq = restrictinfo->left_mcvfreq;
 			}
 
 			if (innerbucketsize > thisbucketsize)
 				innerbucketsize = thisbucketsize;
+			if (innermcvfreq > thismcvfreq)
+				innermcvfreq = thismcvfreq;
 		}
 	}
+
+	/*
+	 * If the bucket holding the inner MCV would exceed work_mem, we don't
+	 * want to hash unless there is really no other alternative, so apply
+	 * disable_cost.  (The executor normally copes with excessive memory usage
+	 * by splitting batches, but obviously it cannot separate equal values
+	 * that way, so it will be unable to drive the batch size below work_mem
+	 * when this is true.)
+	 */
+	if (relation_byte_size(clamp_row_est(inner_path_rows * innermcvfreq),
+						   inner_path->pathtarget->width) >
+		(work_mem * 1024L))
+		startup_cost += disable_cost;
 
 	/*
 	 * Compute cost of the hashquals and qpquals (other restriction clauses)
@@ -3366,7 +3402,7 @@ cost_rescan(PlannerInfo *root, Path *path,
 				 */
 				Cost		run_cost = cpu_tuple_cost * path->rows;
 				double		nbytes = relation_byte_size(path->rows,
-													path->pathtarget->width);
+														path->pathtarget->width);
 				long		work_mem_bytes = work_mem * 1024L;
 
 				if (nbytes > work_mem_bytes)
@@ -3393,7 +3429,7 @@ cost_rescan(PlannerInfo *root, Path *path,
 				 */
 				Cost		run_cost = cpu_operator_cost * path->rows;
 				double		nbytes = relation_byte_size(path->rows,
-													path->pathtarget->width);
+														path->pathtarget->width);
 				long		work_mem_bytes = work_mem * 1024L;
 
 				if (nbytes > work_mem_bytes)
@@ -3597,11 +3633,14 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	else if (IsA(node, ArrayCoerceExpr))
 	{
 		ArrayCoerceExpr *acoerce = (ArrayCoerceExpr *) node;
-		Node	   *arraynode = (Node *) acoerce->arg;
+		QualCost	perelemcost;
 
-		if (OidIsValid(acoerce->elemfuncid))
-			context->total.per_tuple += get_func_cost(acoerce->elemfuncid) *
-				cpu_operator_cost * estimate_array_length(arraynode);
+		cost_qual_eval_node(&perelemcost, (Node *) acoerce->elemexpr,
+							context->root);
+		context->total.startup += perelemcost.startup;
+		if (perelemcost.per_tuple > 0)
+			context->total.per_tuple += perelemcost.per_tuple *
+				estimate_array_length((Node *) acoerce->arg);
 	}
 	else if (IsA(node, RowCompareExpr))
 	{
@@ -3616,6 +3655,15 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 			context->total.per_tuple += get_func_cost(get_opcode(opid)) *
 				cpu_operator_cost;
 		}
+	}
+	else if (IsA(node, MinMaxExpr) ||
+			 IsA(node, SQLValueFunction) ||
+			 IsA(node, XmlExpr) ||
+			 IsA(node, CoerceToDomain) ||
+			 IsA(node, NextValueExpr))
+	{
+		/* Treat all these as having cost 1 */
+		context->total.per_tuple += cpu_operator_cost;
 	}
 	else if (IsA(node, CurrentOfExpr))
 	{
@@ -3775,7 +3823,7 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 	jselec = clauselist_selectivity(root,
 									joinquals,
 									0,
-							 (jointype == JOIN_ANTI) ? JOIN_ANTI : JOIN_SEMI,
+									(jointype == JOIN_ANTI) ? JOIN_ANTI : JOIN_SEMI,
 									sjinfo);
 
 	/*
@@ -4037,7 +4085,7 @@ get_parameterized_baserel_size(PlannerInfo *root, RelOptInfo *rel,
 	nrows = rel->tuples *
 		clauselist_selectivity(root,
 							   allclauses,
-							   rel->relid,		/* do not use 0! */
+							   rel->relid,	/* do not use 0! */
 							   JOIN_INNER,
 							   NULL);
 	nrows = clamp_row_est(nrows);
@@ -4308,7 +4356,6 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 	{
 		ForeignKeyOptInfo *fkinfo = (ForeignKeyOptInfo *) lfirst(lc);
 		bool		ref_is_outer;
-		bool		use_smallest_selectivity = false;
 		List	   *removedlist;
 		ListCell   *cell;
 		ListCell   *prev;
@@ -4325,6 +4372,22 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 				 bms_is_member(fkinfo->con_relid, inner_relids))
 			ref_is_outer = true;
 		else
+			continue;
+
+		/*
+		 * If we're dealing with a semi/anti join, and the FK's referenced
+		 * relation is on the outside, then knowledge of the FK doesn't help
+		 * us figure out what we need to know (which is the fraction of outer
+		 * rows that have matches).  On the other hand, if the referenced rel
+		 * is on the inside, then all outer rows must have matches in the
+		 * referenced table (ignoring nulls).  But any restriction or join
+		 * clauses that filter that table will reduce the fraction of matches.
+		 * We can account for restriction clauses, but it's too hard to guess
+		 * how many table rows would get through a join that's inside the RHS.
+		 * Hence, if either case applies, punt and ignore the FK.
+		 */
+		if ((jointype == JOIN_SEMI || jointype == JOIN_ANTI) &&
+			(ref_is_outer || bms_membership(inner_relids) != BMS_SINGLETON))
 			continue;
 
 		/*
@@ -4427,10 +4490,7 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		 * However (1) if there are any strict restriction clauses for the
 		 * referencing column(s) elsewhere in the query, derating here would
 		 * be double-counting the null fraction, and (2) it's not very clear
-		 * how to combine null fractions for multiple referencing columns.
-		 *
-		 * In the use_smallest_selectivity code below, null derating is done
-		 * implicitly by relying on clause_selectivity(); in the other cases,
+		 * how to combine null fractions for multiple referencing columns. So
 		 * we do nothing for now about correcting for nulls.
 		 *
 		 * XXX another point here is that if either side of an FK constraint
@@ -4443,52 +4503,23 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 		 * work, it is uncommon in practice to have an FK referencing a parent
 		 * table.  So, at least for now, disregard inheritance here.
 		 */
-		if (ref_is_outer && jointype != JOIN_INNER)
+		if (jointype == JOIN_SEMI || jointype == JOIN_ANTI)
 		{
 			/*
-			 * When the referenced table is on the outer side of a non-inner
-			 * join, knowing that each inner row has exactly one match is not
-			 * as useful as one could wish, since we really need to know the
-			 * fraction of outer rows with a match.  Still, we can avoid the
-			 * folly of multiplying the per-column estimates together.  Take
-			 * the smallest per-column selectivity, instead.  (This should
-			 * correspond to the FK column with the most nulls.)
+			 * For JOIN_SEMI and JOIN_ANTI, we only get here when the FK's
+			 * referenced table is exactly the inside of the join.  The join
+			 * selectivity is defined as the fraction of LHS rows that have
+			 * matches.  The FK implies that every LHS row has a match *in the
+			 * referenced table*; but any restriction clauses on it will
+			 * reduce the number of matches.  Hence we take the join
+			 * selectivity as equal to the selectivity of the table's
+			 * restriction clauses, which is rows / tuples; but we must guard
+			 * against tuples == 0.
 			 */
-			use_smallest_selectivity = true;
-		}
-		else if (jointype == JOIN_SEMI || jointype == JOIN_ANTI)
-		{
-			/*
-			 * For JOIN_SEMI and JOIN_ANTI, the selectivity is defined as the
-			 * fraction of LHS rows that have matches.  The referenced table
-			 * is on the inner side (we already handled the other case above),
-			 * so the FK implies that every LHS row has a match *in the
-			 * referenced table*.  But any restriction or join clauses below
-			 * here will reduce the number of matches.
-			 */
-			if (bms_membership(inner_relids) == BMS_SINGLETON)
-			{
-				/*
-				 * When the inner side of the semi/anti join is just the
-				 * referenced table, we may take the FK selectivity as equal
-				 * to the selectivity of the table's restriction clauses.
-				 */
-				RelOptInfo *ref_rel = find_base_rel(root, fkinfo->ref_relid);
-				double		ref_tuples = Max(ref_rel->tuples, 1.0);
+			RelOptInfo *ref_rel = find_base_rel(root, fkinfo->ref_relid);
+			double		ref_tuples = Max(ref_rel->tuples, 1.0);
 
-				fkselec *= ref_rel->rows / ref_tuples;
-			}
-			else
-			{
-				/*
-				 * When the inner side of the semi/anti join is itself a join,
-				 * it's hard to guess what fraction of the referenced table
-				 * will get through the join.  But we still don't want to
-				 * multiply per-column estimates together.  Take the smallest
-				 * per-column selectivity, instead.
-				 */
-				use_smallest_selectivity = true;
-			}
+			fkselec *= ref_rel->rows / ref_tuples;
 		}
 		else
 		{
@@ -4501,26 +4532,6 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 			double		ref_tuples = Max(ref_rel->tuples, 1.0);
 
 			fkselec *= 1.0 / ref_tuples;
-		}
-
-		/*
-		 * Common code for cases where we should use the smallest selectivity
-		 * that would be computed for any one of the FK's clauses.
-		 */
-		if (use_smallest_selectivity)
-		{
-			Selectivity thisfksel = 1.0;
-
-			foreach(cell, removedlist)
-			{
-				RestrictInfo *rinfo = (RestrictInfo *) lfirst(cell);
-				Selectivity csel;
-
-				csel = clause_selectivity(root, (Node *) rinfo,
-										  0, jointype, sjinfo);
-				thisfksel = Min(thisfksel, csel);
-			}
-			fkselec *= thisfksel;
 		}
 	}
 
@@ -4543,15 +4554,11 @@ set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 {
 	PlannerInfo *subroot = rel->subroot;
 	RelOptInfo *sub_final_rel;
-	RangeTblEntry *rte PG_USED_FOR_ASSERTS_ONLY;
 	ListCell   *lc;
 
 	/* Should only be applied to base relations that are subqueries */
 	Assert(rel->relid > 0);
-#ifdef USE_ASSERT_CHECKING
-	rte = planner_rt_fetch(rel->relid, root);
-	Assert(rte->rtekind == RTE_SUBQUERY);
-#endif
+	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_SUBQUERY);
 
 	/*
 	 * Copy raw number of output rows from subquery.  All of its paths should
@@ -4663,14 +4670,9 @@ set_function_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 void
 set_tablefunc_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 {
-	RangeTblEntry *rte PG_USED_FOR_ASSERTS_ONLY;
-
 	/* Should only be applied to base relations that are functions */
 	Assert(rel->relid > 0);
-#ifdef USE_ASSERT_CHECKING
-	rte = planner_rt_fetch(rel->relid, root);
-	Assert(rte->rtekind == RTE_TABLEFUNC);
-#endif
+	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_TABLEFUNC);
 
 	rel->tuples = 100;
 
@@ -4952,7 +4954,7 @@ set_rel_width(PlannerInfo *root, RelOptInfo *rel)
 		{
 			/* Real relation, so estimate true tuple width */
 			wholerow_width += get_relation_data_width(reloid,
-										   rel->attr_widths - rel->min_attr);
+													  rel->attr_widths - rel->min_attr);
 		}
 		else
 		{

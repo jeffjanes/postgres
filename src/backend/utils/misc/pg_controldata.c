@@ -91,11 +91,11 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 	 * function's pg_proc entry!
 	 */
 	tupdesc = CreateTemplateTupleDesc(19, false);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "checkpoint_location",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "checkpoint_lsn",
 					   LSNOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "prior_location",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "prior_lsn",
 					   LSNOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "redo_location",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "redo_lsn",
 					   LSNOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "redo_wal_file",
 					   TEXTOID, -1, 0);
@@ -141,8 +141,9 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 	 * Calculate name of the WAL file containing the latest checkpoint's REDO
 	 * start point.
 	 */
-	XLByteToSeg(ControlFile->checkPointCopy.redo, segno);
-	XLogFileName(xlogfilename, ControlFile->checkPointCopy.ThisTimeLineID, segno);
+	XLByteToSeg(ControlFile->checkPointCopy.redo, segno, wal_segment_size);
+	XLogFileName(xlogfilename, ControlFile->checkPointCopy.ThisTimeLineID,
+				 segno, wal_segment_size);
 
 	/* Populate the values and null arrays */
 	values[0] = LSNGetDatum(ControlFile->checkPoint);
@@ -167,8 +168,8 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 	nulls[6] = false;
 
 	values[7] = CStringGetTextDatum(psprintf("%u:%u",
-									ControlFile->checkPointCopy.nextXidEpoch,
-									   ControlFile->checkPointCopy.nextXid));
+											 ControlFile->checkPointCopy.nextXidEpoch,
+											 ControlFile->checkPointCopy.nextXid));
 	nulls[7] = false;
 
 	values[8] = ObjectIdGetDatum(ControlFile->checkPointCopy.nextOid);
@@ -202,7 +203,7 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 	nulls[17] = false;
 
 	values[18] = TimestampTzGetDatum(
-					time_t_to_timestamptz(ControlFile->checkPointCopy.time));
+									 time_t_to_timestamptz(ControlFile->checkPointCopy.time));
 	nulls[18] = false;
 
 	htup = heap_form_tuple(tupdesc, values, nulls);
@@ -225,13 +226,13 @@ pg_control_recovery(PG_FUNCTION_ARGS)
 	 * function's pg_proc entry!
 	 */
 	tupdesc = CreateTemplateTupleDesc(5, false);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "min_recovery_end_location",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "min_recovery_end_lsn",
 					   LSNOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "min_recovery_end_timeline",
 					   INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "backup_start_location",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "backup_start_lsn",
 					   LSNOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "backup_end_location",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "backup_end_lsn",
 					   LSNOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "end_of_backup_record_required",
 					   BOOLOID, -1, 0);

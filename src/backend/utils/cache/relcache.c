@@ -546,7 +546,7 @@ RelationBuildTupleDesc(Relation relation)
 			elog(ERROR, "invalid attribute number %d for %s",
 				 attp->attnum, RelationGetRelationName(relation));
 
-		memcpy(relation->rd_att->attrs[attp->attnum - 1],
+		memcpy(TupleDescAttr(relation->rd_att, attp->attnum - 1),
 			   attp,
 			   ATTRIBUTE_FIXED_PART_SIZE);
 
@@ -590,7 +590,7 @@ RelationBuildTupleDesc(Relation relation)
 		int			i;
 
 		for (i = 0; i < relation->rd_rel->relnatts; i++)
-			Assert(relation->rd_att->attrs[i]->attcacheoff == -1);
+			Assert(TupleDescAttr(relation->rd_att, i)->attcacheoff == -1);
 	}
 #endif
 
@@ -600,7 +600,7 @@ RelationBuildTupleDesc(Relation relation)
 	 * for attnum=1 that used to exist in fastgetattr() and index_getattr().
 	 */
 	if (relation->rd_rel->relnatts > 0)
-		relation->rd_att->attrs[0]->attcacheoff = 0;
+		TupleDescAttr(relation->rd_att, 0)->attcacheoff = 0;
 
 	/*
 	 * Set up constraint/default info
@@ -627,7 +627,7 @@ RelationBuildTupleDesc(Relation relation)
 			constr->num_check = relation->rd_rel->relchecks;
 			constr->check = (ConstrCheck *)
 				MemoryContextAllocZero(CacheMemoryContext,
-									constr->num_check * sizeof(ConstrCheck));
+									   constr->num_check * sizeof(ConstrCheck));
 			CheckConstraintFetch(relation);
 		}
 		else
@@ -945,6 +945,10 @@ RelationBuildPartitionKey(Relation relation)
 								   opclassform->opcintype,
 								   opclassform->opcintype,
 								   BTORDER_PROC);
+		if (!OidIsValid(funcid))	/* should not happen */
+			elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
+				 BTORDER_PROC, opclassform->opcintype, opclassform->opcintype,
+				 opclassform->opcfamily);
 
 		fmgr_info(funcid, &key->partsupfunc[i]);
 
@@ -954,9 +958,11 @@ RelationBuildPartitionKey(Relation relation)
 		/* Collect type information */
 		if (attno != 0)
 		{
-			key->parttypid[i] = relation->rd_att->attrs[attno - 1]->atttypid;
-			key->parttypmod[i] = relation->rd_att->attrs[attno - 1]->atttypmod;
-			key->parttypcoll[i] = relation->rd_att->attrs[attno - 1]->attcollation;
+			Form_pg_attribute att = TupleDescAttr(relation->rd_att, attno - 1);
+
+			key->parttypid[i] = att->atttypid;
+			key->parttypmod[i] = att->atttypmod;
+			key->parttypcoll[i] = att->attcollation;
 		}
 		else
 		{
@@ -1204,7 +1210,9 @@ equalPartitionDescs(PartitionKey key, PartitionDesc partdesc1,
 			if (partdesc2->boundinfo == NULL)
 				return false;
 
-			if (!partition_bounds_equal(key, partdesc1->boundinfo,
+			if (!partition_bounds_equal(key->partnatts, key->parttyplen,
+										key->parttypbyval,
+										partdesc1->boundinfo,
 										partdesc2->boundinfo))
 				return false;
 		}
@@ -1371,7 +1379,7 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 	/*
 	 * initialize the relation lock manager information
 	 */
-	RelationInitLockInfo(relation);		/* see lmgr.c */
+	RelationInitLockInfo(relation); /* see lmgr.c */
 
 	/*
 	 * initialize physical addressing information for the relation
@@ -1446,7 +1454,7 @@ RelationInitPhysicalAddr(Relation relation)
 			Form_pg_class physrel;
 
 			phys_tuple = ScanPgRelation(RelationGetRelid(relation),
-							   RelationGetRelid(relation) != ClassOidIndexId,
+										RelationGetRelid(relation) != ClassOidIndexId,
 										true);
 			if (!HeapTupleIsValid(phys_tuple))
 				elog(ERROR, "could not find pg_class entry for %u",
@@ -1971,16 +1979,16 @@ formrdesc(const char *relationName, Oid relationReltype,
 	has_not_null = false;
 	for (i = 0; i < natts; i++)
 	{
-		memcpy(relation->rd_att->attrs[i],
+		memcpy(TupleDescAttr(relation->rd_att, i),
 			   &attrs[i],
 			   ATTRIBUTE_FIXED_PART_SIZE);
 		has_not_null |= attrs[i].attnotnull;
 		/* make sure attcacheoff is valid */
-		relation->rd_att->attrs[i]->attcacheoff = -1;
+		TupleDescAttr(relation->rd_att, i)->attcacheoff = -1;
 	}
 
 	/* initialize first attribute's attcacheoff, cf RelationBuildTupleDesc */
-	relation->rd_att->attrs[0]->attcacheoff = 0;
+	TupleDescAttr(relation->rd_att, 0)->attcacheoff = 0;
 
 	/* mark not-null status */
 	if (has_not_null)
@@ -1994,7 +2002,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	/*
 	 * initialize relation id from info in att array (my, this is ugly)
 	 */
-	RelationGetRelid(relation) = relation->rd_att->attrs[0]->attrelid;
+	RelationGetRelid(relation) = TupleDescAttr(relation->rd_att, 0)->attrelid;
 
 	/*
 	 * All relations made with formrdesc are mapped.  This is necessarily so
@@ -2011,7 +2019,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	/*
 	 * initialize the relation lock manager information
 	 */
-	RelationInitLockInfo(relation);		/* see lmgr.c */
+	RelationInitLockInfo(relation); /* see lmgr.c */
 
 	/*
 	 * initialize physical addressing information for the relation
@@ -2423,7 +2431,7 @@ RelationClearRelation(Relation relation, bool rebuild)
 
 		if (relation->rd_rel->relkind == RELKIND_INDEX)
 		{
-			relation->rd_isvalid = false;		/* needs to be revalidated */
+			relation->rd_isvalid = false;	/* needs to be revalidated */
 			if (relation->rd_refcnt > 1 && IsTransactionState())
 				RelationReloadIndexInfo(relation);
 		}
@@ -2889,7 +2897,7 @@ RememberToFreeTupleDescAtEOX(TupleDesc td)
 		Assert(EOXactTupleDescArrayLen > 0);
 
 		EOXactTupleDescArray = (TupleDesc *) repalloc(EOXactTupleDescArray,
-												 newlen * sizeof(TupleDesc));
+													  newlen * sizeof(TupleDesc));
 		EOXactTupleDescArrayLen = newlen;
 	}
 
@@ -3268,9 +3276,12 @@ RelationBuildLocalRelation(const char *relname,
 	has_not_null = false;
 	for (i = 0; i < natts; i++)
 	{
-		rel->rd_att->attrs[i]->attidentity = tupDesc->attrs[i]->attidentity;
-		rel->rd_att->attrs[i]->attnotnull = tupDesc->attrs[i]->attnotnull;
-		has_not_null |= tupDesc->attrs[i]->attnotnull;
+		Form_pg_attribute satt = TupleDescAttr(tupDesc, i);
+		Form_pg_attribute datt = TupleDescAttr(rel->rd_att, i);
+
+		datt->attidentity = satt->attidentity;
+		datt->attnotnull = satt->attnotnull;
+		has_not_null |= satt->attnotnull;
 	}
 
 	if (has_not_null)
@@ -3340,7 +3351,7 @@ RelationBuildLocalRelation(const char *relname,
 	RelationGetRelid(rel) = relid;
 
 	for (i = 0; i < natts; i++)
-		rel->rd_att->attrs[i]->attrelid = relid;
+		TupleDescAttr(rel->rd_att, i)->attrelid = relid;
 
 	rel->rd_rel->reltablespace = reltablespace;
 
@@ -3657,7 +3668,7 @@ RelationCacheInitializePhase3(void)
 		formrdesc("pg_type", TypeRelation_Rowtype_Id, false,
 				  true, Natts_pg_type, Desc_pg_type);
 
-#define NUM_CRITICAL_LOCAL_RELS 4		/* fix if you change list above */
+#define NUM_CRITICAL_LOCAL_RELS 4	/* fix if you change list above */
 	}
 
 	MemoryContextSwitchTo(oldcxt);
@@ -3782,7 +3793,7 @@ RelationCacheInitializePhase3(void)
 			Form_pg_class relp;
 
 			htup = SearchSysCache1(RELOID,
-							   ObjectIdGetDatum(RelationGetRelid(relation)));
+								   ObjectIdGetDatum(RelationGetRelid(relation)));
 			if (!HeapTupleIsValid(htup))
 				elog(FATAL, "cache lookup failed for relation %u",
 					 RelationGetRelid(relation));
@@ -3858,13 +3869,20 @@ RelationCacheInitializePhase3(void)
 		}
 
 		/*
-		 * Reload partition key and descriptor for a partitioned table.
+		 * Reload the partition key and descriptor for a partitioned table.
 		 */
-		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
+			relation->rd_partkey == NULL)
 		{
 			RelationBuildPartitionKey(relation);
 			Assert(relation->rd_partkey != NULL);
 
+			restart = true;
+		}
+
+		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
+			relation->rd_partdesc == NULL)
+		{
 			RelationBuildPartitionDesc(relation);
 			Assert(relation->rd_partdesc != NULL);
 
@@ -3953,18 +3971,18 @@ BuildHardcodedDescriptor(int natts, const FormData_pg_attribute *attrs,
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
 	result = CreateTemplateTupleDesc(natts, hasoids);
-	result->tdtypeid = RECORDOID;		/* not right, but we don't care */
+	result->tdtypeid = RECORDOID;	/* not right, but we don't care */
 	result->tdtypmod = -1;
 
 	for (i = 0; i < natts; i++)
 	{
-		memcpy(result->attrs[i], &attrs[i], ATTRIBUTE_FIXED_PART_SIZE);
+		memcpy(TupleDescAttr(result, i), &attrs[i], ATTRIBUTE_FIXED_PART_SIZE);
 		/* make sure attcacheoff is valid */
-		result->attrs[i]->attcacheoff = -1;
+		TupleDescAttr(result, i)->attcacheoff = -1;
 	}
 
 	/* initialize first attribute's attcacheoff, cf RelationBuildTupleDesc */
-	result->attrs[0]->attcacheoff = 0;
+	TupleDescAttr(result, 0)->attcacheoff = 0;
 
 	/* Note: we don't bother to set up a TupleConstr entry */
 
@@ -4031,6 +4049,7 @@ AttrDefaultFetch(Relation relation)
 	while (HeapTupleIsValid(htup = systable_getnext(adscan)))
 	{
 		Form_pg_attrdef adform = (Form_pg_attrdef) GETSTRUCT(htup);
+		Form_pg_attribute attr = TupleDescAttr(relation->rd_att, adform->adnum - 1);
 
 		for (i = 0; i < ndef; i++)
 		{
@@ -4038,7 +4057,7 @@ AttrDefaultFetch(Relation relation)
 				continue;
 			if (attrdef[i].adbin != NULL)
 				elog(WARNING, "multiple attrdef records found for attr %s of rel %s",
-				NameStr(relation->rd_att->attrs[adform->adnum - 1]->attname),
+					 NameStr(attr->attname),
 					 RelationGetRelationName(relation));
 			else
 				found++;
@@ -4048,7 +4067,7 @@ AttrDefaultFetch(Relation relation)
 							  adrel->rd_att, &isnull);
 			if (isnull)
 				elog(WARNING, "null adbin for attr %s of rel %s",
-				NameStr(relation->rd_att->attrs[adform->adnum - 1]->attname),
+					 NameStr(attr->attname),
 					 RelationGetRelationName(relation));
 			else
 			{
@@ -4232,7 +4251,7 @@ RelationGetFKeyList(Relation relation)
 			elog(ERROR, "null conkey for rel %s",
 				 RelationGetRelationName(relation));
 
-		arr = DatumGetArrayTypeP(adatum);		/* ensure not toasted */
+		arr = DatumGetArrayTypeP(adatum);	/* ensure not toasted */
 		nelem = ARR_DIMS(arr)[0];
 		if (ARR_NDIM(arr) != 1 ||
 			nelem < 1 ||
@@ -4251,7 +4270,7 @@ RelationGetFKeyList(Relation relation)
 			elog(ERROR, "null confkey for rel %s",
 				 RelationGetRelationName(relation));
 
-		arr = DatumGetArrayTypeP(adatum);		/* ensure not toasted */
+		arr = DatumGetArrayTypeP(adatum);	/* ensure not toasted */
 		nelem = ARR_DIMS(arr)[0];
 		if (ARR_NDIM(arr) != 1 ||
 			nelem != info->nkeys ||
@@ -4268,7 +4287,7 @@ RelationGetFKeyList(Relation relation)
 			elog(ERROR, "null conpfeqop for rel %s",
 				 RelationGetRelationName(relation));
 
-		arr = DatumGetArrayTypeP(adatum);		/* ensure not toasted */
+		arr = DatumGetArrayTypeP(adatum);	/* ensure not toasted */
 		nelem = ARR_DIMS(arr)[0];
 		if (ARR_NDIM(arr) != 1 ||
 			nelem != info->nkeys ||
@@ -4455,7 +4474,7 @@ RelationGetIndexList(Relation relation)
 
 /*
  * RelationGetStatExtList
- *		get a list of OIDs of extended statistics on this relation
+ *		get a list of OIDs of statistics objects on this relation
  *
  * The statistics list is created only if someone requests it, in a way
  * similar to RelationGetIndexList().  We scan pg_statistic_ext to find
@@ -4463,7 +4482,7 @@ RelationGetIndexList(Relation relation)
  * won't have to compute it again.  Note that shared cache inval of a
  * relcache entry will delete the old list and set rd_statvalid to 0,
  * so that we must recompute the statistics list on next request.  This
- * handles creation or deletion of a statistic.
+ * handles creation or deletion of a statistics object.
  *
  * The returned list is guaranteed to be sorted in order by OID, although
  * this is not currently needed.
@@ -4497,7 +4516,10 @@ RelationGetStatExtList(Relation relation)
 	 */
 	result = NIL;
 
-	/* Prepare to scan pg_statistic_ext for entries having stxrelid = this rel. */
+	/*
+	 * Prepare to scan pg_statistic_ext for entries having stxrelid = this
+	 * rel.
+	 */
 	ScanKeyInit(&skey,
 				Anum_pg_statistic_ext_stxrelid,
 				BTEqualStrategyNumber, F_OIDEQ,
@@ -4596,9 +4618,10 @@ RelationSetIndexList(Relation relation, List *indexIds, Oid oidIndex)
 	list_free(relation->rd_indexlist);
 	relation->rd_indexlist = indexIds;
 	relation->rd_oidindex = oidIndex;
+
 	/*
-	 * For the moment, assume the target rel hasn't got a pk or replica
-	 * index. We'll load them on demand in the API that wraps access to them.
+	 * For the moment, assume the target rel hasn't got a pk or replica index.
+	 * We'll load them on demand in the API that wraps access to them.
 	 */
 	relation->rd_pkindex = InvalidOid;
 	relation->rd_replidindex = InvalidOid;
@@ -4936,19 +4959,19 @@ restart:
 			if (attrnum != 0)
 			{
 				indexattrs = bms_add_member(indexattrs,
-							   attrnum - FirstLowInvalidHeapAttributeNumber);
+											attrnum - FirstLowInvalidHeapAttributeNumber);
 
 				if (isKey)
 					uindexattrs = bms_add_member(uindexattrs,
-							   attrnum - FirstLowInvalidHeapAttributeNumber);
+												 attrnum - FirstLowInvalidHeapAttributeNumber);
 
 				if (isPK)
 					pkindexattrs = bms_add_member(pkindexattrs,
-							   attrnum - FirstLowInvalidHeapAttributeNumber);
+												  attrnum - FirstLowInvalidHeapAttributeNumber);
 
 				if (isIDKey)
 					idindexattrs = bms_add_member(idindexattrs,
-							   attrnum - FirstLowInvalidHeapAttributeNumber);
+												  attrnum - FirstLowInvalidHeapAttributeNumber);
 			}
 		}
 
@@ -5162,7 +5185,7 @@ GetRelationPublicationActions(Relation relation)
 {
 	List	   *puboids;
 	ListCell   *lc;
-	MemoryContext		oldcxt;
+	MemoryContext oldcxt;
 	PublicationActions *pubactions = palloc0(sizeof(PublicationActions));
 
 	if (relation->rd_pubactions)
@@ -5193,8 +5216,8 @@ GetRelationPublicationActions(Relation relation)
 		ReleaseSysCache(tup);
 
 		/*
-		 * If we know everything is replicated, there is no point to check
-		 * for other publications.
+		 * If we know everything is replicated, there is no point to check for
+		 * other publications.
 		 */
 		if (pubactions->pubinsert && pubactions->pubupdate &&
 			pubactions->pubdelete)
@@ -5253,7 +5276,7 @@ errtablecol(Relation rel, int attnum)
 
 	/* Use reldesc if it's a user attribute, else consult the catalogs */
 	if (attnum > 0 && attnum <= reldesc->natts)
-		colname = NameStr(reldesc->attrs[attnum - 1]->attname);
+		colname = NameStr(TupleDescAttr(reldesc, attnum - 1)->attname);
 	else
 		colname = get_relid_attribute_name(RelationGetRelid(rel), attnum);
 
@@ -5437,20 +5460,22 @@ load_relcache_init_file(bool shared)
 		rel->rd_att->tdrefcount = 1;	/* mark as refcounted */
 
 		rel->rd_att->tdtypeid = relform->reltype;
-		rel->rd_att->tdtypmod = -1;		/* unnecessary, but... */
+		rel->rd_att->tdtypmod = -1; /* unnecessary, but... */
 
 		/* next read all the attribute tuple form data entries */
 		has_not_null = false;
 		for (i = 0; i < relform->relnatts; i++)
 		{
+			Form_pg_attribute attr = TupleDescAttr(rel->rd_att, i);
+
 			if (fread(&len, 1, sizeof(len), fp) != sizeof(len))
 				goto read_failed;
 			if (len != ATTRIBUTE_FIXED_PART_SIZE)
 				goto read_failed;
-			if (fread(rel->rd_att->attrs[i], 1, len, fp) != len)
+			if (fread(attr, 1, len, fp) != len)
 				goto read_failed;
 
-			has_not_null |= rel->rd_att->attrs[i]->attnotnull;
+			has_not_null |= attr->attnotnull;
 		}
 
 		/* next read the access method specific field */
@@ -5462,7 +5487,7 @@ load_relcache_init_file(bool shared)
 			if (fread(rel->rd_options, 1, len, fp) != len)
 				goto read_failed;
 			if (len != VARSIZE(rel->rd_options))
-				goto read_failed;		/* sanity check */
+				goto read_failed;	/* sanity check */
 		}
 		else
 		{
@@ -5608,6 +5633,7 @@ load_relcache_init_file(bool shared)
 		rel->rd_rsdesc = NULL;
 		rel->rd_partkeycxt = NULL;
 		rel->rd_partkey = NULL;
+		rel->rd_pdcxt = NULL;
 		rel->rd_partdesc = NULL;
 		rel->rd_partcheck = NIL;
 		rel->rd_indexprs = NIL;
@@ -5778,7 +5804,7 @@ write_relcache_init_file(bool shared)
 				(errcode_for_file_access(),
 				 errmsg("could not create relation-cache initialization file \"%s\": %m",
 						tempfilename),
-			  errdetail("Continuing anyway, but there's something wrong.")));
+				 errdetail("Continuing anyway, but there's something wrong.")));
 		return;
 	}
 
@@ -5830,7 +5856,8 @@ write_relcache_init_file(bool shared)
 		/* next, do all the attribute tuple form data entries */
 		for (i = 0; i < relform->relnatts; i++)
 		{
-			write_item(rel->rd_att->attrs[i], ATTRIBUTE_FIXED_PART_SIZE, fp);
+			write_item(TupleDescAttr(rel->rd_att, i),
+					   ATTRIBUTE_FIXED_PART_SIZE, fp);
 		}
 
 		/* next, do the access method specific field */

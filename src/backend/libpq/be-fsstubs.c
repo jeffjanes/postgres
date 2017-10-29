@@ -200,8 +200,8 @@ lo_write(int fd, const char *buf, int len)
 	if ((lobj->flags & IFS_WRLOCK) == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-			  errmsg("large object descriptor %d was not opened for writing",
-					 fd)));
+				 errmsg("large object descriptor %d was not opened for writing",
+						fd)));
 
 	/* Permission checks --- first time through only */
 	if ((lobj->flags & IFS_WR_PERM_OK) == 0)
@@ -242,8 +242,8 @@ be_lo_lseek(PG_FUNCTION_ARGS)
 	if (status != (int32) status)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-		errmsg("lo_lseek result out of range for large-object descriptor %d",
-			   fd)));
+				 errmsg("lo_lseek result out of range for large-object descriptor %d",
+						fd)));
 
 	PG_RETURN_INT32((int32) status);
 }
@@ -315,8 +315,8 @@ be_lo_tell(PG_FUNCTION_ARGS)
 	if (offset != (int32) offset)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-		 errmsg("lo_tell result out of range for large-object descriptor %d",
-				fd)));
+				 errmsg("lo_tell result out of range for large-object descriptor %d",
+						fd)));
 
 	PG_RETURN_INT32((int32) offset);
 }
@@ -462,7 +462,7 @@ lo_import_internal(text *filename, Oid lobjOid)
 	 * open the file to be read in
 	 */
 	text_to_cstring_buffer(filename, fnamebuf, sizeof(fnamebuf));
-	fd = OpenTransientFile(fnamebuf, O_RDONLY | PG_BINARY, S_IRWXU);
+	fd = OpenTransientFile(fnamebuf, O_RDONLY | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -538,8 +538,17 @@ be_lo_export(PG_FUNCTION_ARGS)
 	 */
 	text_to_cstring_buffer(filename, fnamebuf, sizeof(fnamebuf));
 	oumask = umask(S_IWGRP | S_IWOTH);
-	fd = OpenTransientFile(fnamebuf, O_CREAT | O_WRONLY | O_TRUNC | PG_BINARY,
-						   S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	PG_TRY();
+	{
+		fd = OpenTransientFilePerm(fnamebuf, O_CREAT | O_WRONLY | O_TRUNC | PG_BINARY,
+								   S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	}
+	PG_CATCH();
+	{
+		umask(oumask);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	umask(oumask);
 	if (fd < 0)
 		ereport(ERROR,
@@ -584,8 +593,8 @@ lo_truncate_internal(int32 fd, int64 len)
 	if ((lobj->flags & IFS_WRLOCK) == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-			  errmsg("large object descriptor %d was not opened for writing",
-					 fd)));
+				 errmsg("large object descriptor %d was not opened for writing",
+						fd)));
 
 	/* Permission checks --- first time through only */
 	if ((lobj->flags & IFS_WR_PERM_OK) == 0)
@@ -766,7 +775,7 @@ lo_get_fragment_internal(Oid loOid, int64 offset, int32 nbytes)
 	LargeObjectDesc *loDesc;
 	int64		loSize;
 	int64		result_length;
-	int total_read PG_USED_FOR_ASSERTS_ONLY;
+	int			total_read PG_USED_FOR_ASSERTS_ONLY;
 	bytea	   *result = NULL;
 
 	/*
@@ -796,7 +805,7 @@ lo_get_fragment_internal(Oid loOid, int64 offset, int32 nbytes)
 	if (loSize > offset)
 	{
 		if (nbytes >= 0 && nbytes <= loSize - offset)
-			result_length = nbytes;		/* request is wholly inside LO */
+			result_length = nbytes; /* request is wholly inside LO */
 		else
 			result_length = loSize - offset;	/* adjust to end of LO */
 	}
@@ -868,7 +877,7 @@ be_lo_from_bytea(PG_FUNCTION_ARGS)
 	Oid			loOid = PG_GETARG_OID(0);
 	bytea	   *str = PG_GETARG_BYTEA_PP(1);
 	LargeObjectDesc *loDesc;
-	int written PG_USED_FOR_ASSERTS_ONLY;
+	int			written PG_USED_FOR_ASSERTS_ONLY;
 
 	CreateFSContext();
 
@@ -891,11 +900,23 @@ be_lo_put(PG_FUNCTION_ARGS)
 	int64		offset = PG_GETARG_INT64(1);
 	bytea	   *str = PG_GETARG_BYTEA_PP(2);
 	LargeObjectDesc *loDesc;
-	int written PG_USED_FOR_ASSERTS_ONLY;
+	int			written PG_USED_FOR_ASSERTS_ONLY;
 
 	CreateFSContext();
 
 	loDesc = inv_open(loOid, INV_WRITE, fscxt);
+
+	/* Permission check */
+	if (!lo_compat_privileges &&
+		pg_largeobject_aclcheck_snapshot(loDesc->id,
+										 GetUserId(),
+										 ACL_UPDATE,
+										 loDesc->snapshot) != ACLCHECK_OK)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied for large object %u",
+						loDesc->id)));
+
 	inv_seek(loDesc, offset, SEEK_SET);
 	written = inv_write(loDesc, VARDATA_ANY(str), VARSIZE_ANY_EXHDR(str));
 	Assert(written == VARSIZE_ANY_EXHDR(str));

@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern ProjectSetState *ExecInitProjectSet(ProjectSet *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecProjectSet(ProjectSetState *node);
 extern void ExecEndProjectSet(ProjectSetState *node);
 extern void ExecReScanProjectSet(ProjectSetState *node);
 
-#endif   /* NODEPROJECTSET_H */
+#endif							/* NODEPROJECTSET_H */

@@ -119,7 +119,7 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 		if (!ginbuf.value)
 		{
 			printfPQExpBuffer(&conn->errorMessage,
-			  libpq_gettext("out of memory allocating GSSAPI buffer (%d)\n"),
+							  libpq_gettext("out of memory allocating GSSAPI buffer (%d)\n"),
 							  payloadlen);
 			return STATUS_ERROR;
 		}
@@ -133,6 +133,11 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 			return STATUS_ERROR;
 		}
 	}
+	else
+	{
+		ginbuf.length = 0;
+		ginbuf.value = NULL;
+	}
 
 	maj_stat = gss_init_sec_context(&min_stat,
 									GSS_C_NO_CREDENTIAL,
@@ -142,13 +147,13 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 									GSS_C_MUTUAL_FLAG,
 									0,
 									GSS_C_NO_CHANNEL_BINDINGS,
-				(conn->gctx == GSS_C_NO_CONTEXT) ? GSS_C_NO_BUFFER : &ginbuf,
+									(ginbuf.value == NULL) ? GSS_C_NO_BUFFER : &ginbuf,
 									NULL,
 									&goutbuf,
 									NULL,
 									NULL);
 
-	if (conn->gctx != GSS_C_NO_CONTEXT)
+	if (ginbuf.value)
 		free(ginbuf.value);
 
 	if (goutbuf.length != 0)
@@ -206,7 +211,7 @@ pg_GSS_startup(PGconn *conn, int payloadlen)
 	if (conn->gctx)
 	{
 		printfPQExpBuffer(&conn->errorMessage,
-					libpq_gettext("duplicate GSS authentication request\n"));
+						  libpq_gettext("duplicate GSS authentication request\n"));
 		return STATUS_ERROR;
 	}
 
@@ -246,7 +251,7 @@ pg_GSS_startup(PGconn *conn, int payloadlen)
 
 	return pg_GSS_continue(conn, payloadlen);
 }
-#endif   /* ENABLE_GSS */
+#endif							/* ENABLE_GSS */
 
 
 #ifdef ENABLE_SSPI
@@ -295,7 +300,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 		if (!inputbuf)
 		{
 			printfPQExpBuffer(&conn->errorMessage,
-				libpq_gettext("out of memory allocating SSPI buffer (%d)\n"),
+							  libpq_gettext("out of memory allocating SSPI buffer (%d)\n"),
 							  payloadlen);
 			return STATUS_ERROR;
 		}
@@ -385,7 +390,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 		if (outbuf.pBuffers[0].cbBuffer > 0)
 		{
 			if (pqPacketSend(conn, 'p',
-				   outbuf.pBuffers[0].pvBuffer, outbuf.pBuffers[0].cbBuffer))
+							 outbuf.pBuffers[0].pvBuffer, outbuf.pBuffers[0].cbBuffer))
 			{
 				FreeContextBuffer(outbuf.pBuffers[0].pvBuffer);
 				return STATUS_ERROR;
@@ -411,7 +416,12 @@ pg_SSPI_startup(PGconn *conn, int use_negotiate, int payloadlen)
 	TimeStamp	expire;
 	char	   *host = PQhost(conn);
 
-	conn->sspictx = NULL;
+	if (conn->sspictx)
+	{
+		printfPQExpBuffer(&conn->errorMessage,
+						  libpq_gettext("duplicate SSPI authentication request\n"));
+		return STATUS_ERROR;
+	}
 
 	/*
 	 * Retrieve credentials handle
@@ -467,7 +477,7 @@ pg_SSPI_startup(PGconn *conn, int use_negotiate, int payloadlen)
 
 	return pg_SSPI_continue(conn, payloadlen);
 }
-#endif   /* ENABLE_SSPI */
+#endif							/* ENABLE_SSPI */
 
 /*
  * Initialize SASL authentication exchange.
@@ -487,7 +497,7 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 	if (conn->sasl_state)
 	{
 		printfPQExpBuffer(&conn->errorMessage,
-				   libpq_gettext("duplicate SASL authentication request\n"));
+						  libpq_gettext("duplicate SASL authentication request\n"));
 		goto error;
 	}
 
@@ -620,7 +630,7 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 	if (!challenge)
 	{
 		printfPQExpBuffer(&conn->errorMessage,
-				libpq_gettext("out of memory allocating SASL buffer (%d)\n"),
+						  libpq_gettext("out of memory allocating SASL buffer (%d)\n"),
 						  payloadlen);
 		return STATUS_ERROR;
 	}
@@ -722,7 +732,7 @@ pg_local_sendauth(PGconn *conn)
 	return STATUS_OK;
 #else
 	printfPQExpBuffer(&conn->errorMessage,
-			libpq_gettext("SCM_CRED authentication method not supported\n"));
+					  libpq_gettext("SCM_CRED authentication method not supported\n"));
 	return STATUS_ERROR;
 #endif
 }
@@ -813,12 +823,12 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 
 		case AUTH_REQ_KRB4:
 			printfPQExpBuffer(&conn->errorMessage,
-				 libpq_gettext("Kerberos 4 authentication not supported\n"));
+							  libpq_gettext("Kerberos 4 authentication not supported\n"));
 			return STATUS_ERROR;
 
 		case AUTH_REQ_KRB5:
 			printfPQExpBuffer(&conn->errorMessage,
-				 libpq_gettext("Kerberos 5 authentication not supported\n"));
+							  libpq_gettext("Kerberos 5 authentication not supported\n"));
 			return STATUS_ERROR;
 
 #if defined(ENABLE_GSS) || defined(ENABLE_SSPI)
@@ -889,9 +899,9 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 		case AUTH_REQ_GSS:
 		case AUTH_REQ_GSS_CONT:
 			printfPQExpBuffer(&conn->errorMessage,
-					 libpq_gettext("GSSAPI authentication not supported\n"));
+							  libpq_gettext("GSSAPI authentication not supported\n"));
 			return STATUS_ERROR;
-#endif   /* defined(ENABLE_GSS) || defined(ENABLE_SSPI) */
+#endif							/* defined(ENABLE_GSS) || defined(ENABLE_SSPI) */
 
 #ifdef ENABLE_SSPI
 		case AUTH_REQ_SSPI:
@@ -921,15 +931,15 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 #if !defined(ENABLE_GSS)
 		case AUTH_REQ_SSPI:
 			printfPQExpBuffer(&conn->errorMessage,
-					   libpq_gettext("SSPI authentication not supported\n"));
+							  libpq_gettext("SSPI authentication not supported\n"));
 			return STATUS_ERROR;
-#endif   /* !define(ENABLE_GSSAPI) */
-#endif   /* ENABLE_SSPI */
+#endif							/* !define(ENABLE_GSSAPI) */
+#endif							/* ENABLE_SSPI */
 
 
 		case AUTH_REQ_CRYPT:
 			printfPQExpBuffer(&conn->errorMessage,
-					  libpq_gettext("Crypt authentication not supported\n"));
+							  libpq_gettext("Crypt authentication not supported\n"));
 			return STATUS_ERROR;
 
 		case AUTH_REQ_MD5:
@@ -950,7 +960,7 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 				if (pg_password_sendauth(conn, password, areq) != STATUS_OK)
 				{
 					printfPQExpBuffer(&conn->errorMessage,
-					 "fe_sendauth: error sending password authentication\n");
+									  "fe_sendauth: error sending password authentication\n");
 					return STATUS_ERROR;
 				}
 				break;
@@ -983,7 +993,7 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 				/* Use error message, if set already */
 				if (conn->errorMessage.len == 0)
 					printfPQExpBuffer(&conn->errorMessage,
-							  "fe_sendauth: error in SASL authentication\n");
+									  "fe_sendauth: error in SASL authentication\n");
 				return STATUS_ERROR;
 			}
 			break;
@@ -995,7 +1005,7 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 
 		default:
 			printfPQExpBuffer(&conn->errorMessage,
-			libpq_gettext("authentication method %u not supported\n"), areq);
+							  libpq_gettext("authentication method %u not supported\n"), areq);
 			return STATUS_ERROR;
 	}
 
@@ -1042,7 +1052,7 @@ pg_fe_getauthname(PQExpBuffer errorMessage)
 		name = username;
 	else if (errorMessage)
 		printfPQExpBuffer(errorMessage,
-				 libpq_gettext("user name lookup failure: error code %lu\n"),
+						  libpq_gettext("user name lookup failure: error code %lu\n"),
 						  GetLastError());
 #else
 	pwerr = pqGetpwuid(user_id, &pwdstr, pwdbuf, sizeof(pwdbuf), &pw);
@@ -1052,12 +1062,12 @@ pg_fe_getauthname(PQExpBuffer errorMessage)
 	{
 		if (pwerr != 0)
 			printfPQExpBuffer(errorMessage,
-				   libpq_gettext("could not look up local user ID %d: %s\n"),
+							  libpq_gettext("could not look up local user ID %d: %s\n"),
 							  (int) user_id,
 							  pqStrerror(pwerr, pwdbuf, sizeof(pwdbuf)));
 		else
 			printfPQExpBuffer(errorMessage,
-					 libpq_gettext("local user with ID %d does not exist\n"),
+							  libpq_gettext("local user with ID %d does not exist\n"),
 							  (int) user_id);
 	}
 #endif
@@ -1077,22 +1087,12 @@ pg_fe_getauthname(PQExpBuffer errorMessage)
 
 
 /*
- * PQencryptPassword -- exported routine to encrypt a password
+ * PQencryptPassword -- exported routine to encrypt a password with MD5
  *
- * This is intended to be used by client applications that wish to send
- * commands like ALTER USER joe PASSWORD 'pwd'.  The password need not
- * be sent in cleartext if it is encrypted on the client side.  This is
- * good because it ensures the cleartext password won't end up in logs,
- * pg_stat displays, etc.  We export the function so that clients won't
- * be dependent on low-level details like whether the encryption is MD5
- * or something else.
- *
- * Arguments are the cleartext password, and the SQL name of the user it
- * is for.
- *
- * Return value is a malloc'd string, or NULL if out-of-memory.  The client
- * may assume the string doesn't contain any special characters that would
- * require escaping.
+ * This function is equivalent to calling PQencryptPasswordConn with
+ * "md5" as the encryption method, except that this doesn't require
+ * a connection object.  This function is deprecated, use
+ * PQencryptPasswordConn instead.
  */
 char *
 PQencryptPassword(const char *passwd, const char *user)
@@ -1108,6 +1108,124 @@ PQencryptPassword(const char *passwd, const char *user)
 		free(crypt_pwd);
 		return NULL;
 	}
+
+	return crypt_pwd;
+}
+
+/*
+ * PQencryptPasswordConn -- exported routine to encrypt a password
+ *
+ * This is intended to be used by client applications that wish to send
+ * commands like ALTER USER joe PASSWORD 'pwd'.  The password need not
+ * be sent in cleartext if it is encrypted on the client side.  This is
+ * good because it ensures the cleartext password won't end up in logs,
+ * pg_stat displays, etc.  We export the function so that clients won't
+ * be dependent on low-level details like whether the encryption is MD5
+ * or something else.
+ *
+ * Arguments are a connection object, the cleartext password, the SQL
+ * name of the user it is for, and a string indicating the algorithm to
+ * use for encrypting the password.  If algorithm is NULL, this queries
+ * the server for the current 'password_encryption' value.  If you wish
+ * to avoid that, e.g. to avoid blocking, you can execute
+ * 'show password_encryption' yourself before calling this function, and
+ * pass it as the algorithm.
+ *
+ * Return value is a malloc'd string.  The client may assume the string
+ * doesn't contain any special characters that would require escaping.
+ * On error, an error message is stored in the connection object, and
+ * returns NULL.
+ */
+char *
+PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user,
+					  const char *algorithm)
+{
+#define MAX_ALGORITHM_NAME_LEN 50
+	char		algobuf[MAX_ALGORITHM_NAME_LEN + 1];
+	char	   *crypt_pwd = NULL;
+
+	if (!conn)
+		return NULL;
+
+	/* If no algorithm was given, ask the server. */
+	if (algorithm == NULL)
+	{
+		PGresult   *res;
+		char	   *val;
+
+		res = PQexec(conn, "show password_encryption");
+		if (res == NULL)
+		{
+			/* PQexec() should've set conn->errorMessage already */
+			return NULL;
+		}
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		{
+			/* PQexec() should've set conn->errorMessage already */
+			PQclear(res);
+			return NULL;
+		}
+		if (PQntuples(res) != 1 || PQnfields(res) != 1)
+		{
+			PQclear(res);
+			printfPQExpBuffer(&conn->errorMessage,
+							  libpq_gettext("unexpected shape of result set returned for SHOW\n"));
+			return NULL;
+		}
+		val = PQgetvalue(res, 0, 0);
+
+		if (strlen(val) > MAX_ALGORITHM_NAME_LEN)
+		{
+			PQclear(res);
+			printfPQExpBuffer(&conn->errorMessage,
+							  libpq_gettext("password_encryption value too long\n"));
+			return NULL;
+		}
+		strcpy(algobuf, val);
+		PQclear(res);
+
+		algorithm = algobuf;
+	}
+
+	/*
+	 * Also accept "on" and "off" as aliases for "md5", because
+	 * password_encryption was a boolean before PostgreSQL 10.  We refuse to
+	 * send the password in plaintext even if it was "off".
+	 */
+	if (strcmp(algorithm, "on") == 0 ||
+		strcmp(algorithm, "off") == 0)
+		algorithm = "md5";
+
+	/*
+	 * Ok, now we know what algorithm to use
+	 */
+	if (strcmp(algorithm, "scram-sha-256") == 0)
+	{
+		crypt_pwd = pg_fe_scram_build_verifier(passwd);
+	}
+	else if (strcmp(algorithm, "md5") == 0)
+	{
+		crypt_pwd = malloc(MD5_PASSWD_LEN + 1);
+		if (crypt_pwd)
+		{
+			if (!pg_md5_encrypt(passwd, user, strlen(user), crypt_pwd))
+			{
+				free(crypt_pwd);
+				crypt_pwd = NULL;
+			}
+		}
+	}
+	else
+	{
+		printfPQExpBuffer(&conn->errorMessage,
+						  libpq_gettext("unrecognized password encryption algorithm \"%s\"\n"),
+						  algorithm);
+		return NULL;
+	}
+
+	if (!crypt_pwd)
+		printfPQExpBuffer(&conn->errorMessage,
+						  libpq_gettext("out of memory\n"));
 
 	return crypt_pwd;
 }

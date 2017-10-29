@@ -21,6 +21,19 @@
 
 #include "utils/guc.h"
 
+#ifdef USE_ICU
+/*
+ * ucol_strcollUTF8() was introduced in ICU 50, but it is buggy before ICU 53.
+ * (see
+ * <https://www.postgresql.org/message-id/flat/f1438ec6-22aa-4029-9a3b-26f79d330e72%40manitou-mail.org>)
+ */
+#if U_ICU_VERSION_MAJOR_NUM >= 53
+#define HAVE_UCOL_STRCOLLUTF8 1
+#else
+#undef HAVE_UCOL_STRCOLLUTF8
+#endif
+#endif
+
 
 /* GUC settings */
 extern char *locale_messages;
@@ -68,20 +81,21 @@ extern void cache_locale_time(void);
  */
 struct pg_locale_struct
 {
-	char	provider;
+	char		provider;
 	union
 	{
 #ifdef HAVE_LOCALE_T
-		locale_t lt;
+		locale_t	lt;
 #endif
 #ifdef USE_ICU
-		struct {
+		struct
+		{
 			const char *locale;
-			UCollator *ucol;
-		} icu;
+			UCollator  *ucol;
+		}			icu;
 #endif
 		int			dummy;		/* in case we have neither LOCALE_T nor ICU */
-	} info;
+	}			info;
 };
 
 typedef struct pg_locale_struct *pg_locale_t;
@@ -92,15 +106,13 @@ extern char *get_collation_actual_version(char collprovider, const char *collcol
 
 #ifdef USE_ICU
 extern int32_t icu_to_uchar(UChar **buff_uchar, const char *buff, size_t nbytes);
-extern int32_t icu_from_uchar(char **result, UChar *buff_uchar, int32_t len_uchar);
+extern int32_t icu_from_uchar(char **result, const UChar *buff_uchar, int32_t len_uchar);
 #endif
 
 /* These functions convert from/to libc's wchar_t, *not* pg_wchar_t */
-#ifdef USE_WIDE_UPPER_LOWER
 extern size_t wchar2char(char *to, const wchar_t *from, size_t tolen,
 		   pg_locale_t locale);
 extern size_t char2wchar(wchar_t *to, size_t tolen,
 		   const char *from, size_t fromlen, pg_locale_t locale);
-#endif
 
-#endif   /* _PG_LOCALE_ */
+#endif							/* _PG_LOCALE_ */

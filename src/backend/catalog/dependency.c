@@ -97,12 +97,12 @@ typedef struct
 } ObjectAddressExtra;
 
 /* ObjectAddressExtra flag bits */
-#define DEPFLAG_ORIGINAL	0x0001		/* an original deletion target */
-#define DEPFLAG_NORMAL		0x0002		/* reached via normal dependency */
-#define DEPFLAG_AUTO		0x0004		/* reached via auto dependency */
-#define DEPFLAG_INTERNAL	0x0008		/* reached via internal dependency */
-#define DEPFLAG_EXTENSION	0x0010		/* reached via extension dependency */
-#define DEPFLAG_REVERSE		0x0020		/* reverse internal/extension link */
+#define DEPFLAG_ORIGINAL	0x0001	/* an original deletion target */
+#define DEPFLAG_NORMAL		0x0002	/* reached via normal dependency */
+#define DEPFLAG_AUTO		0x0004	/* reached via auto dependency */
+#define DEPFLAG_INTERNAL	0x0008	/* reached via internal dependency */
+#define DEPFLAG_EXTENSION	0x0010	/* reached via extension dependency */
+#define DEPFLAG_REVERSE		0x0020	/* reverse internal/extension link */
 
 
 /* expansible list of ObjectAddresses */
@@ -150,7 +150,7 @@ static const Oid object_classes[] = {
 	OperatorClassRelationId,	/* OCLASS_OPCLASS */
 	OperatorFamilyRelationId,	/* OCLASS_OPFAMILY */
 	AccessMethodRelationId,		/* OCLASS_AM */
-	AccessMethodOperatorRelationId,		/* OCLASS_AMOP */
+	AccessMethodOperatorRelationId, /* OCLASS_AMOP */
 	AccessMethodProcedureRelationId,	/* OCLASS_AMPROC */
 	RewriteRelationId,			/* OCLASS_REWRITE */
 	TriggerRelationId,			/* OCLASS_TRIGGER */
@@ -163,7 +163,7 @@ static const Oid object_classes[] = {
 	AuthIdRelationId,			/* OCLASS_ROLE */
 	DatabaseRelationId,			/* OCLASS_DATABASE */
 	TableSpaceRelationId,		/* OCLASS_TBLSPACE */
-	ForeignDataWrapperRelationId,		/* OCLASS_FDW */
+	ForeignDataWrapperRelationId,	/* OCLASS_FDW */
 	ForeignServerRelationId,	/* OCLASS_FOREIGN_SERVER */
 	UserMappingRelationId,		/* OCLASS_USER_MAPPING */
 	DefaultAclRelationId,		/* OCLASS_DEFACL */
@@ -399,7 +399,7 @@ performMultipleDeletions(const ObjectAddresses *objects,
 		findDependentObjects(thisobj,
 							 DEPFLAG_ORIGINAL,
 							 flags,
-							 NULL,		/* empty stack */
+							 NULL,	/* empty stack */
 							 targetObjects,
 							 objects,
 							 &depRel);
@@ -956,8 +956,8 @@ reportDependentObjects(const ObjectAddresses *targetObjects,
 		if (origObject)
 			ereport(ERROR,
 					(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
-				  errmsg("cannot drop %s because other objects depend on it",
-						 getObjectDescription(origObject)),
+					 errmsg("cannot drop %s because other objects depend on it",
+							getObjectDescription(origObject)),
 					 errdetail("%s", clientdetail.data),
 					 errdetail_log("%s", logdetail.data),
 					 errhint("Use DROP ... CASCADE to drop the dependent objects too.")));
@@ -1125,8 +1125,10 @@ doDeletion(const ObjectAddress *object, int flags)
 						heap_drop_with_catalog(object->objectId);
 				}
 
-				/* for a sequence, in addition to dropping the heap, also
-				 * delete pg_sequence tuple */
+				/*
+				 * for a sequence, in addition to dropping the heap, also
+				 * delete pg_sequence tuple
+				 */
 				if (relKind == RELKIND_SEQUENCE)
 					DeleteSequenceTuple(object->objectId);
 				break;
@@ -1204,6 +1206,10 @@ doDeletion(const ObjectAddress *object, int flags)
 			RemoveSchemaById(object->objectId);
 			break;
 
+		case OCLASS_STATISTIC_EXT:
+			RemoveStatisticsById(object->objectId);
+			break;
+
 		case OCLASS_TSPARSER:
 			RemoveTSParserById(object->objectId);
 			break;
@@ -1265,13 +1271,20 @@ doDeletion(const ObjectAddress *object, int flags)
 			DropTransformById(object->objectId);
 			break;
 
-		case OCLASS_STATISTIC_EXT:
-			RemoveStatisticsById(object->objectId);
+			/*
+			 * These global object types are not supported here.
+			 */
+		case OCLASS_ROLE:
+		case OCLASS_DATABASE:
+		case OCLASS_TBLSPACE:
+		case OCLASS_SUBSCRIPTION:
+			elog(ERROR, "global objects cannot be deleted by doDeletion");
 			break;
 
-		default:
-			elog(ERROR, "unrecognized object class: %u",
-				 object->classId);
+			/*
+			 * There's intentionally no default: case here; we want the
+			 * compiler to warn if a new OCLASS hasn't been handled above.
+			 */
 	}
 }
 
@@ -1392,7 +1405,7 @@ recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
 	rte.type = T_RangeTblEntry;
 	rte.rtekind = RTE_RELATION;
 	rte.relid = relId;
-	rte.relkind = RELKIND_RELATION;		/* no need for exactness here */
+	rte.relkind = RELKIND_RELATION; /* no need for exactness here */
 
 	context.rtables = list_make1(list_make1(&rte));
 
@@ -1619,8 +1632,8 @@ find_expr_references_walker(Node *node,
 				case REGROLEOID:
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("constant of the type %s cannot be used here",
-							   "regrole")));
+							 errmsg("constant of the type %s cannot be used here",
+									"regrole")));
 					break;
 			}
 		}
@@ -1700,6 +1713,51 @@ find_expr_references_walker(Node *node,
 		/* Extra work needed here if we ever need this case */
 		elog(ERROR, "already-planned subqueries not supported");
 	}
+	else if (IsA(node, FieldSelect))
+	{
+		FieldSelect *fselect = (FieldSelect *) node;
+		Oid			argtype = getBaseType(exprType((Node *) fselect->arg));
+		Oid			reltype = get_typ_typrelid(argtype);
+
+		/*
+		 * We need a dependency on the specific column named in FieldSelect,
+		 * assuming we can identify the pg_class OID for it.  (Probably we
+		 * always can at the moment, but in future it might be possible for
+		 * argtype to be RECORDOID.)  If we can make a column dependency then
+		 * we shouldn't need a dependency on the column's type; but if we
+		 * can't, make a dependency on the type, as it might not appear
+		 * anywhere else in the expression.
+		 */
+		if (OidIsValid(reltype))
+			add_object_address(OCLASS_CLASS, reltype, fselect->fieldnum,
+							   context->addrs);
+		else
+			add_object_address(OCLASS_TYPE, fselect->resulttype, 0,
+							   context->addrs);
+		/* the collation might not be referenced anywhere else, either */
+		if (OidIsValid(fselect->resultcollid) &&
+			fselect->resultcollid != DEFAULT_COLLATION_OID)
+			add_object_address(OCLASS_COLLATION, fselect->resultcollid, 0,
+							   context->addrs);
+	}
+	else if (IsA(node, FieldStore))
+	{
+		FieldStore *fstore = (FieldStore *) node;
+		Oid			reltype = get_typ_typrelid(fstore->resulttype);
+
+		/* similar considerations to FieldSelect, but multiple column(s) */
+		if (OidIsValid(reltype))
+		{
+			ListCell   *l;
+
+			foreach(l, fstore->fieldnums)
+				add_object_address(OCLASS_CLASS, reltype, lfirst_int(l),
+								   context->addrs);
+		}
+		else
+			add_object_address(OCLASS_TYPE, fstore->resulttype, 0,
+							   context->addrs);
+	}
 	else if (IsA(node, RelabelType))
 	{
 		RelabelType *relab = (RelabelType *) node;
@@ -1720,16 +1778,24 @@ find_expr_references_walker(Node *node,
 		/* since there is no exposed function, need to depend on type */
 		add_object_address(OCLASS_TYPE, iocoerce->resulttype, 0,
 						   context->addrs);
+		/* the collation might not be referenced anywhere else, either */
+		if (OidIsValid(iocoerce->resultcollid) &&
+			iocoerce->resultcollid != DEFAULT_COLLATION_OID)
+			add_object_address(OCLASS_COLLATION, iocoerce->resultcollid, 0,
+							   context->addrs);
 	}
 	else if (IsA(node, ArrayCoerceExpr))
 	{
 		ArrayCoerceExpr *acoerce = (ArrayCoerceExpr *) node;
 
-		if (OidIsValid(acoerce->elemfuncid))
-			add_object_address(OCLASS_PROC, acoerce->elemfuncid, 0,
-							   context->addrs);
+		/* as above, depend on type */
 		add_object_address(OCLASS_TYPE, acoerce->resulttype, 0,
 						   context->addrs);
+		/* the collation might not be referenced anywhere else, either */
+		if (OidIsValid(acoerce->resultcollid) &&
+			acoerce->resultcollid != DEFAULT_COLLATION_OID)
+			add_object_address(OCLASS_COLLATION, acoerce->resultcollid, 0,
+							   context->addrs);
 		/* fall through to examine arguments */
 	}
 	else if (IsA(node, ConvertRowtypeExpr))
@@ -1776,6 +1842,13 @@ find_expr_references_walker(Node *node,
 		CoerceToDomain *cd = (CoerceToDomain *) node;
 
 		add_object_address(OCLASS_TYPE, cd->resulttype, 0,
+						   context->addrs);
+	}
+	else if (IsA(node, NextValueExpr))
+	{
+		NextValueExpr *nve = (NextValueExpr *) node;
+
+		add_object_address(OCLASS_CLASS, nve->seqid, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, OnConflictExpr))
@@ -1858,7 +1931,7 @@ find_expr_references_walker(Node *node,
 					TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
 					if (tle->resjunk)
-						continue;		/* ignore junk tlist items */
+						continue;	/* ignore junk tlist items */
 					add_object_address(OCLASS_CLASS, rte->relid, tle->resno,
 									   context->addrs);
 				}
@@ -1928,13 +2001,6 @@ find_expr_references_walker(Node *node,
 		add_object_address(OCLASS_PROC, tsc->tsmhandler, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
-	}
-	else if (IsA(node, NextValueExpr))
-	{
-		NextValueExpr  *nve = (NextValueExpr *) node;
-
-		add_object_address(OCLASS_CLASS, nve->seqid, 0,
-						   context->addrs);
 	}
 
 	return expression_tree_walker(node, find_expr_references_walker,

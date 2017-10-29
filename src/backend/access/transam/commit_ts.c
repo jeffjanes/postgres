@@ -292,7 +292,7 @@ TransactionIdGetCommitTsData(TransactionId xid, TimestampTz *ts,
 	if (!TransactionIdIsValid(xid))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		errmsg("cannot retrieve commit timestamp for transaction %u", xid)));
+				 errmsg("cannot retrieve commit timestamp for transaction %u", xid)));
 	else if (!TransactionIdIsNormal(xid))
 	{
 		/* frozen and bootstrap xids are always committed far in the past */
@@ -621,7 +621,7 @@ CommitTsParameterChange(bool newvalue, bool oldvalue)
  *
  * The reason why this SLRU needs separate activation/deactivation functions is
  * that it can be enabled/disabled during start and the activation/deactivation
- * on master is propagated to slave via replay. Other SLRUs don't have this
+ * on master is propagated to standby via replay. Other SLRUs don't have this
  * property and they can be just initialized during normal startup.
  *
  * This is in charge of creating the currently active segment, if it's not
@@ -748,8 +748,8 @@ ShutdownCommitTs(void)
 	SimpleLruFlush(CommitTsCtl, false);
 
 	/*
-	 * fsync pg_commit_ts to ensure that any files flushed previously are durably
-	 * on disk.
+	 * fsync pg_commit_ts to ensure that any files flushed previously are
+	 * durably on disk.
 	 */
 	fsync_fname("pg_commit_ts", true);
 }
@@ -764,8 +764,8 @@ CheckPointCommitTs(void)
 	SimpleLruFlush(CommitTsCtl, true);
 
 	/*
-	 * fsync pg_commit_ts to ensure that any files flushed previously are durably
-	 * on disk.
+	 * fsync pg_commit_ts to ensure that any files flushed previously are
+	 * durably on disk.
 	 */
 	fsync_fname("pg_commit_ts", true);
 }
@@ -877,7 +877,7 @@ AdvanceOldestCommitTsXid(TransactionId oldestXact)
 {
 	LWLockAcquire(CommitTsLock, LW_EXCLUSIVE);
 	if (ShmemVariableCache->oldestCommitTsXid != InvalidTransactionId &&
-	TransactionIdPrecedes(ShmemVariableCache->oldestCommitTsXid, oldestXact))
+		TransactionIdPrecedes(ShmemVariableCache->oldestCommitTsXid, oldestXact))
 		ShmemVariableCache->oldestCommitTsXid = oldestXact;
 	LWLockRelease(CommitTsLock);
 }

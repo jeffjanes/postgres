@@ -63,9 +63,11 @@ NamedTuplestoreScanRecheck(NamedTuplestoreScanState *node, TupleTableSlot *slot)
  *		access method functions.
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecNamedTuplestoreScan(NamedTuplestoreScanState *node)
+static TupleTableSlot *
+ExecNamedTuplestoreScan(PlanState *pstate)
 {
+	NamedTuplestoreScanState *node = castNode(NamedTuplestoreScanState, pstate);
+
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) NamedTuplestoreScanNext,
 					(ExecScanRecheckMtd) NamedTuplestoreScanRecheck);
@@ -97,6 +99,7 @@ ExecInitNamedTuplestoreScan(NamedTuplestoreScan *node, EState *estate, int eflag
 	scanstate = makeNode(NamedTuplestoreScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
+	scanstate->ss.ps.ExecProcNode = ExecNamedTuplestoreScan;
 
 	enr = get_ENR(estate->es_queryEnv, node->enrname);
 	if (!enr)
@@ -107,7 +110,7 @@ ExecInitNamedTuplestoreScan(NamedTuplestoreScan *node, EState *estate, int eflag
 	scanstate->relation = (Tuplestorestate *) enr->reldata;
 	scanstate->tupdesc = ENRMetadataGetTupDesc(&(enr->md));
 	scanstate->readptr =
-		tuplestore_alloc_read_pointer(scanstate->relation, 0);
+		tuplestore_alloc_read_pointer(scanstate->relation, EXEC_FLAG_REWIND);
 
 	/*
 	 * The new read pointer copies its position from read pointer 0, which
@@ -117,6 +120,7 @@ ExecInitNamedTuplestoreScan(NamedTuplestoreScan *node, EState *estate, int eflag
 
 	/*
 	 * XXX: Should we add a function to free that read pointer when done?
+	 *
 	 * This was attempted, but it did not improve performance or memory usage
 	 * in any tested cases.
 	 */

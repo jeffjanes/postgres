@@ -17,7 +17,6 @@
 #include "nodes/execnodes.h"
 
 extern HashState *ExecInitHash(Hash *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecHash(HashState *node);
 extern Node *MultiExecHash(HashState *node);
 extern void ExecEndHash(HashState *node);
 extern void ExecReScanHash(HashState *node);
@@ -50,4 +49,4 @@ extern void ExecChooseHashTableSize(double ntuples, int tupwidth, bool useskew,
 						int *num_skew_mcvs);
 extern int	ExecHashGetSkewBucket(HashJoinTable hashtable, uint32 hashvalue);
 
-#endif   /* NODEHASH_H */
+#endif							/* NODEHASH_H */

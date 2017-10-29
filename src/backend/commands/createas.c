@@ -288,7 +288,7 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 	{
 		GetUserIdAndSecContext(&save_userid, &save_sec_context);
 		SetUserIdAndSecContext(save_userid,
-						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
+							   save_sec_context | SECURITY_RESTRICTED_OPERATION);
 		save_nestlevel = NewGUCNestLevel();
 	}
 
@@ -326,8 +326,8 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 		query = linitial_node(Query, rewritten);
 		Assert(query->commandType == CMD_SELECT);
 
-		/* plan the query --- note we disallow parallelism */
-		plan = pg_plan_query(query, 0, params);
+		/* plan the query */
+		plan = pg_plan_query(query, CURSOR_OPT_PARALLEL_OK, params);
 
 		/*
 		 * Use a snapshot with an updated command ID to ensure this query sees
@@ -468,7 +468,7 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	lc = list_head(into->colNames);
 	for (attnum = 0; attnum < typeinfo->natts; attnum++)
 	{
-		Form_pg_attribute attribute = typeinfo->attrs[attnum];
+		Form_pg_attribute attribute = TupleDescAttr(typeinfo, attnum);
 		ColumnDef  *col;
 		char	   *colname;
 
@@ -532,7 +532,7 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 
 	for (attnum = 1; attnum <= intoRelationDesc->rd_att->natts; attnum++)
 		rte->insertedCols = bms_add_member(rte->insertedCols,
-								attnum - FirstLowInvalidHeapAttributeNumber);
+										   attnum - FirstLowInvalidHeapAttributeNumber);
 
 	ExecCheckRTPerms(list_make1(rte), true);
 

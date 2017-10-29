@@ -96,10 +96,12 @@ SampleRecheck(SampleScanState *node, TupleTableSlot *slot)
  *		access method functions.
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecSampleScan(SampleScanState *node)
+static TupleTableSlot *
+ExecSampleScan(PlanState *pstate)
 {
-	return ExecScan((ScanState *) node,
+	SampleScanState *node = castNode(SampleScanState, pstate);
+
+	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) SampleNext,
 					(ExecScanRecheckMtd) SampleRecheck);
 }
@@ -120,7 +122,7 @@ InitScanRelation(SampleScanState *node, EState *estate, int eflags)
 	 * open that relation and acquire appropriate lock on it.
 	 */
 	currentRelation = ExecOpenScanRelation(estate,
-						   ((SampleScan *) node->ss.ps.plan)->scan.scanrelid,
+										   ((SampleScan *) node->ss.ps.plan)->scan.scanrelid,
 										   eflags);
 
 	node->ss.ss_currentRelation = currentRelation;
@@ -153,6 +155,7 @@ ExecInitSampleScan(SampleScan *node, EState *estate, int eflags)
 	scanstate = makeNode(SampleScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
+	scanstate->ss.ps.ExecProcNode = ExecSampleScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -307,7 +310,7 @@ tablesample_init(SampleScanState *scanstate)
 		if (isnull)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLESAMPLE_REPEAT),
-				 errmsg("TABLESAMPLE REPEATABLE parameter cannot be null")));
+					 errmsg("TABLESAMPLE REPEATABLE parameter cannot be null")));
 
 		/*
 		 * The REPEATABLE parameter has been coerced to float8 by the parser.
@@ -415,7 +418,7 @@ tablesample_getnext(SampleScanState *scanstate)
 	else
 	{
 		/* continue from previously returned page/tuple */
-		blockno = scan->rs_cblock;		/* current page */
+		blockno = scan->rs_cblock;	/* current page */
 	}
 
 	/*

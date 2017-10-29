@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * pg_receivewal.c - receive streaming transaction log data and write it
+ * pg_receivewal.c - receive streaming WAL data and write it
  *					  to a local file.
  *
  * Author: Magnus Hagander <magnus@hagander.net>
@@ -35,13 +35,14 @@ static char *basedir = NULL;
 static int	verbose = 0;
 static int	compresslevel = 0;
 static int	noloop = 0;
-static int	standby_message_timeout = 10 * 1000;		/* 10 sec = default */
-static volatile bool time_to_abort = false;
+static int	standby_message_timeout = 10 * 1000;	/* 10 sec = default */
+static volatile bool time_to_stop = false;
 static bool do_create_slot = false;
 static bool slot_exists_ok = false;
 static bool do_drop_slot = false;
 static bool synchronous = false;
 static char *replication_slot = NULL;
+static XLogRecPtr endpos = InvalidXLogRecPtr;
 
 
 static void usage(void);
@@ -59,30 +60,31 @@ static bool stop_streaming(XLogRecPtr segendpos, uint32 timeline,
 	}
 
 /* Routines to evaluate segment file format */
-#define IsCompressXLogFileName(fname)    \
-	(strlen(fname) == XLOG_FNAME_LEN + strlen(".gz") &&	\
+#define IsCompressXLogFileName(fname)	 \
+	(strlen(fname) == XLOG_FNAME_LEN + strlen(".gz") && \
 	 strspn(fname, "0123456789ABCDEF") == XLOG_FNAME_LEN &&		\
 	 strcmp((fname) + XLOG_FNAME_LEN, ".gz") == 0)
-#define IsPartialCompressXLogFileName(fname)    \
-	(strlen(fname) == XLOG_FNAME_LEN + strlen(".gz.partial") &&	\
+#define IsPartialCompressXLogFileName(fname)	\
+	(strlen(fname) == XLOG_FNAME_LEN + strlen(".gz.partial") && \
 	 strspn(fname, "0123456789ABCDEF") == XLOG_FNAME_LEN &&		\
 	 strcmp((fname) + XLOG_FNAME_LEN, ".gz.partial") == 0)
 
 static void
 usage(void)
 {
-	printf(_("%s receives PostgreSQL streaming transaction logs.\n\n"),
+	printf(_("%s receives PostgreSQL streaming write-ahead logs.\n\n"),
 		   progname);
 	printf(_("Usage:\n"));
 	printf(_("  %s [OPTION]...\n"), progname);
 	printf(_("\nOptions:\n"));
-	printf(_("  -D, --directory=DIR    receive transaction log files into this directory\n"));
+	printf(_("  -D, --directory=DIR    receive write-ahead log files into this directory\n"));
+	printf(_("  -E, --endpos=LSN       exit after receiving the specified LSN\n"));
 	printf(_("      --if-not-exists    do not error if slot already exists when creating a slot\n"));
 	printf(_("  -n, --no-loop          do not loop on connection lost\n"));
 	printf(_("  -s, --status-interval=SECS\n"
 			 "                         time between status packets sent to server (default: %d)\n"), (standby_message_timeout / 1000));
 	printf(_("  -S, --slot=SLOTNAME    replication slot to use\n"));
-	printf(_("      --synchronous      flush transaction log immediately after writing\n"));
+	printf(_("      --synchronous      flush write-ahead log immediately after writing\n"));
 	printf(_("  -v, --verbose          output verbose messages\n"));
 	printf(_("  -V, --version          output version information, then exit\n"));
 	printf(_("  -Z, --compress=0-9     compress logs with given compression level\n"));
@@ -112,6 +114,16 @@ stop_streaming(XLogRecPtr xlogpos, uint32 timeline, bool segment_finished)
 				progname, (uint32) (xlogpos >> 32), (uint32) xlogpos,
 				timeline);
 
+	if (!XLogRecPtrIsInvalid(endpos) && endpos < xlogpos)
+	{
+		if (verbose)
+			fprintf(stderr, _("%s: stopped streaming at %X/%X (timeline %u)\n"),
+					progname, (uint32) (xlogpos >> 32), (uint32) xlogpos,
+					timeline);
+		time_to_stop = true;
+		return true;
+	}
+
 	/*
 	 * Note that we report the previous, not current, position here. After a
 	 * timeline switch, xlogpos points to the beginning of the segment because
@@ -120,7 +132,7 @@ stop_streaming(XLogRecPtr xlogpos, uint32 timeline, bool segment_finished)
 	 * slightly before the end of the WAL that we received on the previous
 	 * timeline, but it's close enough for reporting purposes.
 	 */
-	if (prevtimeline != 0 && prevtimeline != timeline)
+	if (verbose && prevtimeline != 0 && prevtimeline != timeline)
 		fprintf(stderr, _("%s: switched to timeline %u at %X/%X\n"),
 				progname, timeline,
 				(uint32) (prevpos >> 32), (uint32) prevpos);
@@ -128,10 +140,11 @@ stop_streaming(XLogRecPtr xlogpos, uint32 timeline, bool segment_finished)
 	prevtimeline = timeline;
 	prevpos = xlogpos;
 
-	if (time_to_abort)
+	if (time_to_stop)
 	{
-		fprintf(stderr, _("%s: received interrupt signal, exiting\n"),
-				progname);
+		if (verbose)
+			fprintf(stderr, _("%s: received interrupt signal, exiting\n"),
+					progname);
 		return true;
 	}
 	return false;
@@ -178,7 +191,7 @@ close_destination_dir(DIR *dest_dir, char *dest_folder)
 /*
  * Determine starting location for streaming, based on any existing xlog
  * segments in the directory. We start at the end of the last one that is
- * complete (size matches XLogSegSize), on the timeline with highest ID.
+ * complete (size matches wal segment size), on the timeline with highest ID.
  *
  * If there are no WAL files in the directory, returns InvalidXLogRecPtr.
  */
@@ -229,17 +242,17 @@ FindStreamingStart(uint32 *tli)
 		/*
 		 * Looks like an xlog file. Parse its position.
 		 */
-		XLogFromFileName(dirent->d_name, &tli, &segno);
+		XLogFromFileName(dirent->d_name, &tli, &segno, WalSegSz);
 
 		/*
 		 * Check that the segment has the right size, if it's supposed to be
 		 * completed.  For non-compressed segments just check the on-disk size
-		 * and see if it matches a completed segment.
-		 * For compressed segments, look at the last 4 bytes of the compressed
-		 * file, which is where the uncompressed size is located for gz files
-		 * with a size lower than 4GB, and then compare it to the size of a
-		 * completed segment. The 4 last bytes correspond to the ISIZE member
-		 * according to http://www.zlib.org/rfc-gzip.html.
+		 * and see if it matches a completed segment. For compressed segments,
+		 * look at the last 4 bytes of the compressed file, which is where the
+		 * uncompressed size is located for gz files with a size lower than
+		 * 4GB, and then compare it to the size of a completed segment. The 4
+		 * last bytes correspond to the ISIZE member according to
+		 * http://www.zlib.org/rfc-gzip.html.
 		 */
 		if (!ispartial && !iscompress)
 		{
@@ -254,7 +267,7 @@ FindStreamingStart(uint32 *tli)
 				disconnect_and_exit(1);
 			}
 
-			if (statbuf.st_size != XLOG_SEG_SIZE)
+			if (statbuf.st_size != WalSegSz)
 			{
 				fprintf(stderr,
 						_("%s: segment file \"%s\" has incorrect size %d, skipping\n"),
@@ -264,10 +277,10 @@ FindStreamingStart(uint32 *tli)
 		}
 		else if (!ispartial && iscompress)
 		{
-			int		fd;
-			char	buf[4];
-			int		bytes_out;
-			char	fullpath[MAXPGPATH * 2];
+			int			fd;
+			char		buf[4];
+			int			bytes_out;
+			char		fullpath[MAXPGPATH * 2];
 
 			snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, dirent->d_name);
 
@@ -278,9 +291,9 @@ FindStreamingStart(uint32 *tli)
 						progname, fullpath, strerror(errno));
 				disconnect_and_exit(1);
 			}
-			if (lseek(fd, (off_t)(-4), SEEK_END) < 0)
+			if (lseek(fd, (off_t) (-4), SEEK_END) < 0)
 			{
-				fprintf(stderr, _("%s: could not seek compressed file \"%s\": %s\n"),
+				fprintf(stderr, _("%s: could not seek in compressed file \"%s\": %s\n"),
 						progname, fullpath, strerror(errno));
 				disconnect_and_exit(1);
 			}
@@ -293,9 +306,9 @@ FindStreamingStart(uint32 *tli)
 
 			close(fd);
 			bytes_out = (buf[3] << 24) | (buf[2] << 16) |
-						(buf[1] << 8) | buf[0];
+				(buf[1] << 8) | buf[0];
 
-			if (bytes_out != XLOG_SEG_SIZE)
+			if (bytes_out != WalSegSz)
 			{
 				fprintf(stderr,
 						_("%s: compressed segment file \"%s\" has incorrect uncompressed size %d, skipping\n"),
@@ -336,7 +349,7 @@ FindStreamingStart(uint32 *tli)
 		if (!high_ispartial)
 			high_segno++;
 
-		XLogSegNoOffsetToRecPtr(high_segno, 0, high_ptr);
+		XLogSegNoOffsetToRecPtr(high_segno, 0, high_ptr, WalSegSz);
 
 		*tli = high_tli;
 		return high_ptr;
@@ -397,7 +410,7 @@ StreamLog(void)
 	/*
 	 * Always start streaming at the beginning of a segment
 	 */
-	stream.startpos -= stream.startpos % XLOG_SEG_SIZE;
+	stream.startpos -= XLogSegmentOffset(stream.startpos, WalSegSz);
 
 	/*
 	 * Start the replication
@@ -405,10 +418,11 @@ StreamLog(void)
 	if (verbose)
 		fprintf(stderr,
 				_("%s: starting log streaming at %X/%X (timeline %u)\n"),
-		progname, (uint32) (stream.startpos >> 32), (uint32) stream.startpos,
+				progname, (uint32) (stream.startpos >> 32), (uint32) stream.startpos,
 				stream.timeline);
 
 	stream.stream_stop = stop_streaming;
+	stream.stop_socket = PGINVALID_SOCKET;
 	stream.standby_message_timeout = standby_message_timeout;
 	stream.synchronous = synchronous;
 	stream.do_sync = true;
@@ -417,7 +431,6 @@ StreamLog(void)
 												stream.do_sync);
 	stream.partial_suffix = ".partial";
 	stream.replication_slot = replication_slot;
-	stream.temp_slot = false;
 
 	ReceiveXlogStream(conn, &stream);
 
@@ -446,7 +459,7 @@ StreamLog(void)
 static void
 sigint_handler(int signum)
 {
-	time_to_abort = true;
+	time_to_stop = true;
 }
 #endif
 
@@ -458,6 +471,7 @@ main(int argc, char **argv)
 		{"version", no_argument, NULL, 'V'},
 		{"directory", required_argument, NULL, 'D'},
 		{"dbname", required_argument, NULL, 'd'},
+		{"endpos", required_argument, NULL, 'E'},
 		{"host", required_argument, NULL, 'h'},
 		{"port", required_argument, NULL, 'p'},
 		{"username", required_argument, NULL, 'U'},
@@ -479,6 +493,7 @@ main(int argc, char **argv)
 	int			c;
 	int			option_index;
 	char	   *db_name;
+	uint32		hi, lo;
 
 	progname = get_progname(argv[0]);
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_basebackup"));
@@ -498,7 +513,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "D:d:h:p:U:s:S:nwWvZ:",
+	while ((c = getopt_long(argc, argv, "D:d:E:h:p:U:s:S:nwWvZ:",
 							long_options, &option_index)) != -1)
 	{
 		switch (c)
@@ -541,6 +556,16 @@ main(int argc, char **argv)
 				break;
 			case 'S':
 				replication_slot = pg_strdup(optarg);
+				break;
+			case 'E':
+				if (sscanf(optarg, "%X/%X", &hi, &lo) != 2)
+				{
+					fprintf(stderr,
+							_("%s: could not parse end position \"%s\"\n"),
+							progname, optarg);
+					exit(1);
+				}
+				endpos = ((uint64) hi) << 32 | lo;
 				break;
 			case 'n':
 				noloop = 1;
@@ -663,6 +688,10 @@ main(int argc, char **argv)
 	if (!RunIdentifySystem(conn, NULL, NULL, NULL, &db_name))
 		disconnect_and_exit(1);
 
+	/* determine remote server's xlog segment size */
+	if (!RetrieveWalSegSize(conn))
+		disconnect_and_exit(1);
+
 	/*
 	 * Check that there is a database associated with connection, none should
 	 * be defined in this context.
@@ -698,7 +727,7 @@ main(int argc, char **argv)
 					_("%s: creating replication slot \"%s\"\n"),
 					progname, replication_slot);
 
-		if (!CreateReplicationSlot(conn, replication_slot, NULL, true,
+		if (!CreateReplicationSlot(conn, replication_slot, NULL, false, true, false,
 								   slot_exists_ok))
 			disconnect_and_exit(1);
 		disconnect_and_exit(0);
@@ -712,11 +741,11 @@ main(int argc, char **argv)
 	while (true)
 	{
 		StreamLog();
-		if (time_to_abort)
+		if (time_to_stop)
 		{
 			/*
-			 * We've been Ctrl-C'ed. That's not an error, so exit without an
-			 * errorcode.
+			 * We've been Ctrl-C'ed or end of streaming position has been
+			 * willingly reached, so exit without an error code.
 			 */
 			exit(0);
 		}

@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern RecursiveUnionState *ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecRecursiveUnion(RecursiveUnionState *node);
 extern void ExecEndRecursiveUnion(RecursiveUnionState *node);
 extern void ExecReScanRecursiveUnion(RecursiveUnionState *node);
 
-#endif   /* NODERECURSIVEUNION_H */
+#endif							/* NODERECURSIVEUNION_H */

@@ -1868,7 +1868,7 @@ CREATE VIEW table_privileges AS
          ) AS grantee (oid, rolname)
 
     WHERE c.relnamespace = nc.oid
-          AND c.relkind IN ('r', 'v', 'p')
+          AND c.relkind IN ('r', 'v', 'f', 'p')
           AND c.grantee = grantee.oid
           AND c.grantor = u_grantor.oid
           AND c.prtype IN ('INSERT', 'SELECT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
@@ -1914,7 +1914,7 @@ CREATE VIEW tables AS
              CASE WHEN nc.oid = pg_my_temp_schema() THEN 'LOCAL TEMPORARY'
                   WHEN c.relkind IN ('r', 'p') THEN 'BASE TABLE'
                   WHEN c.relkind = 'v' THEN 'VIEW'
-                  WHEN c.relkind = 'f' THEN 'FOREIGN TABLE'
+                  WHEN c.relkind = 'f' THEN 'FOREIGN'
                   ELSE null END
              AS character_data) AS table_type,
 
@@ -2936,12 +2936,14 @@ CREATE VIEW user_mapping_options AS
     SELECT authorization_identifier,
            foreign_server_catalog,
            foreign_server_name,
-           CAST((pg_options_to_table(um.umoptions)).option_name AS sql_identifier) AS option_name,
+           CAST(opts.option_name AS sql_identifier) AS option_name,
            CAST(CASE WHEN (umuser <> 0 AND authorization_identifier = current_user)
                        OR (umuser = 0 AND pg_has_role(srvowner, 'USAGE'))
-                       OR (SELECT rolsuper FROM pg_authid WHERE rolname = current_user) THEN (pg_options_to_table(um.umoptions)).option_value
+                       OR (SELECT rolsuper FROM pg_authid WHERE rolname = current_user)
+                     THEN opts.option_value
                      ELSE NULL END AS character_data) AS option_value
-    FROM _pg_user_mappings um;
+    FROM _pg_user_mappings um,
+         pg_options_to_table(um.umoptions) opts;
 
 GRANT SELECT ON user_mapping_options TO PUBLIC;
 

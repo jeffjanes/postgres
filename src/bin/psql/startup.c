@@ -12,7 +12,7 @@
 #else							/* WIN32 */
 #include <io.h>
 #include <win32.h>
-#endif   /* WIN32 */
+#endif							/* WIN32 */
 
 #include "getopt_long.h"
 
@@ -79,7 +79,7 @@ struct adhoc_opts
 };
 
 static void parse_psql_options(int argc, char *argv[],
-				   struct adhoc_opts * options);
+				   struct adhoc_opts *options);
 static void simple_action_list_append(SimpleActionList *list,
 						  enum _actions action, const char *val);
 static void process_psqlrc(char *argv0);
@@ -160,7 +160,14 @@ main(int argc, char *argv[])
 
 	EstablishVariableSpace();
 
+	/* Create variables showing psql version number */
 	SetVariable(pset.vars, "VERSION", PG_VERSION_STR);
+	SetVariable(pset.vars, "VERSION_NAME", PG_VERSION);
+	SetVariable(pset.vars, "VERSION_NUM", CppAsString2(PG_VERSION_NUM));
+
+	/* Initialize variables for last error */
+	SetVariable(pset.vars, "LAST_ERROR_MESSAGE", "");
+	SetVariable(pset.vars, "LAST_ERROR_SQLSTATE", "00000");
 
 	/* Default values for variables (that don't match the result of \unset) */
 	SetVariableBool(pset.vars, "AUTOCOMMIT");
@@ -411,7 +418,7 @@ error:
  */
 
 static void
-parse_psql_options(int argc, char *argv[], struct adhoc_opts * options)
+parse_psql_options(int argc, char *argv[], struct adhoc_opts *options)
 {
 	static struct option long_options[] =
 	{

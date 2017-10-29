@@ -53,7 +53,7 @@ static void buildShSecLabels(PGconn *conn, const char *catalog_name,
 				 uint32 objectId, PQExpBuffer buffer,
 				 const char *target, const char *objname);
 static PGconn *connectDatabase(const char *dbname, const char *connstr, const char *pghost, const char *pgport,
-		   const char *pguser, trivalue prompt_password, bool fail_on_error);
+				const char *pguser, trivalue prompt_password, bool fail_on_error);
 static char *constructConnStr(const char **keywords, const char **values);
 static PGresult *executeQuery(PGconn *conn, const char *query);
 static void executeCommand(PGconn *conn, const char *query);
@@ -74,10 +74,13 @@ static int	if_exists = 0;
 static int	inserts = 0;
 static int	no_tablespaces = 0;
 static int	use_setsessauth = 0;
+static int	no_publications = 0;
 static int	no_security_labels = 0;
+static int	no_subscriptions = 0;
 static int	no_unlogged_table_data = 0;
 static int	no_role_passwords = 0;
 static int	server_version;
+static int	load_via_partition_root = 0;
 
 static char role_catalog[10];
 #define PG_AUTHID "pg_authid"
@@ -94,6 +97,7 @@ main(int argc, char *argv[])
 	static struct option long_options[] = {
 		{"data-only", no_argument, NULL, 'a'},
 		{"clean", no_argument, NULL, 'c'},
+		{"encoding", required_argument, NULL, 'E'},
 		{"file", required_argument, NULL, 'f'},
 		{"globals-only", no_argument, NULL, 'g'},
 		{"host", required_argument, NULL, 'h'},
@@ -126,12 +130,15 @@ main(int argc, char *argv[])
 		{"lock-wait-timeout", required_argument, NULL, 2},
 		{"no-tablespaces", no_argument, &no_tablespaces, 1},
 		{"quote-all-identifiers", no_argument, &quote_all_identifiers, 1},
+		{"load-via-partition-root", no_argument, &load_via_partition_root, 1},
 		{"role", required_argument, NULL, 3},
 		{"use-set-session-authorization", no_argument, &use_setsessauth, 1},
+		{"no-publications", no_argument, &no_publications, 1},
+		{"no-role-passwords", no_argument, &no_role_passwords, 1},
 		{"no-security-labels", no_argument, &no_security_labels, 1},
+		{"no-subscriptions", no_argument, &no_subscriptions, 1},
 		{"no-sync", no_argument, NULL, 4},
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
-		{"no-role-passwords", no_argument, &no_role_passwords, 1},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -141,6 +148,7 @@ main(int argc, char *argv[])
 	char	   *pguser = NULL;
 	char	   *pgdb = NULL;
 	char	   *use_role = NULL;
+	const char *dumpencoding = NULL;
 	trivalue	prompt_password = TRI_DEFAULT;
 	bool		data_only = false;
 	bool		globals_only = false;
@@ -198,7 +206,7 @@ main(int argc, char *argv[])
 
 	pgdumpopts = createPQExpBuffer();
 
-	while ((c = getopt_long(argc, argv, "acd:f:gh:l:oOp:rsS:tU:vwWx", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "acd:E:f:gh:l:oOp:rsS:tU:vwWx", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -213,6 +221,12 @@ main(int argc, char *argv[])
 
 			case 'd':
 				connstr = pg_strdup(optarg);
+				break;
+
+			case 'E':
+				dumpencoding = pg_strdup(optarg);
+				appendPQExpBufferStr(pgdumpopts, " -E ");
+				appendShellString(pgdumpopts, optarg);
 				break;
 
 			case 'f':
@@ -357,9 +371,9 @@ main(int argc, char *argv[])
 	}
 
 	/*
-	 * If password values are not required in the dump, switch to
-	 * using pg_roles which is equally useful, just more likely
-	 * to have unrestricted access than pg_authid.
+	 * If password values are not required in the dump, switch to using
+	 * pg_roles which is equally useful, just more likely to have unrestricted
+	 * access than pg_authid.
 	 */
 	if (no_role_passwords)
 		sprintf(role_catalog, "%s", PG_ROLES);
@@ -381,10 +395,16 @@ main(int argc, char *argv[])
 		appendPQExpBufferStr(pgdumpopts, " --no-tablespaces");
 	if (quote_all_identifiers)
 		appendPQExpBufferStr(pgdumpopts, " --quote-all-identifiers");
+	if (load_via_partition_root)
+		appendPQExpBufferStr(pgdumpopts, " --load-via-partition-root");
 	if (use_setsessauth)
 		appendPQExpBufferStr(pgdumpopts, " --use-set-session-authorization");
+	if (no_publications)
+		appendPQExpBufferStr(pgdumpopts, " --no-publications");
 	if (no_security_labels)
 		appendPQExpBufferStr(pgdumpopts, " --no-security-labels");
+	if (no_subscriptions)
+		appendPQExpBufferStr(pgdumpopts, " --no-subscriptions");
 	if (no_unlogged_table_data)
 		appendPQExpBufferStr(pgdumpopts, " --no-unlogged-table-data");
 
@@ -440,6 +460,19 @@ main(int argc, char *argv[])
 	}
 	else
 		OPF = stdout;
+
+	/*
+	 * Set the client encoding if requested.
+	 */
+	if (dumpencoding)
+	{
+		if (PQsetClientEncoding(conn, dumpencoding) < 0)
+		{
+			fprintf(stderr, _("%s: invalid client encoding \"%s\" specified\n"),
+					progname, dumpencoding);
+			exit_nicely(1);
+		}
+	}
 
 	/*
 	 * Get the active encoding and the standard_conforming_strings setting, so
@@ -576,6 +609,7 @@ help(void)
 	printf(_("\nOptions controlling the output content:\n"));
 	printf(_("  -a, --data-only              dump only the data, not the schema\n"));
 	printf(_("  -c, --clean                  clean (drop) databases before recreating\n"));
+	printf(_("  -E, --encoding=ENCODING      dump the data in encoding ENCODING\n"));
 	printf(_("  -g, --globals-only           dump only global objects, no databases\n"));
 	printf(_("  -o, --oids                   include OIDs in dump\n"));
 	printf(_("  -O, --no-owner               skip restoration of object ownership\n"));
@@ -590,12 +624,15 @@ help(void)
 	printf(_("  --disable-triggers           disable triggers during data-only restore\n"));
 	printf(_("  --if-exists                  use IF EXISTS when dropping objects\n"));
 	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
+	printf(_("  --no-publications            do not dump publications\n"));
+	printf(_("  --no-role-passwords          do not dump passwords for roles\n"));
 	printf(_("  --no-security-labels         do not dump security label assignments\n"));
+	printf(_("  --no-subscriptions           do not dump subscriptions\n"));
 	printf(_("  --no-sync                    do not wait for changes to be written safely to disk\n"));
 	printf(_("  --no-tablespaces             do not dump tablespace assignments\n"));
 	printf(_("  --no-unlogged-table-data     do not dump unlogged table data\n"));
-	printf(_("  --no-role-passwords          do not dump passwords for roles\n"));
 	printf(_("  --quote-all-identifiers      quote all identifiers, even if not key words\n"));
+	printf(_("  --load-via-partition-root    load partitions via the root table\n"));
 	printf(_("  --use-set-session-authorization\n"
 			 "                               use SET SESSION AUTHORIZATION commands instead of\n"
 			 "                               ALTER OWNER commands to set ownership\n"));
@@ -629,23 +666,23 @@ dropRoles(PGconn *conn)
 
 	if (server_version >= 90600)
 		printfPQExpBuffer(buf,
-						   "SELECT rolname "
-						   "FROM %s "
-						   "WHERE rolname !~ '^pg_' "
-						   "ORDER BY 1", role_catalog);
+						  "SELECT rolname "
+						  "FROM %s "
+						  "WHERE rolname !~ '^pg_' "
+						  "ORDER BY 1", role_catalog);
 	else if (server_version >= 80100)
 		printfPQExpBuffer(buf,
-						   "SELECT rolname "
-						   "FROM %s "
-						   "ORDER BY 1", role_catalog);
+						  "SELECT rolname "
+						  "FROM %s "
+						  "ORDER BY 1", role_catalog);
 	else
 		printfPQExpBuffer(buf,
-						   "SELECT usename as rolname "
-						   "FROM pg_shadow "
-						   "UNION "
-						   "SELECT groname as rolname "
-						   "FROM pg_group "
-						   "ORDER BY 1");
+						  "SELECT usename as rolname "
+						  "FROM pg_shadow "
+						  "UNION "
+						  "SELECT groname as rolname "
+						  "FROM pg_group "
+						  "ORDER BY 1");
 
 	res = executeQuery(conn, buf->data);
 
@@ -702,7 +739,7 @@ dumpRoles(PGconn *conn)
 						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, rolreplication, rolbypassrls, "
-			 "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
+						  "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
 						  "rolname = current_user AS is_current_user "
 						  "FROM %s "
 						  "WHERE rolname !~ '^pg_' "
@@ -713,7 +750,7 @@ dumpRoles(PGconn *conn)
 						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, rolreplication, rolbypassrls, "
-			 "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
+						  "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
 						  "rolname = current_user AS is_current_user "
 						  "FROM %s "
 						  "ORDER BY 2", role_catalog, role_catalog);
@@ -724,7 +761,7 @@ dumpRoles(PGconn *conn)
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, rolreplication, "
 						  "false as rolbypassrls, "
-			 "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
+						  "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
 						  "rolname = current_user AS is_current_user "
 						  "FROM %s "
 						  "ORDER BY 2", role_catalog, role_catalog);
@@ -735,7 +772,7 @@ dumpRoles(PGconn *conn)
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, false as rolreplication, "
 						  "false as rolbypassrls, "
-			 "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
+						  "pg_catalog.shobj_description(oid, '%s') as rolcomment, "
 						  "rolname = current_user AS is_current_user "
 						  "FROM %s "
 						  "ORDER BY 2", role_catalog, role_catalog);
@@ -939,15 +976,15 @@ dumpRoleMembership(PGconn *conn)
 	int			i;
 
 	printfPQExpBuffer(buf, "SELECT ur.rolname AS roleid, "
-					   "um.rolname AS member, "
-					   "a.admin_option, "
-					   "ug.rolname AS grantor "
-					   "FROM pg_auth_members a "
-					   "LEFT JOIN %s ur on ur.oid = a.roleid "
-					   "LEFT JOIN %s um on um.oid = a.member "
-					   "LEFT JOIN %s ug on ug.oid = a.grantor "
-					"WHERE NOT (ur.rolname ~ '^pg_' AND um.rolname ~ '^pg_')"
-					   "ORDER BY 1,2,3", role_catalog, role_catalog, role_catalog);
+					  "um.rolname AS member, "
+					  "a.admin_option, "
+					  "ug.rolname AS grantor "
+					  "FROM pg_auth_members a "
+					  "LEFT JOIN %s ur on ur.oid = a.roleid "
+					  "LEFT JOIN %s um on um.oid = a.member "
+					  "LEFT JOIN %s ug on ug.oid = a.grantor "
+					  "WHERE NOT (ur.rolname ~ '^pg_' AND um.rolname ~ '^pg_')"
+					  "ORDER BY 1,2,3", role_catalog, role_catalog, role_catalog);
 	res = executeQuery(conn, buf->data);
 
 	if (PQntuples(res) > 0)
@@ -1112,7 +1149,7 @@ dumpTablespaces(PGconn *conn)
 	 */
 	if (server_version >= 90600)
 		res = executeQuery(conn, "SELECT oid, spcname, "
-						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
+						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "pg_catalog.pg_tablespace_location(oid), "
 						   "(SELECT pg_catalog.array_agg(acl) FROM (SELECT pg_catalog.unnest(coalesce(spcacl,pg_catalog.acldefault('t',spcowner))) AS acl "
 						   "EXCEPT SELECT pg_catalog.unnest(pg_catalog.acldefault('t',spcowner))) as foo)"
@@ -1121,40 +1158,40 @@ dumpTablespaces(PGconn *conn)
 						   "EXCEPT SELECT pg_catalog.unnest(coalesce(spcacl,pg_catalog.acldefault('t',spcowner)))) as foo)"
 						   "AS rspcacl,"
 						   "array_to_string(spcoptions, ', '),"
-						"pg_catalog.shobj_description(oid, 'pg_tablespace') "
+						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
 						   "WHERE spcname !~ '^pg_' "
 						   "ORDER BY 1");
 	else if (server_version >= 90200)
 		res = executeQuery(conn, "SELECT oid, spcname, "
-						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
+						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "pg_catalog.pg_tablespace_location(oid), "
 						   "spcacl, '' as rspcacl, "
 						   "array_to_string(spcoptions, ', '),"
-						"pg_catalog.shobj_description(oid, 'pg_tablespace') "
+						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
 						   "WHERE spcname !~ '^pg_' "
 						   "ORDER BY 1");
 	else if (server_version >= 90000)
 		res = executeQuery(conn, "SELECT oid, spcname, "
-						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
+						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "spclocation, spcacl, '' as rspcacl, "
 						   "array_to_string(spcoptions, ', '),"
-						"pg_catalog.shobj_description(oid, 'pg_tablespace') "
+						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
 						   "WHERE spcname !~ '^pg_' "
 						   "ORDER BY 1");
 	else if (server_version >= 80200)
 		res = executeQuery(conn, "SELECT oid, spcname, "
-						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
+						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "spclocation, spcacl, '' as rspcacl, null, "
-						"pg_catalog.shobj_description(oid, 'pg_tablespace') "
+						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
 						   "WHERE spcname !~ '^pg_' "
 						   "ORDER BY 1");
 	else
 		res = executeQuery(conn, "SELECT oid, spcname, "
-						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
+						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "spclocation, spcacl, '' as rspcacl, "
 						   "null, null "
 						   "FROM pg_catalog.pg_tablespace "
@@ -1339,67 +1376,67 @@ dumpCreateDB(PGconn *conn)
 	 */
 	if (server_version >= 90600)
 		printfPQExpBuffer(buf,
-						   "SELECT datname, "
-						   "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
-						   "pg_encoding_to_char(d.encoding), "
-						   "datcollate, datctype, datfrozenxid, datminmxid, "
-						   "datistemplate, "
-						   "(SELECT pg_catalog.array_agg(acl ORDER BY acl::text COLLATE \"C\") FROM ( "
-						   "  SELECT pg_catalog.unnest(coalesce(datacl,pg_catalog.acldefault('d',datdba))) AS acl "
-						   "  EXCEPT SELECT pg_catalog.unnest(pg_catalog.acldefault('d',datdba))) as datacls)"
-						   "AS datacl, "
-						   "(SELECT pg_catalog.array_agg(acl ORDER BY acl::text COLLATE \"C\") FROM ( "
-						   "  SELECT pg_catalog.unnest(pg_catalog.acldefault('d',datdba)) AS acl "
-						   "  EXCEPT SELECT pg_catalog.unnest(coalesce(datacl,pg_catalog.acldefault('d',datdba)))) as rdatacls)"
-						   "AS rdatacl, "
-						   "datconnlimit, "
-						   "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
-			  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
-						   "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
+						  "SELECT datname, "
+						  "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
+						  "pg_encoding_to_char(d.encoding), "
+						  "datcollate, datctype, datfrozenxid, datminmxid, "
+						  "datistemplate, "
+						  "(SELECT pg_catalog.array_agg(acl ORDER BY acl::text COLLATE \"C\") FROM ( "
+						  "  SELECT pg_catalog.unnest(coalesce(datacl,pg_catalog.acldefault('d',datdba))) AS acl "
+						  "  EXCEPT SELECT pg_catalog.unnest(pg_catalog.acldefault('d',datdba))) as datacls)"
+						  "AS datacl, "
+						  "(SELECT pg_catalog.array_agg(acl ORDER BY acl::text COLLATE \"C\") FROM ( "
+						  "  SELECT pg_catalog.unnest(pg_catalog.acldefault('d',datdba)) AS acl "
+						  "  EXCEPT SELECT pg_catalog.unnest(coalesce(datacl,pg_catalog.acldefault('d',datdba)))) as rdatacls)"
+						  "AS rdatacl, "
+						  "datconnlimit, "
+						  "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
+						  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
+						  "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
 	else if (server_version >= 90300)
 		printfPQExpBuffer(buf,
-						   "SELECT datname, "
-						   "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
-						   "pg_encoding_to_char(d.encoding), "
-						   "datcollate, datctype, datfrozenxid, datminmxid, "
-						   "datistemplate, datacl, '' as rdatacl, "
-						   "datconnlimit, "
-						   "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
-			  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
-						   "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
+						  "SELECT datname, "
+						  "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
+						  "pg_encoding_to_char(d.encoding), "
+						  "datcollate, datctype, datfrozenxid, datminmxid, "
+						  "datistemplate, datacl, '' as rdatacl, "
+						  "datconnlimit, "
+						  "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
+						  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
+						  "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
 	else if (server_version >= 80400)
 		printfPQExpBuffer(buf,
-						   "SELECT datname, "
-						   "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
-						   "pg_encoding_to_char(d.encoding), "
-					  "datcollate, datctype, datfrozenxid, 0 AS datminmxid, "
-						   "datistemplate, datacl, '' as rdatacl, "
-						   "datconnlimit, "
-						   "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
-			  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
-						   "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
+						  "SELECT datname, "
+						  "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
+						  "pg_encoding_to_char(d.encoding), "
+						  "datcollate, datctype, datfrozenxid, 0 AS datminmxid, "
+						  "datistemplate, datacl, '' as rdatacl, "
+						  "datconnlimit, "
+						  "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
+						  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
+						  "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
 	else if (server_version >= 80100)
 		printfPQExpBuffer(buf,
-						   "SELECT datname, "
-						   "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
-						   "pg_encoding_to_char(d.encoding), "
-						   "null::text AS datcollate, null::text AS datctype, datfrozenxid, 0 AS datminmxid, "
-						   "datistemplate, datacl, '' as rdatacl, "
-						   "datconnlimit, "
-						   "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
-			  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
-						   "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
+						  "SELECT datname, "
+						  "coalesce(rolname, (select rolname from %s where oid=(select datdba from pg_database where datname='template0'))), "
+						  "pg_encoding_to_char(d.encoding), "
+						  "null::text AS datcollate, null::text AS datctype, datfrozenxid, 0 AS datminmxid, "
+						  "datistemplate, datacl, '' as rdatacl, "
+						  "datconnlimit, "
+						  "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
+						  "FROM pg_database d LEFT JOIN %s u ON (datdba = u.oid) "
+						  "WHERE datallowconn ORDER BY 1", role_catalog, role_catalog);
 	else
 		printfPQExpBuffer(buf,
-						   "SELECT datname, "
-						   "coalesce(usename, (select usename from pg_shadow where usesysid=(select datdba from pg_database where datname='template0'))), "
-						   "pg_encoding_to_char(d.encoding), "
-						   "null::text AS datcollate, null::text AS datctype, datfrozenxid, 0 AS datminmxid, "
-						   "datistemplate, datacl, '' as rdatacl, "
-						   "-1 as datconnlimit, "
-						   "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
-		   "FROM pg_database d LEFT JOIN pg_shadow u ON (datdba = usesysid) "
-						   "WHERE datallowconn ORDER BY 1");
+						  "SELECT datname, "
+						  "coalesce(usename, (select usename from pg_shadow where usesysid=(select datdba from pg_database where datname='template0'))), "
+						  "pg_encoding_to_char(d.encoding), "
+						  "null::text AS datcollate, null::text AS datctype, datfrozenxid, 0 AS datminmxid, "
+						  "datistemplate, datacl, '' as rdatacl, "
+						  "-1 as datconnlimit, "
+						  "(SELECT spcname FROM pg_tablespace t WHERE t.oid = d.dattablespace) AS dattablespace "
+						  "FROM pg_database d LEFT JOIN pg_shadow u ON (datdba = usesysid) "
+						  "WHERE datallowconn ORDER BY 1");
 
 	res = executeQuery(conn, buf->data);
 
@@ -1560,7 +1597,7 @@ dumpDatabaseConfig(PGconn *conn, const char *dbname)
 		appendStringLiteralConn(buf, dbname, conn);
 
 		if (server_version >= 90000)
-			appendPQExpBuffer(buf, ")");
+			appendPQExpBufferChar(buf, ')');
 
 		res = executeQuery(conn, buf->data);
 		if (PQntuples(res) == 1 &&
@@ -1599,7 +1636,7 @@ dumpUserConfig(PGconn *conn, const char *username)
 		if (server_version >= 90000)
 			printfPQExpBuffer(buf, "SELECT setconfig[%d] FROM pg_db_role_setting WHERE "
 							  "setdatabase = 0 AND setrole = "
-					   "(SELECT oid FROM %s WHERE rolname = ", count, role_catalog);
+							  "(SELECT oid FROM %s WHERE rolname = ", count, role_catalog);
 		else if (server_version >= 80100)
 			printfPQExpBuffer(buf, "SELECT rolconfig[%d] FROM %s WHERE rolname = ", count, role_catalog);
 		else
@@ -1640,7 +1677,7 @@ dumpDbRoleConfig(PGconn *conn)
 
 	printfPQExpBuffer(buf, "SELECT rolname, datname, unnest(setconfig) "
 					  "FROM pg_db_role_setting, %s u, pg_database "
-		  "WHERE setrole = u.oid AND setdatabase = pg_database.oid", role_catalog);
+					  "WHERE setrole = u.oid AND setdatabase = pg_database.oid", role_catalog);
 	res = executeQuery(conn, buf->data);
 
 	if (PQntuples(res) > 0)

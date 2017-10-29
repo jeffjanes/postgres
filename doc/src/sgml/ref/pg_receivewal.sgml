@@ -16,13 +16,13 @@ PostgreSQL documentation
 
  <refnamediv>
   <refname>pg_receivewal</refname>
-  <refpurpose>stream transaction logs from a <productname>PostgreSQL</productname> server</refpurpose>
+  <refpurpose>stream write-ahead logs from a <productname>PostgreSQL</productname> server</refpurpose>
  </refnamediv>
 
  <refsynopsisdiv>
   <cmdsynopsis>
    <command>pg_receivewal</command>
-   <arg rep="repeat"><replaceable>option</></arg>
+   <arg rep="repeat"><replaceable>option</replaceable></arg>
   </cmdsynopsis>
  </refsynopsisdiv>
 
@@ -31,8 +31,8 @@ PostgreSQL documentation
    Description
   </title>
   <para>
-   <application>pg_receivewal</application> is used to stream the transaction log
-   from a running <productname>PostgreSQL</productname> cluster. The transaction
+   <application>pg_receivewal</application> is used to stream the write-ahead log
+   from a running <productname>PostgreSQL</productname> cluster. The write-ahead
    log is streamed using the streaming replication protocol, and is written
    to a local directory of files. This directory can be used as the archive
    location for doing a restore using point-in-time recovery (see
@@ -40,7 +40,7 @@ PostgreSQL documentation
   </para>
 
   <para>
-   <application>pg_receivewal</application> streams the transaction
+   <application>pg_receivewal</application> streams the write-ahead
    log in real time as it's being generated on the server, and does not wait
    for segments to complete like <xref linkend="guc-archive-command"> does.
    For this reason, it is not necessary to set
@@ -49,14 +49,14 @@ PostgreSQL documentation
   </para>
 
   <para>
-   Unlike the WAL receiver of a PostgreSQL standby server, <application>pg_receivewal</>
+   Unlike the WAL receiver of a PostgreSQL standby server, <application>pg_receivewal</application>
    by default flushes WAL data only when a WAL file is closed.
-   The option <option>--synchronous</> must be specified to flush WAL data
+   The option <option>--synchronous</option> must be specified to flush WAL data
    in real time.
   </para>
 
   <para>
-   The transaction log is streamed over a regular
+   The write-ahead log is streamed over a regular
    <productname>PostgreSQL</productname> connection and uses the replication
    protocol. The connection must be made with a superuser or a user
    having <literal>REPLICATION</literal> permissions (see
@@ -73,6 +73,12 @@ PostgreSQL documentation
    as possible. To avoid this behavior, use the <literal>-n</literal>
    parameter.
   </para>
+
+  <para>
+   In the absence of fatal errors, <application>pg_receivewal</application>
+   will run until terminated by the <systemitem>SIGINT</systemitem> signal
+   (<keycombo action="simul"><keycap>Control</keycap><keycap>C</keycap></keycombo>).
+  </para>
  </refsect1>
 
  <refsect1>
@@ -88,6 +94,22 @@ PostgreSQL documentation
        </para>
        <para>
         This parameter is required.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-E <replaceable>lsn</replaceable></option></term>
+      <term><option>--endpos=<replaceable>lsn</replaceable></option></term>
+      <listitem>
+       <para>
+        Automatically stop replication and exit with normal exit status 0 when
+        receiving reaches the specified LSN.
+       </para>
+
+       <para>
+        If there is a record with LSN exactly equal to <replaceable>lsn</replaceable>,
+        the record will be processed.
        </para>
       </listitem>
      </varlistentry>
@@ -134,7 +156,7 @@ PostgreSQL documentation
         <para>
          Require <application>pg_receivewal</application> to use an existing
          replication slot (see <xref linkend="streaming-replication-slots">).
-         When this option is used, <application>pg_receivewal</> will report
+         When this option is used, <application>pg_receivewal</application> will report
          a flush position to the server, indicating when each segment has been
          synchronized to disk so that the server can remove that segment if it
          is not otherwise needed.
@@ -159,7 +181,7 @@ PostgreSQL documentation
        <para>
         Flush the WAL data to disk immediately after it has been received. Also
         send a status packet back to the server immediately after flushing,
-        regardless of <literal>--status-interval</>.
+        regardless of <literal>--status-interval</literal>.
        </para>
 
        <para>
@@ -186,7 +208,7 @@ PostgreSQL documentation
       <term><option>--compress=<replaceable class="parameter">level</replaceable></option></term>
       <listitem>
        <para>
-        Enables gzip compression of transaction logs, and specifies the
+        Enables gzip compression of write-ahead logs, and specifies the
         compression level (0 through 9, 0 being no compression and 9 being best
         compression).  The suffix <filename>.gz</filename> will
         automatically be added to all filenames.
@@ -208,7 +230,7 @@ PostgreSQL documentation
         string. See <xref linkend="libpq-connstring"> for more information.
        </para>
        <para>
-        The option is called <literal>--dbname</> for consistency with other
+        The option is called <literal>--dbname</literal> for consistency with other
         client applications, but because <application>pg_receivewal</application>
         doesn't connect to any particular database in the cluster, database
         name in the connection string will be ignored.
@@ -254,8 +276,8 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>-w</></term>
-      <term><option>--no-password</></term>
+      <term><option>-w</option></term>
+      <term><option>--no-password</option></term>
       <listitem>
        <para>
         Never issue a password prompt.  If the server requires
@@ -283,7 +305,7 @@ PostgreSQL documentation
         for a password if the server demands password authentication.
         However, <application>pg_receivewal</application> will waste a
         connection attempt finding out that the server wants a password.
-        In some cases it is worth typing <option>-W</> to avoid the extra
+        In some cases it is worth typing <option>-W</option> to avoid the extra
         connection attempt.
        </para>
       </listitem>
@@ -323,8 +345,8 @@ PostgreSQL documentation
 
     <variablelist>
      <varlistentry>
-       <term><option>-V</></term>
-       <term><option>--version</></term>
+       <term><option>-V</option></term>
+       <term><option>--version</option></term>
        <listitem>
        <para>
        Print the <application>pg_receivewal</application> version and exit.
@@ -333,8 +355,8 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-       <term><option>-?</></term>
-       <term><option>--help</></term>
+       <term><option>-?</option></term>
+       <term><option>--help</option></term>
        <listitem>
        <para>
        Show help about <application>pg_receivewal</application> command line
@@ -349,11 +371,23 @@ PostgreSQL documentation
  </refsect1>
 
  <refsect1>
+  <title>Exit Status</title>
+
+  <para>
+   <application>pg_receivewal</application> will exit with status 0 when
+   terminated by the <systemitem>SIGINT</systemitem> signal.  (That is the
+   normal way to end it.  Hence it is not an error.)  For fatal errors or
+   other signals, the exit status will be nonzero.
+  </para>
+
+ </refsect1>
+
+ <refsect1>
   <title>Environment</title>
 
   <para>
-   This utility, like most other <productname>PostgreSQL</> utilities,
-   uses the environment variables supported by <application>libpq</>
+   This utility, like most other <productname>PostgreSQL</productname> utilities,
+   uses the environment variables supported by <application>libpq</application>
    (see <xref linkend="libpq-envars">).
   </para>
 
@@ -366,7 +400,7 @@ PostgreSQL documentation
    When using <application>pg_receivewal</application> instead of
    <xref linkend="guc-archive-command"> as the main WAL backup method, it is
    strongly recommended to use replication slots.  Otherwise, the server is
-   free to recycle or remove transaction log files before they are backed up,
+   free to recycle or remove write-ahead log files before they are backed up,
    because it does not have any information, either
    from <xref linkend="guc-archive-command"> or the replication slots, about
    how far the WAL stream has been archived.  Note, however, that a
@@ -380,7 +414,7 @@ PostgreSQL documentation
   <title>Examples</title>
 
   <para>
-   To stream the transaction log from the server at
+   To stream the write-ahead log from the server at
    <literal>mydbserver</literal> and store it in the local directory
    <filename>/usr/local/pgsql/archive</filename>:
 <screen>
@@ -392,7 +426,7 @@ PostgreSQL documentation
   <title>See Also</title>
 
   <simplelist type="inline">
-   <member><xref linkend="APP-PGBASEBACKUP"></member>
+   <member><xref linkend="app-pgbasebackup"></member>
   </simplelist>
  </refsect1>
 

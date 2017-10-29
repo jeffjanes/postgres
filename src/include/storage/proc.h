@@ -14,6 +14,7 @@
 #ifndef _PROC_H_
 #define _PROC_H_
 
+#include "access/clog.h"
 #include "access/xlogdefs.h"
 #include "lib/ilist.h"
 #include "storage/latch.h"
@@ -171,12 +172,23 @@ struct PGPROC
 
 	uint32		wait_event_info;	/* proc's wait information */
 
+	/* Support for group transaction status update. */
+	bool		clogGroupMember;	/* true, if member of clog group */
+	pg_atomic_uint32 clogGroupNext; /* next clog group member */
+	TransactionId clogGroupMemberXid;	/* transaction id of clog group member */
+	XidStatus	clogGroupMemberXidStatus;	/* transaction status of clog
+											 * group member */
+	int			clogGroupMemberPage;	/* clog page corresponding to
+										 * transaction id of clog group member */
+	XLogRecPtr	clogGroupMemberLsn; /* WAL location of commit record for clog
+									 * group member */
+
 	/* Per-backend LWLock.  Protects fields below (but not group fields). */
 	LWLock		backendLock;
 
 	/* Lock manager data, recording fast-path locks taken by this backend. */
 	uint64		fpLockBits;		/* lock modes held for each fast-path slot */
-	Oid			fpRelId[FP_LOCK_SLOTS_PER_BACKEND];		/* slots for rel oids */
+	Oid			fpRelId[FP_LOCK_SLOTS_PER_BACKEND]; /* slots for rel oids */
 	bool		fpVXIDLock;		/* are we holding a fast-path VXID lock? */
 	LocalTransactionId fpLocalTransactionId;	/* lxid for fast-path VXID
 												 * lock */
@@ -186,7 +198,7 @@ struct PGPROC
 	 * leader to get the LWLock protecting these fields.
 	 */
 	PGPROC	   *lockGroupLeader;	/* lock group leader, if I'm a member */
-	dlist_head	lockGroupMembers;		/* list of members, if I'm a leader */
+	dlist_head	lockGroupMembers;	/* list of members, if I'm a leader */
 	dlist_node	lockGroupLink;	/* my member link, if I'm a member */
 };
 
@@ -242,6 +254,8 @@ typedef struct PROC_HDR
 	PGPROC	   *bgworkerFreeProcs;
 	/* First pgproc waiting for group XID clear */
 	pg_atomic_uint32 procArrayGroupFirst;
+	/* First pgproc waiting for group transaction status update */
+	pg_atomic_uint32 clogGroupFirst;
 	/* WALWriter process's latch */
 	Latch	   *walwriterLatch;
 	/* Checkpointer process's latch */
@@ -313,4 +327,4 @@ extern PGPROC *AuxiliaryPidGetProc(int pid);
 extern void BecomeLockGroupLeader(void);
 extern bool BecomeLockGroupMember(PGPROC *leader, int pid);
 
-#endif   /* PROC_H */
+#endif							/* PROC_H */

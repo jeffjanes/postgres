@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern SubqueryScanState *ExecInitSubqueryScan(SubqueryScan *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecSubqueryScan(SubqueryScanState *node);
 extern void ExecEndSubqueryScan(SubqueryScanState *node);
 extern void ExecReScanSubqueryScan(SubqueryScanState *node);
 
-#endif   /* NODESUBQUERYSCAN_H */
+#endif							/* NODESUBQUERYSCAN_H */

@@ -32,7 +32,7 @@ sub dumpsyms
 sub extract_syms
 {
 	my ($symfile, $def) = @_;
-	open(my $f, '<', $symfile) || die "Could not open $symfile for $_\n";
+	open(my $f, '<', $symfile) || die "Could not open $symfile for $_: $!\n";
 	while (<$f>)
 	{
 
@@ -174,7 +174,7 @@ print "Generating $defname.DEF from directory $ARGV[0], platform $platform\n";
 
 my %def = ();
 
-while (<$ARGV[0]/*.obj>)  ## no critic (RequireGlobFunction);
+while (<$ARGV[0]/*.obj>)    ## no critic (RequireGlobFunction);
 {
 	my $objfile = $_;
 	my $symfile = $objfile;

@@ -32,6 +32,8 @@
 #include "utils/datum.h"
 #include "utils/rel.h"
 
+static void outChar(StringInfo str, char c);
+
 
 /*
  * Macros to simplify output of different kinds of fields.  Use these
@@ -52,6 +54,11 @@
 #define WRITE_UINT_FIELD(fldname) \
 	appendStringInfo(str, " :" CppAsString(fldname) " %u", node->fldname)
 
+/* Write an unsigned integer field (anything written with UINT64_FORMAT) */
+#define WRITE_UINT64_FIELD(fldname) \
+	appendStringInfo(str, " :" CppAsString(fldname) " " UINT64_FORMAT, \
+					 node->fldname)
+
 /* Write an OID field (don't hard-wire assumption that OID is same as uint) */
 #define WRITE_OID_FIELD(fldname) \
 	appendStringInfo(str, " :" CppAsString(fldname) " %u", node->fldname)
@@ -62,7 +69,8 @@
 
 /* Write a char field (ie, one ascii character) */
 #define WRITE_CHAR_FIELD(fldname) \
-	appendStringInfo(str, " :" CppAsString(fldname) " %c", node->fldname)
+	(appendStringInfo(str, " :" CppAsString(fldname) " "), \
+	 outChar(str, node->fldname))
 
 /* Write an enumerated-type field as an integer code */
 #define WRITE_ENUM_FIELD(fldname, enumtype) \
@@ -80,7 +88,7 @@
 
 /* Write a character-string (possibly NULL) field */
 #define WRITE_STRING_FIELD(fldname) \
-	(appendStringInfo(str, " :" CppAsString(fldname) " "), \
+	(appendStringInfoString(str, " :" CppAsString(fldname) " "), \
 	 outToken(str, node->fldname))
 
 /* Write a parse location field (actually same as INT case) */
@@ -89,12 +97,12 @@
 
 /* Write a Node field */
 #define WRITE_NODE_FIELD(fldname) \
-	(appendStringInfo(str, " :" CppAsString(fldname) " "), \
+	(appendStringInfoString(str, " :" CppAsString(fldname) " "), \
 	 outNode(str, node->fldname))
 
 /* Write a bitmapset field */
 #define WRITE_BITMAPSET_FIELD(fldname) \
-	(appendStringInfo(str, " :" CppAsString(fldname) " "), \
+	(appendStringInfoString(str, " :" CppAsString(fldname) " "), \
 	 outBitmapset(str, node->fldname))
 
 
@@ -138,6 +146,21 @@ outToken(StringInfo str, const char *s)
 			appendStringInfoChar(str, '\\');
 		appendStringInfoChar(str, *s++);
 	}
+}
+
+/*
+ * Convert one char.  Goes through outToken() so that special characters are
+ * escaped.
+ */
+static void
+outChar(StringInfo str, char c)
+{
+	char		in[2];
+
+	in[0] = c;
+	in[1] = '\0';
+
+	outToken(str, in);
 }
 
 static void
@@ -242,7 +265,7 @@ _outPlannedStmt(StringInfo str, const PlannedStmt *node)
 	WRITE_NODE_TYPE("PLANNEDSTMT");
 
 	WRITE_ENUM_FIELD(commandType, CmdType);
-	WRITE_UINT_FIELD(queryId);
+	WRITE_UINT64_FIELD(queryId);
 	WRITE_BOOL_FIELD(hasReturning);
 	WRITE_BOOL_FIELD(hasModifyingCTE);
 	WRITE_BOOL_FIELD(canSetTag);
@@ -253,6 +276,7 @@ _outPlannedStmt(StringInfo str, const PlannedStmt *node)
 	WRITE_NODE_FIELD(rtable);
 	WRITE_NODE_FIELD(resultRelations);
 	WRITE_NODE_FIELD(nonleafResultRelations);
+	WRITE_NODE_FIELD(rootResultRelations);
 	WRITE_NODE_FIELD(subplans);
 	WRITE_BITMAPSET_FIELD(rewindPlanIDs);
 	WRITE_NODE_FIELD(rowMarks);
@@ -350,6 +374,7 @@ _outModifyTable(StringInfo str, const ModifyTable *node)
 	WRITE_NODE_FIELD(partitioned_rels);
 	WRITE_NODE_FIELD(resultRelations);
 	WRITE_INT_FIELD(resultRelIndex);
+	WRITE_INT_FIELD(rootResultRelIndex);
 	WRITE_NODE_FIELD(plans);
 	WRITE_NODE_FIELD(withCheckOptionLists);
 	WRITE_NODE_FIELD(returningLists);
@@ -459,6 +484,7 @@ _outGather(StringInfo str, const Gather *node)
 	_outPlanInfo(str, (const Plan *) node);
 
 	WRITE_INT_FIELD(num_workers);
+	WRITE_INT_FIELD(rescan_param);
 	WRITE_BOOL_FIELD(single_copy);
 	WRITE_BOOL_FIELD(invisible);
 }
@@ -466,13 +492,14 @@ _outGather(StringInfo str, const Gather *node)
 static void
 _outGatherMerge(StringInfo str, const GatherMerge *node)
 {
-	int		i;
+	int			i;
 
 	WRITE_NODE_TYPE("GATHERMERGE");
 
 	_outPlanInfo(str, (const Plan *) node);
 
 	WRITE_INT_FIELD(num_workers);
+	WRITE_INT_FIELD(rescan_param);
 	WRITE_INT_FIELD(numCols);
 
 	appendStringInfoString(str, " :sortColIdx");
@@ -896,8 +923,6 @@ _outHash(StringInfo str, const Hash *node)
 	WRITE_OID_FIELD(skewTable);
 	WRITE_INT_FIELD(skewColumn);
 	WRITE_BOOL_FIELD(skewInherit);
-	WRITE_OID_FIELD(skewColType);
-	WRITE_INT_FIELD(skewColTypmod);
 }
 
 static void
@@ -1018,8 +1043,8 @@ _outTableFunc(StringInfo str, const TableFunc *node)
 {
 	WRITE_NODE_TYPE("TABLEFUNC");
 
-	WRITE_NODE_FIELD(ns_names);
 	WRITE_NODE_FIELD(ns_uris);
+	WRITE_NODE_FIELD(ns_names);
 	WRITE_NODE_FIELD(docexpr);
 	WRITE_NODE_FIELD(rowexpr);
 	WRITE_NODE_FIELD(colnames);
@@ -1374,11 +1399,10 @@ _outArrayCoerceExpr(StringInfo str, const ArrayCoerceExpr *node)
 	WRITE_NODE_TYPE("ARRAYCOERCEEXPR");
 
 	WRITE_NODE_FIELD(arg);
-	WRITE_OID_FIELD(elemfuncid);
+	WRITE_NODE_FIELD(elemexpr);
 	WRITE_OID_FIELD(resulttype);
 	WRITE_INT_FIELD(resulttypmod);
 	WRITE_OID_FIELD(resultcollid);
-	WRITE_BOOL_FIELD(isExplicit);
 	WRITE_ENUM_FIELD(coerceformat, CoercionForm);
 	WRITE_LOCATION_FIELD(location);
 }
@@ -1590,6 +1614,15 @@ _outCurrentOfExpr(StringInfo str, const CurrentOfExpr *node)
 	WRITE_UINT_FIELD(cvarno);
 	WRITE_STRING_FIELD(cursor_name);
 	WRITE_INT_FIELD(cursor_param);
+}
+
+static void
+_outNextValueExpr(StringInfo str, const NextValueExpr *node)
+{
+	WRITE_NODE_TYPE("NEXTVALUEEXPR");
+
+	WRITE_OID_FIELD(seqid);
+	WRITE_OID_FIELD(typeId);
 }
 
 static void
@@ -2145,6 +2178,7 @@ _outPlannerGlobal(StringInfo str, const PlannerGlobal *node)
 	WRITE_NODE_FIELD(finalrowmarks);
 	WRITE_NODE_FIELD(resultRelations);
 	WRITE_NODE_FIELD(nonleafResultRelations);
+	WRITE_NODE_FIELD(rootResultRelations);
 	WRITE_NODE_FIELD(relationOids);
 	WRITE_NODE_FIELD(invalItems);
 	WRITE_INT_FIELD(nParamExec);
@@ -2636,9 +2670,9 @@ _outCreateStatsStmt(StringInfo str, const CreateStatsStmt *node)
 	WRITE_NODE_TYPE("CREATESTATSSTMT");
 
 	WRITE_NODE_FIELD(defnames);
-	WRITE_NODE_FIELD(relation);
-	WRITE_NODE_FIELD(keys);
-	WRITE_NODE_FIELD(options);
+	WRITE_NODE_FIELD(stat_types);
+	WRITE_NODE_FIELD(exprs);
+	WRITE_NODE_FIELD(relations);
 	WRITE_BOOL_FIELD(if_not_exists);
 }
 
@@ -2766,6 +2800,7 @@ _outColumnDef(StringInfo str, const ColumnDef *node)
 	WRITE_BOOL_FIELD(is_local);
 	WRITE_BOOL_FIELD(is_not_null);
 	WRITE_BOOL_FIELD(is_from_type);
+	WRITE_BOOL_FIELD(is_from_parent);
 	WRITE_CHAR_FIELD(storage);
 	WRITE_NODE_FIELD(raw_default);
 	WRITE_NODE_FIELD(cooked_default);
@@ -3045,6 +3080,7 @@ _outRangeTblEntry(StringInfo str, const RangeTblEntry *node)
 			break;
 		case RTE_NAMEDTUPLESTORE:
 			WRITE_STRING_FIELD(enrname);
+			WRITE_FLOAT_FIELD(enrtuples, "%.0f");
 			WRITE_OID_FIELD(relid);
 			WRITE_NODE_FIELD(coltypes);
 			WRITE_NODE_FIELD(coltypmods);
@@ -3514,16 +3550,6 @@ _outForeignKeyCacheInfo(StringInfo str, const ForeignKeyCacheInfo *node)
 }
 
 static void
-_outPartitionSpec(StringInfo str, const PartitionSpec *node)
-{
-	WRITE_NODE_TYPE("PARTITIONBY");
-
-	WRITE_STRING_FIELD(strategy);
-	WRITE_NODE_FIELD(partParams);
-	WRITE_LOCATION_FIELD(location);
-}
-
-static void
 _outPartitionElem(StringInfo str, const PartitionElem *node)
 {
 	WRITE_NODE_TYPE("PARTITIONELEM");
@@ -3536,23 +3562,36 @@ _outPartitionElem(StringInfo str, const PartitionElem *node)
 }
 
 static void
+_outPartitionSpec(StringInfo str, const PartitionSpec *node)
+{
+	WRITE_NODE_TYPE("PARTITIONSPEC");
+
+	WRITE_STRING_FIELD(strategy);
+	WRITE_NODE_FIELD(partParams);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
 _outPartitionBoundSpec(StringInfo str, const PartitionBoundSpec *node)
 {
-	WRITE_NODE_TYPE("PARTITIONBOUND");
+	WRITE_NODE_TYPE("PARTITIONBOUNDSPEC");
 
 	WRITE_CHAR_FIELD(strategy);
+	WRITE_BOOL_FIELD(is_default);
 	WRITE_NODE_FIELD(listdatums);
 	WRITE_NODE_FIELD(lowerdatums);
 	WRITE_NODE_FIELD(upperdatums);
+	WRITE_LOCATION_FIELD(location);
 }
 
 static void
 _outPartitionRangeDatum(StringInfo str, const PartitionRangeDatum *node)
 {
-	WRITE_NODE_TYPE("PARTRANGEDATUM");
+	WRITE_NODE_TYPE("PARTITIONRANGEDATUM");
 
-	WRITE_BOOL_FIELD(infinite);
+	WRITE_ENUM_FIELD(kind, PartitionRangeDatumKind);
 	WRITE_NODE_FIELD(value);
+	WRITE_LOCATION_FIELD(location);
 }
 
 /*
@@ -3848,6 +3887,9 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_CurrentOfExpr:
 				_outCurrentOfExpr(str, obj);
+				break;
+			case T_NextValueExpr:
+				_outNextValueExpr(str, obj);
 				break;
 			case T_InferenceElem:
 				_outInferenceElem(str, obj);
@@ -4182,11 +4224,11 @@ outNode(StringInfo str, const void *obj)
 			case T_TriggerTransition:
 				_outTriggerTransition(str, obj);
 				break;
-			case T_PartitionSpec:
-				_outPartitionSpec(str, obj);
-				break;
 			case T_PartitionElem:
 				_outPartitionElem(str, obj);
+				break;
+			case T_PartitionSpec:
+				_outPartitionSpec(str, obj);
 				break;
 			case T_PartitionBoundSpec:
 				_outPartitionBoundSpec(str, obj);

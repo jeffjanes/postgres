@@ -112,7 +112,7 @@ spgGetCache(Relation index)
 		 * tupdesc.  We pass this to the opclass config function so that
 		 * polymorphic opclasses are possible.
 		 */
-		atttype = index->rd_att->attrs[0]->atttypid;
+		atttype = TupleDescAttr(index->rd_att, 0)->atttypid;
 
 		/* Call the config function to get config info for the opclass */
 		in.attType = atttype;
@@ -705,7 +705,7 @@ spgFormInnerTuple(SpGistState *state, bool hasPrefix, Datum prefix,
 				 errmsg("SP-GiST inner tuple size %zu exceeds maximum %zu",
 						(Size) size,
 						SPGIST_PAGE_CAPACITY - sizeof(ItemIdData)),
-			errhint("Values larger than a buffer page cannot be indexed.")));
+				 errhint("Values larger than a buffer page cannot be indexed.")));
 
 	/*
 	 * Check for overflow of header fields --- probably can't fail if the
@@ -848,7 +848,7 @@ SpGistPageAddNewItem(SpGistState *state, Page page, Item item, Size size,
 			for (; i <= maxoff; i++)
 			{
 				SpGistDeadTuple it = (SpGistDeadTuple) PageGetItem(page,
-													 PageGetItemId(page, i));
+																   PageGetItemId(page, i));
 
 				if (it->tupstate == SPGIST_PLACEHOLDER)
 				{

@@ -212,9 +212,12 @@ typedef enum BuiltinTrancheIds
 	LWTRANCHE_LOCK_MANAGER,
 	LWTRANCHE_PREDICATE_LOCK_MANAGER,
 	LWTRANCHE_PARALLEL_QUERY_DSA,
+	LWTRANCHE_SESSION_DSA,
+	LWTRANCHE_SESSION_RECORD_TABLE,
+	LWTRANCHE_SESSION_TYPMOD_TABLE,
 	LWTRANCHE_TBM,
 	LWTRANCHE_FIRST_USER_DEFINED
-}	BuiltinTrancheIds;
+}			BuiltinTrancheIds;
 
 /*
  * Prior to PostgreSQL 9.4, we used an enum type called LWLockId to refer
@@ -223,4 +226,4 @@ typedef enum BuiltinTrancheIds
  */
 typedef LWLock *LWLockId;
 
-#endif   /* LWLOCK_H */
+#endif							/* LWLOCK_H */

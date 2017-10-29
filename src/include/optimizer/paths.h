@@ -27,24 +27,24 @@ extern int	min_parallel_index_scan_size;
 
 /* Hook for plugins to get control in set_rel_pathlist() */
 typedef void (*set_rel_pathlist_hook_type) (PlannerInfo *root,
-														RelOptInfo *rel,
-														Index rti,
-														RangeTblEntry *rte);
+											RelOptInfo *rel,
+											Index rti,
+											RangeTblEntry *rte);
 extern PGDLLIMPORT set_rel_pathlist_hook_type set_rel_pathlist_hook;
 
 /* Hook for plugins to get control in add_paths_to_joinrel() */
 typedef void (*set_join_pathlist_hook_type) (PlannerInfo *root,
-														 RelOptInfo *joinrel,
-														 RelOptInfo *outerrel,
-														 RelOptInfo *innerrel,
-														 JoinType jointype,
-												   JoinPathExtraData *extra);
+											 RelOptInfo *joinrel,
+											 RelOptInfo *outerrel,
+											 RelOptInfo *innerrel,
+											 JoinType jointype,
+											 JoinPathExtraData *extra);
 extern PGDLLIMPORT set_join_pathlist_hook_type set_join_pathlist_hook;
 
 /* Hook for plugins to replace standard_join_search() */
 typedef RelOptInfo *(*join_search_hook_type) (PlannerInfo *root,
-														  int levels_needed,
-														  List *initial_rels);
+											  int levels_needed,
+											  List *initial_rels);
 extern PGDLLIMPORT join_search_hook_type join_search_hook;
 
 
@@ -57,7 +57,9 @@ extern void generate_gather_paths(PlannerInfo *root, RelOptInfo *rel);
 extern int compute_parallel_worker(RelOptInfo *rel, double heap_pages,
 						double index_pages);
 extern void create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
-										Path *bitmapqual);
+							Path *bitmapqual);
+extern void generate_partition_wise_join_paths(PlannerInfo *root,
+								   RelOptInfo *rel);
 
 #ifdef OPTIMIZER_DEBUG
 extern void debug_print_rel(PlannerInfo *root, RelOptInfo *rel);
@@ -111,18 +113,22 @@ extern bool have_join_order_restriction(PlannerInfo *root,
 							RelOptInfo *rel1, RelOptInfo *rel2);
 extern bool have_dangerous_phv(PlannerInfo *root,
 				   Relids outer_relids, Relids inner_params);
+extern void mark_dummy_rel(RelOptInfo *rel);
+extern bool have_partkey_equi_join(RelOptInfo *rel1, RelOptInfo *rel2,
+					   JoinType jointype, List *restrictlist);
 
 /*
  * equivclass.c
  *	  routines for managing EquivalenceClasses
  */
 typedef bool (*ec_matches_callback_type) (PlannerInfo *root,
-													  RelOptInfo *rel,
-													  EquivalenceClass *ec,
-													  EquivalenceMember *em,
-													  void *arg);
+										  RelOptInfo *rel,
+										  EquivalenceClass *ec,
+										  EquivalenceMember *em,
+										  void *arg);
 
-extern bool process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
+extern bool process_equivalence(PlannerInfo *root,
+					RestrictInfo **p_restrictinfo,
 					bool below_outer_join);
 extern Expr *canonicalize_ec_expression(Expr *expr,
 						   Oid req_type, Oid req_collation);
@@ -228,4 +234,4 @@ extern PathKey *make_canonical_pathkey(PlannerInfo *root,
 					   EquivalenceClass *eclass, Oid opfamily,
 					   int strategy, bool nulls_first);
 
-#endif   /* PATHS_H */
+#endif							/* PATHS_H */

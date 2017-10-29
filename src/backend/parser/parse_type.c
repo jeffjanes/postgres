@@ -80,8 +80,8 @@ LookupTypeName(ParseState *pstate, const TypeName *typeName,
 			case 1:
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-				errmsg("improper %%TYPE reference (too few dotted names): %s",
-					   NameListToString(typeName->names)),
+						 errmsg("improper %%TYPE reference (too few dotted names): %s",
+								NameListToString(typeName->names)),
 						 parser_errposition(pstate, typeName->location)));
 				break;
 			case 2:
@@ -124,8 +124,8 @@ LookupTypeName(ParseState *pstate, const TypeName *typeName,
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_COLUMN),
-					errmsg("column \"%s\" of relation \"%s\" does not exist",
-						   field, rel->relname),
+						 errmsg("column \"%s\" of relation \"%s\" does not exist",
+								field, rel->relname),
 						 parser_errposition(pstate, typeName->location)));
 		}
 		else
@@ -334,8 +334,8 @@ typenameTypeMod(ParseState *pstate, const TypeName *typeName, Type typ)
 	if (!((Form_pg_type) GETSTRUCT(typ))->typisdefined)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
-			errmsg("type modifier cannot be specified for shell type \"%s\"",
-				   TypeNameToString(typeName)),
+				 errmsg("type modifier cannot be specified for shell type \"%s\"",
+						TypeNameToString(typeName)),
 				 parser_errposition(pstate, typeName->location)));
 
 	typmodin = ((Form_pg_type) GETSTRUCT(typ))->typmodin;
@@ -385,7 +385,7 @@ typenameTypeMod(ParseState *pstate, const TypeName *typeName, Type typ)
 		if (!cstr)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-			errmsg("type modifiers must be simple constants or identifiers"),
+					 errmsg("type modifiers must be simple constants or identifiers"),
 					 parser_errposition(pstate, typeName->location)));
 		datums[n++] = CStringGetDatum(cstr);
 	}
@@ -641,7 +641,10 @@ stringTypeDatum(Type tp, char *string, int32 atttypmod)
 	return OidInputFunctionCall(typinput, string, typioparam, atttypmod);
 }
 
-/* given a typeid, return the type's typrelid (associated relation, if any) */
+/*
+ * Given a typeid, return the type's typrelid (associated relation), if any.
+ * Returns InvalidOid if type is not a composite type.
+ */
 Oid
 typeidTypeRelid(Oid type_id)
 {
@@ -652,8 +655,39 @@ typeidTypeRelid(Oid type_id)
 	typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_id));
 	if (!HeapTupleIsValid(typeTuple))
 		elog(ERROR, "cache lookup failed for type %u", type_id);
-
 	type = (Form_pg_type) GETSTRUCT(typeTuple);
+	result = type->typrelid;
+	ReleaseSysCache(typeTuple);
+	return result;
+}
+
+/*
+ * Given a typeid, return the type's typrelid (associated relation), if any.
+ * Returns InvalidOid if type is not a composite type or a domain over one.
+ * This is the same as typeidTypeRelid(getBaseType(type_id)), but faster.
+ */
+Oid
+typeOrDomainTypeRelid(Oid type_id)
+{
+	HeapTuple	typeTuple;
+	Form_pg_type type;
+	Oid			result;
+
+	for (;;)
+	{
+		typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_id));
+		if (!HeapTupleIsValid(typeTuple))
+			elog(ERROR, "cache lookup failed for type %u", type_id);
+		type = (Form_pg_type) GETSTRUCT(typeTuple);
+		if (type->typtype != TYPTYPE_DOMAIN)
+		{
+			/* Not a domain, so done looking through domains */
+			break;
+		}
+		/* It is a domain, so examine the base type instead */
+		type_id = type->typbasetype;
+		ReleaseSysCache(typeTuple);
+	}
 	result = type->typrelid;
 	ReleaseSysCache(typeTuple);
 	return result;

@@ -102,7 +102,7 @@ CreateExecutorState(void)
 	 * Initialize all fields of the Executor State structure
 	 */
 	estate->es_direction = ForwardScanDirection;
-	estate->es_snapshot = InvalidSnapshot;		/* caller must initialize this */
+	estate->es_snapshot = InvalidSnapshot;	/* caller must initialize this */
 	estate->es_crosscheck_snapshot = InvalidSnapshot;	/* no crosscheck */
 	estate->es_range_table = NIL;
 	estate->es_plannedstmt = NULL;
@@ -114,6 +114,11 @@ CreateExecutorState(void)
 	estate->es_result_relations = NULL;
 	estate->es_num_result_relations = 0;
 	estate->es_result_relation_info = NULL;
+
+	estate->es_root_result_relations = NULL;
+	estate->es_num_root_result_relations = 0;
+
+	estate->es_leaf_result_relations = NIL;
 
 	estate->es_trig_target_relations = NIL;
 	estate->es_trig_tuple_slot = NULL;
@@ -150,6 +155,8 @@ CreateExecutorState(void)
 	estate->es_epqTupleSet = NULL;
 	estate->es_epqScanDone = NULL;
 	estate->es_sourceText = NULL;
+
+	estate->es_use_parallel_mode = false;
 
 	/*
 	 * Return the executor state structure
@@ -808,7 +815,7 @@ ShutdownExprContext(ExprContext *econtext, bool isCommit)
 	{
 		econtext->ecxt_callbacks = ecxt_callback->next;
 		if (isCommit)
-			(*ecxt_callback->function) (ecxt_callback->arg);
+			ecxt_callback->function(ecxt_callback->arg);
 		pfree(ecxt_callback);
 	}
 
@@ -826,14 +833,14 @@ void
 ExecLockNonLeafAppendTables(List *partitioned_rels, EState *estate)
 {
 	PlannedStmt *stmt = estate->es_plannedstmt;
-	ListCell	*lc;
+	ListCell   *lc;
 
 	foreach(lc, partitioned_rels)
 	{
 		ListCell   *l;
-		Index	rti = lfirst_int(lc);
-		bool	is_result_rel = false;
-		Oid		relid = getrelid(rti, estate->es_range_table);
+		Index		rti = lfirst_int(lc);
+		bool		is_result_rel = false;
+		Oid			relid = getrelid(rti, estate->es_range_table);
 
 		/* If this is a result relation, already locked in InitPlan */
 		foreach(l, stmt->nonleafResultRelations)
@@ -912,9 +919,11 @@ GetAttributeByName(HeapTupleHeader tuple, const char *attname, bool *isNull)
 	attrno = InvalidAttrNumber;
 	for (i = 0; i < tupDesc->natts; i++)
 	{
-		if (namestrcmp(&(tupDesc->attrs[i]->attname), attname) == 0)
+		Form_pg_attribute att = TupleDescAttr(tupDesc, i);
+
+		if (namestrcmp(&(att->attname), attname) == 0)
 		{
-			attrno = tupDesc->attrs[i]->attnum;
+			attrno = att->attnum;
 			break;
 		}
 	}

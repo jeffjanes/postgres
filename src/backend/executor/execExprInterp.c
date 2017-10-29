@@ -34,10 +34,8 @@
  *
  * For very simple instructions the overhead of the full interpreter
  * "startup", as minimal as it is, is noticeable.  Therefore
- * ExecReadyInterpretedExpr will choose to implement simple scalar Var
- * and Const expressions using special fast-path routines (ExecJust*).
- * Benchmarking shows anything more complex than those may as well use the
- * "full interpreter".
+ * ExecReadyInterpretedExpr will choose to implement certain simple
+ * opcode patterns using special fast-path routines (ExecJust*).
  *
  * Complex or uncommon instructions are not implemented in-line in
  * ExecInterpExpr(), rather we call out to a helper function appearing later
@@ -83,7 +81,7 @@
  */
 #ifdef HAVE_COMPUTED_GOTO
 #define EEO_USE_COMPUTED_GOTO
-#endif   /* HAVE_COMPUTED_GOTO */
+#endif							/* HAVE_COMPUTED_GOTO */
 
 /*
  * Macros for opcode dispatch.
@@ -112,7 +110,7 @@ static const void **dispatch_table = NULL;
 #define EEO_DISPATCH()		goto starteval
 #define EEO_OPCODE(opcode)	(opcode)
 
-#endif   /* EEO_USE_COMPUTED_GOTO */
+#endif							/* EEO_USE_COMPUTED_GOTO */
 
 #define EEO_NEXT() \
 	do { \
@@ -149,6 +147,7 @@ static Datum ExecJustConst(ExprState *state, ExprContext *econtext, bool *isnull
 static Datum ExecJustAssignInnerVar(ExprState *state, ExprContext *econtext, bool *isnull);
 static Datum ExecJustAssignOuterVar(ExprState *state, ExprContext *econtext, bool *isnull);
 static Datum ExecJustAssignScanVar(ExprState *state, ExprContext *econtext, bool *isnull);
+static Datum ExecJustApplyFuncToCase(ExprState *state, ExprContext *econtext, bool *isnull);
 
 
 /*
@@ -184,10 +183,8 @@ ExecReadyInterpretedExpr(ExprState *state)
 
 	/*
 	 * Select fast-path evalfuncs for very simple expressions.  "Starting up"
-	 * the full interpreter is a measurable overhead for these.  Plain Vars
-	 * and Const seem to be the only ones where the intrinsic cost is small
-	 * enough that the overhead of ExecInterpExpr matters.  For more complex
-	 * expressions it's cheaper to use ExecInterpExpr always.
+	 * the full interpreter is a measurable overhead for these, and these
+	 * patterns occur often enough to be worth optimizing.
 	 */
 	if (state->steps_len == 3)
 	{
@@ -230,6 +227,13 @@ ExecReadyInterpretedExpr(ExprState *state)
 			state->evalfunc = ExecJustAssignScanVar;
 			return;
 		}
+		else if (step0 == EEOP_CASE_TESTVAL &&
+				 step1 == EEOP_FUNCEXPR_STRICT &&
+				 state->steps[0].d.casetest.value)
+		{
+			state->evalfunc = ExecJustApplyFuncToCase;
+			return;
+		}
 	}
 	else if (state->steps_len == 2 &&
 			 state->steps[0].opcode == EEOP_CONST)
@@ -256,7 +260,7 @@ ExecReadyInterpretedExpr(ExprState *state)
 
 		state->flags |= EEO_FLAG_DIRECT_THREADED;
 	}
-#endif   /* EEO_USE_COMPUTED_GOTO */
+#endif							/* EEO_USE_COMPUTED_GOTO */
 
 	state->evalfunc = ExecInterpExpr;
 }
@@ -373,7 +377,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		return PointerGetDatum(dispatch_table);
 #else
 	Assert(state != NULL);
-#endif   /* EEO_USE_COMPUTED_GOTO */
+#endif							/* EEO_USE_COMPUTED_GOTO */
 
 	/* setup state */
 	op = state->steps;
@@ -501,15 +505,17 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_INNER_SYSVAR)
 		{
 			int			attnum = op->d.var.attnum;
+			Datum		d;
 
 			/* these asserts must match defenses in slot_getattr */
 			Assert(innerslot->tts_tuple != NULL);
 			Assert(innerslot->tts_tuple != &(innerslot->tts_minhdr));
-			/* heap_getsysattr has sufficient defenses against bad attnums */
 
-			*op->resvalue = heap_getsysattr(innerslot->tts_tuple, attnum,
-											innerslot->tts_tupleDescriptor,
-											op->resnull);
+			/* heap_getsysattr has sufficient defenses against bad attnums */
+			d = heap_getsysattr(innerslot->tts_tuple, attnum,
+								innerslot->tts_tupleDescriptor,
+								op->resnull);
+			*op->resvalue = d;
 
 			EEO_NEXT();
 		}
@@ -517,15 +523,17 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_OUTER_SYSVAR)
 		{
 			int			attnum = op->d.var.attnum;
+			Datum		d;
 
 			/* these asserts must match defenses in slot_getattr */
 			Assert(outerslot->tts_tuple != NULL);
 			Assert(outerslot->tts_tuple != &(outerslot->tts_minhdr));
 
 			/* heap_getsysattr has sufficient defenses against bad attnums */
-			*op->resvalue = heap_getsysattr(outerslot->tts_tuple, attnum,
-											outerslot->tts_tupleDescriptor,
-											op->resnull);
+			d = heap_getsysattr(outerslot->tts_tuple, attnum,
+								outerslot->tts_tupleDescriptor,
+								op->resnull);
+			*op->resvalue = d;
 
 			EEO_NEXT();
 		}
@@ -533,15 +541,17 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_SCAN_SYSVAR)
 		{
 			int			attnum = op->d.var.attnum;
+			Datum		d;
 
 			/* these asserts must match defenses in slot_getattr */
 			Assert(scanslot->tts_tuple != NULL);
 			Assert(scanslot->tts_tuple != &(scanslot->tts_minhdr));
-			/* heap_getsysattr has sufficient defenses against bad attnums */
 
-			*op->resvalue = heap_getsysattr(scanslot->tts_tuple, attnum,
-											scanslot->tts_tupleDescriptor,
-											op->resnull);
+			/* heap_getsysattr has sufficient defenses against bad attnums */
+			d = heap_getsysattr(scanslot->tts_tuple, attnum,
+								scanslot->tts_tupleDescriptor,
+								op->resnull);
+			*op->resvalue = d;
 
 			EEO_NEXT();
 		}
@@ -641,13 +651,22 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		 * As both STRICT checks and function-usage are noticeable performance
 		 * wise, and function calls are a very hot-path (they also back
 		 * operators!), it's worth having so many separate opcodes.
+		 *
+		 * Note: the reason for using a temporary variable "d", here and in
+		 * other places, is that some compilers think "*op->resvalue = f();"
+		 * requires them to evaluate op->resvalue into a register before
+		 * calling f(), just in case f() is able to modify op->resvalue
+		 * somehow.  The extra line of code can save a useless register spill
+		 * and reload across the function call.
 		 */
 		EEO_CASE(EEOP_FUNCEXPR)
 		{
 			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			Datum		d;
 
 			fcinfo->isnull = false;
-			*op->resvalue = (op->d.func.fn_addr) (fcinfo);
+			d = op->d.func.fn_addr(fcinfo);
+			*op->resvalue = d;
 			*op->resnull = fcinfo->isnull;
 
 			EEO_NEXT();
@@ -658,6 +677,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
 			bool	   *argnull = fcinfo->argnull;
 			int			argno;
+			Datum		d;
 
 			/* strict function, so check for NULL args */
 			for (argno = 0; argno < op->d.func.nargs; argno++)
@@ -669,7 +689,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				}
 			}
 			fcinfo->isnull = false;
-			*op->resvalue = (op->d.func.fn_addr) (fcinfo);
+			d = op->d.func.fn_addr(fcinfo);
+			*op->resvalue = d;
 			*op->resnull = fcinfo->isnull;
 
 	strictfail:
@@ -680,11 +701,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
 			PgStat_FunctionCallUsage fcusage;
+			Datum		d;
 
 			pgstat_init_function_usage(fcinfo, &fcusage);
 
 			fcinfo->isnull = false;
-			*op->resvalue = (op->d.func.fn_addr) (fcinfo);
+			d = op->d.func.fn_addr(fcinfo);
+			*op->resvalue = d;
 			*op->resnull = fcinfo->isnull;
 
 			pgstat_end_function_usage(&fcusage, true);
@@ -698,6 +721,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			PgStat_FunctionCallUsage fcusage;
 			bool	   *argnull = fcinfo->argnull;
 			int			argno;
+			Datum		d;
 
 			/* strict function, so check for NULL args */
 			for (argno = 0; argno < op->d.func.nargs; argno++)
@@ -712,7 +736,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			pgstat_init_function_usage(fcinfo, &fcusage);
 
 			fcinfo->isnull = false;
-			*op->resvalue = (op->d.func.fn_addr) (fcinfo);
+			d = op->d.func.fn_addr(fcinfo);
+			*op->resvalue = d;
 			*op->resnull = fcinfo->isnull;
 
 			pgstat_end_function_usage(&fcusage, true);
@@ -1113,6 +1138,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			if (!op->d.iocoerce.finfo_in->fn_strict || str != NULL)
 			{
 				FunctionCallInfo fcinfo_in;
+				Datum		d;
 
 				fcinfo_in = op->d.iocoerce.fcinfo_data_in;
 				fcinfo_in->arg[0] = PointerGetDatum(str);
@@ -1120,7 +1146,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				/* second and third arguments are already set up */
 
 				fcinfo_in->isnull = false;
-				*op->resvalue = FunctionCallInvoke(fcinfo_in);
+				d = FunctionCallInvoke(fcinfo_in);
+				*op->resvalue = d;
 
 				/* Should get null result if and only if str is NULL */
 				if (str == NULL)
@@ -1170,7 +1197,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				Datum		eqresult;
 
 				fcinfo->isnull = false;
-				eqresult = (op->d.func.fn_addr) (fcinfo);
+				eqresult = op->d.func.fn_addr(fcinfo);
 				/* Must invert result of "="; safe to do even if null */
 				*op->resvalue = BoolGetDatum(!DatumGetBool(eqresult));
 				*op->resnull = fcinfo->isnull;
@@ -1192,7 +1219,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				Datum		result;
 
 				fcinfo->isnull = false;
-				result = (op->d.func.fn_addr) (fcinfo);
+				result = op->d.func.fn_addr(fcinfo);
 
 				/* if the arguments are equal return null */
 				if (!fcinfo->isnull && DatumGetBool(result))
@@ -1232,21 +1259,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_NEXTVALUEEXPR)
 		{
-			switch (op->d.nextvalueexpr.seqtypid)
-			{
-				case INT2OID:
-					*op->resvalue = Int16GetDatum((int16) nextval_internal(op->d.nextvalueexpr.seqid, false));
-					break;
-				case INT4OID:
-					*op->resvalue = Int32GetDatum((int32) nextval_internal(op->d.nextvalueexpr.seqid, false));
-					break;
-				case INT8OID:
-					*op->resvalue = Int64GetDatum((int64) nextval_internal(op->d.nextvalueexpr.seqid, false));
-					break;
-				default:
-					elog(ERROR, "unsupported sequence type %u", op->d.nextvalueexpr.seqtypid);
-			}
-			*op->resnull = false;
+			/*
+			 * Doesn't seem worthwhile to have an inline implementation
+			 * efficiency-wise.
+			 */
+			ExecEvalNextValueExpr(state, op);
 
 			EEO_NEXT();
 		}
@@ -1262,7 +1279,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ARRAYCOERCE)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalArrayCoerce(state, op);
+			ExecEvalArrayCoerce(state, op, econtext);
 
 			EEO_NEXT();
 		}
@@ -1278,6 +1295,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ROWCOMPARE_STEP)
 		{
 			FunctionCallInfo fcinfo = op->d.rowcompare_step.fcinfo_data;
+			Datum		d;
 
 			/* force NULL result if strict fn and NULL input */
 			if (op->d.rowcompare_step.finfo->fn_strict &&
@@ -1289,7 +1307,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 			/* Apply comparison function */
 			fcinfo->isnull = false;
-			*op->resvalue = (op->d.rowcompare_step.fn_addr) (fcinfo);
+			d = op->d.rowcompare_step.fn_addr(fcinfo);
+			*op->resvalue = d;
 
 			/* force NULL result if NULL function result */
 			if (fcinfo->isnull)
@@ -1559,11 +1578,11 @@ CheckVarSlotCompatibility(TupleTableSlot *slot, int attnum, Oid vartype)
 		TupleDesc	slot_tupdesc = slot->tts_tupleDescriptor;
 		Form_pg_attribute attr;
 
-		if (attnum > slot_tupdesc->natts)		/* should never happen */
+		if (attnum > slot_tupdesc->natts)	/* should never happen */
 			elog(ERROR, "attribute number %d exceeds number of columns %d",
 				 attnum, slot_tupdesc->natts);
 
-		attr = slot_tupdesc->attrs[attnum - 1];
+		attr = TupleDescAttr(slot_tupdesc, attnum - 1);
 
 		if (attr->attisdropped)
 			ereport(ERROR,
@@ -1796,6 +1815,43 @@ ExecJustAssignScanVar(ExprState *state, ExprContext *econtext, bool *isnull)
 	return 0;
 }
 
+/* Evaluate CASE_TESTVAL and apply a strict function to it */
+static Datum
+ExecJustApplyFuncToCase(ExprState *state, ExprContext *econtext, bool *isnull)
+{
+	ExprEvalStep *op = &state->steps[0];
+	FunctionCallInfo fcinfo;
+	bool	   *argnull;
+	int			argno;
+	Datum		d;
+
+	/*
+	 * XXX with some redesign of the CaseTestExpr mechanism, maybe we could
+	 * get rid of this data shuffling?
+	 */
+	*op->resvalue = *op->d.casetest.value;
+	*op->resnull = *op->d.casetest.isnull;
+
+	op++;
+
+	fcinfo = op->d.func.fcinfo_data;
+	argnull = fcinfo->argnull;
+
+	/* strict function, so check for NULL args */
+	for (argno = 0; argno < op->d.func.nargs; argno++)
+	{
+		if (argnull[argno])
+		{
+			*isnull = true;
+			return (Datum) 0;
+		}
+	}
+	fcinfo->isnull = false;
+	d = op->d.func.fn_addr(fcinfo);
+	*isnull = fcinfo->isnull;
+	return d;
+}
+
 
 /*
  * Do one-time initialization of interpretation machinery.
@@ -1888,7 +1944,7 @@ ExecEvalParamExtern(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 
 		/* give hook a chance in case parameter is dynamic */
 		if (!OidIsValid(prm->ptype) && paramInfo->paramFetch != NULL)
-			(*paramInfo->paramFetch) (paramInfo, paramId);
+			paramInfo->paramFetch(paramInfo, paramId);
 
 		if (likely(OidIsValid(prm->ptype)))
 		{
@@ -1986,7 +2042,33 @@ ExecEvalCurrentOfExpr(ExprState *state, ExprEvalStep *op)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		   errmsg("WHERE CURRENT OF is not supported for this table type")));
+			 errmsg("WHERE CURRENT OF is not supported for this table type")));
+}
+
+/*
+ * Evaluate NextValueExpr.
+ */
+void
+ExecEvalNextValueExpr(ExprState *state, ExprEvalStep *op)
+{
+	int64		newval = nextval_internal(op->d.nextvalueexpr.seqid, false);
+
+	switch (op->d.nextvalueexpr.seqtypid)
+	{
+		case INT2OID:
+			*op->resvalue = Int16GetDatum((int16) newval);
+			break;
+		case INT4OID:
+			*op->resvalue = Int32GetDatum((int32) newval);
+			break;
+		case INT8OID:
+			*op->resvalue = Int64GetDatum((int64) newval);
+			break;
+		default:
+			elog(ERROR, "unsupported sequence type %u",
+				 op->d.nextvalueexpr.seqtypid);
+	}
+	*op->resnull = false;
 }
 
 /*
@@ -2065,7 +2147,7 @@ ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
 	for (att = 1; att <= tupDesc->natts; att++)
 	{
 		/* ignore dropped columns */
-		if (tupDesc->attrs[att - 1]->attisdropped)
+		if (TupleDescAttr(tupDesc, att - 1)->attisdropped)
 			continue;
 		if (heap_attisnull(&tmptup, att))
 		{
@@ -2114,14 +2196,6 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 		/* Elements are presumably of scalar type */
 		Datum	   *dvalues = op->d.arrayexpr.elemvalues;
 		bool	   *dnulls = op->d.arrayexpr.elemnulls;
-
-		/* Shouldn't happen here, but if length is 0, return empty array */
-		if (nelems == 0)
-		{
-			*op->resvalue =
-				PointerGetDatum(construct_empty_array(element_type));
-			return;
-		}
 
 		/* setup for 1-D array of the given length */
 		ndims = 1;
@@ -2187,7 +2261,7 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 						(errcode(ERRCODE_DATATYPE_MISMATCH),
 						 errmsg("cannot merge incompatible arrays"),
 						 errdetail("Array with element type %s cannot be "
-						 "included in ARRAY construct with element type %s.",
+								   "included in ARRAY construct with element type %s.",
 								   format_type_be(ARR_ELEMTYPE(array)),
 								   format_type_be(element_type))));
 
@@ -2207,8 +2281,8 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 				if (ndims <= 0 || ndims > MAXDIM)
 					ereport(ERROR,
 							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-						  errmsg("number of array dimensions (%d) exceeds " \
-								 "the maximum allowed (%d)", ndims, MAXDIM)));
+							 errmsg("number of array dimensions (%d) exceeds " \
+									"the maximum allowed (%d)", ndims, MAXDIM)));
 
 				elem_dims = (int *) palloc(elem_ndims * sizeof(int));
 				memcpy(elem_dims, ARR_DIMS(array), elem_ndims * sizeof(int));
@@ -2312,11 +2386,9 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
  * Source array is in step's result variable.
  */
 void
-ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op)
+ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 {
-	ArrayCoerceExpr *acoerce = op->d.arraycoerce.coerceexpr;
 	Datum		arraydatum;
-	FunctionCallInfoData locfcinfo;
 
 	/* NULL array -> NULL result */
 	if (*op->resnull)
@@ -2328,7 +2400,7 @@ ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op)
 	 * If it's binary-compatible, modify the element type in the array header,
 	 * but otherwise leave the array as we received it.
 	 */
-	if (!OidIsValid(acoerce->elemfuncid))
+	if (op->d.arraycoerce.elemexprstate == NULL)
 	{
 		/* Detoast input array if necessary, and copy in any case */
 		ArrayType  *array = DatumGetArrayTypePCopy(arraydatum);
@@ -2339,23 +2411,12 @@ ExecEvalArrayCoerce(ExprState *state, ExprEvalStep *op)
 	}
 
 	/*
-	 * Use array_map to apply the function to each array element.
-	 *
-	 * We pass on the desttypmod and isExplicit flags whether or not the
-	 * function wants them.
-	 *
-	 * Note: coercion functions are assumed to not use collation.
+	 * Use array_map to apply the sub-expression to each array element.
 	 */
-	InitFunctionCallInfoData(locfcinfo, op->d.arraycoerce.elemfunc, 3,
-							 InvalidOid, NULL, NULL);
-	locfcinfo.arg[0] = arraydatum;
-	locfcinfo.arg[1] = Int32GetDatum(acoerce->resulttypmod);
-	locfcinfo.arg[2] = BoolGetDatum(acoerce->isExplicit);
-	locfcinfo.argnull[0] = false;
-	locfcinfo.argnull[1] = false;
-	locfcinfo.argnull[2] = false;
-
-	*op->resvalue = array_map(&locfcinfo, op->d.arraycoerce.resultelemtype,
+	*op->resvalue = array_map(arraydatum,
+							  op->d.arraycoerce.elemexprstate,
+							  econtext,
+							  op->d.arraycoerce.resultelemtype,
 							  op->d.arraycoerce.amstate);
 }
 
@@ -2475,10 +2536,10 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 	if (fieldnum <= 0)			/* should never happen */
 		elog(ERROR, "unsupported reference to system column %d in FieldSelect",
 			 fieldnum);
-	if (fieldnum > tupDesc->natts)		/* should never happen */
+	if (fieldnum > tupDesc->natts)	/* should never happen */
 		elog(ERROR, "attribute number %d exceeds number of columns %d",
 			 fieldnum, tupDesc->natts);
-	attr = tupDesc->attrs[fieldnum - 1];
+	attr = TupleDescAttr(tupDesc, fieldnum - 1);
 
 	/* Check for dropped column, and force a NULL result if so */
 	if (attr->attisdropped)
@@ -2601,7 +2662,7 @@ ExecEvalArrayRefSubscript(ExprState *state, ExprEvalStep *op)
 		if (arefstate->isassignment)
 			ereport(ERROR,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				  errmsg("array subscript in assignment must not be null")));
+					 errmsg("array subscript in assignment must not be null")));
 		*op->resnull = true;
 		return false;
 	}
@@ -2834,7 +2895,7 @@ ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext
 		/* prepare map from old to new attribute numbers */
 		op->d.convert_rowtype.map =
 			convert_tuples_by_name(indesc, outdesc,
-								 gettext_noop("could not convert row type"));
+								   gettext_noop("could not convert row type"));
 		op->d.convert_rowtype.initialized = true;
 
 		MemoryContextSwitchTo(old_cxt);
@@ -2984,7 +3045,7 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 		else
 		{
 			fcinfo->isnull = false;
-			thisresult = (op->d.scalararrayop.fn_addr) (fcinfo);
+			thisresult = op->d.scalararrayop.fn_addr(fcinfo);
 		}
 
 		/* Combine results per OR or AND semantics */
@@ -3049,9 +3110,9 @@ ExecEvalConstraintCheck(ExprState *state, ExprEvalStep *op)
 		!DatumGetBool(*op->d.domaincheck.checkvalue))
 		ereport(ERROR,
 				(errcode(ERRCODE_CHECK_VIOLATION),
-			   errmsg("value for domain %s violates check constraint \"%s\"",
-					  format_type_be(op->d.domaincheck.resulttype),
-					  op->d.domaincheck.constraintname),
+				 errmsg("value for domain %s violates check constraint \"%s\"",
+						format_type_be(op->d.domaincheck.resulttype),
+						op->d.domaincheck.constraintname),
 				 errdomainconstraint(op->d.domaincheck.resulttype,
 									 op->d.domaincheck.constraintname)));
 }
@@ -3116,7 +3177,7 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 						appendStringInfo(&buf, "<%s>%s</%s>",
 										 argname,
 										 map_sql_value_to_xml_value(value,
-												 exprType((Node *) e), true),
+																	exprType((Node *) e), true),
 										 argname);
 						*op->resnull = false;
 					}
@@ -3137,10 +3198,10 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 
 		case IS_XMLELEMENT:
 			*op->resvalue = PointerGetDatum(xmlelement(xexpr,
-												op->d.xmlexpr.named_argvalue,
-												 op->d.xmlexpr.named_argnull,
+													   op->d.xmlexpr.named_argvalue,
+													   op->d.xmlexpr.named_argnull,
 													   op->d.xmlexpr.argvalue,
-													 op->d.xmlexpr.argnull));
+													   op->d.xmlexpr.argnull));
 			*op->resnull = false;
 			break;
 
@@ -3166,7 +3227,7 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 
 				*op->resvalue = PointerGetDatum(xmlparse(data,
 														 xexpr->xmloption,
-													   preserve_whitespace));
+														 preserve_whitespace));
 				*op->resnull = false;
 			}
 			break;
@@ -3243,8 +3304,8 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 				value = argvalue[0];
 
 				*op->resvalue = PointerGetDatum(
-								xmltotext_with_xmloption(DatumGetXmlP(value),
-														 xexpr->xmloption));
+												xmltotext_with_xmloption(DatumGetXmlP(value),
+																		 xexpr->xmloption));
 				*op->resnull = false;
 			}
 			break;
@@ -3408,8 +3469,12 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 			 * generates an INT4 NULL regardless of the dropped column type).
 			 * If we find a dropped column and cannot verify that case (1)
 			 * holds, we have to use the slow path to check (2) for each row.
+			 *
+			 * If vartype is a domain over composite, just look through that
+			 * to the base composite type.
 			 */
-			var_tupdesc = lookup_rowtype_tupdesc(variable->vartype, -1);
+			var_tupdesc = lookup_rowtype_tupdesc_domain(variable->vartype,
+														-1, false);
 
 			slot_tupdesc = slot->tts_tupleDescriptor;
 
@@ -3418,15 +3483,15 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 						(errcode(ERRCODE_DATATYPE_MISMATCH),
 						 errmsg("table row type and query-specified row type do not match"),
 						 errdetail_plural("Table row contains %d attribute, but query expects %d.",
-				   "Table row contains %d attributes, but query expects %d.",
+										  "Table row contains %d attributes, but query expects %d.",
 										  slot_tupdesc->natts,
 										  slot_tupdesc->natts,
 										  var_tupdesc->natts)));
 
 			for (i = 0; i < var_tupdesc->natts; i++)
 			{
-				Form_pg_attribute vattr = var_tupdesc->attrs[i];
-				Form_pg_attribute sattr = slot_tupdesc->attrs[i];
+				Form_pg_attribute vattr = TupleDescAttr(var_tupdesc, i);
+				Form_pg_attribute sattr = TupleDescAttr(slot_tupdesc, i);
 
 				if (vattr->atttypid == sattr->atttypid)
 					continue;	/* no worries */
@@ -3492,10 +3557,10 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 		 * perhaps other places.)
 		 */
 		if (econtext->ecxt_estate &&
-		variable->varno <= list_length(econtext->ecxt_estate->es_range_table))
+			variable->varno <= list_length(econtext->ecxt_estate->es_range_table))
 		{
 			RangeTblEntry *rte = rt_fetch(variable->varno,
-									  econtext->ecxt_estate->es_range_table);
+										  econtext->ecxt_estate->es_range_table);
 
 			if (rte->eref)
 				ExecTypeSetColNames(output_tupdesc, rte->eref->colnames);
@@ -3524,8 +3589,8 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 
 		for (i = 0; i < var_tupdesc->natts; i++)
 		{
-			Form_pg_attribute vattr = var_tupdesc->attrs[i];
-			Form_pg_attribute sattr = tupleDesc->attrs[i];
+			Form_pg_attribute vattr = TupleDescAttr(var_tupdesc, i);
+			Form_pg_attribute sattr = TupleDescAttr(tupleDesc, i);
 
 			if (!vattr->attisdropped)
 				continue;		/* already checked non-dropped cols */

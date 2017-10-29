@@ -33,6 +33,7 @@ hash_xlog_init_meta_page(XLogReaderState *record)
 	XLogRecPtr	lsn = record->EndRecPtr;
 	Page		page;
 	Buffer		metabuf;
+	ForkNumber	forknum;
 
 	xl_hash_init_meta_page *xlrec = (xl_hash_init_meta_page *) XLogRecGetData(record);
 
@@ -44,6 +45,17 @@ hash_xlog_init_meta_page(XLogReaderState *record)
 	page = (Page) BufferGetPage(metabuf);
 	PageSetLSN(page, lsn);
 	MarkBufferDirty(metabuf);
+
+	/*
+	 * Force the on-disk state of init forks to always be in sync with the
+	 * state in shared buffers.  See XLogReadBufferForRedoExtended.  We need
+	 * special handling for init forks as create index operations don't log a
+	 * full page image of the metapage.
+	 */
+	XLogRecGetBlockTag(record, 0, NULL, &forknum, NULL);
+	if (forknum == INIT_FORKNUM)
+		FlushOneBuffer(metabuf);
+
 	/* all done */
 	UnlockReleaseBuffer(metabuf);
 }
@@ -60,6 +72,7 @@ hash_xlog_init_bitmap_page(XLogReaderState *record)
 	Page		page;
 	HashMetaPage metap;
 	uint32		num_buckets;
+	ForkNumber	forknum;
 
 	xl_hash_init_bitmap_page *xlrec = (xl_hash_init_bitmap_page *) XLogRecGetData(record);
 
@@ -70,6 +83,16 @@ hash_xlog_init_bitmap_page(XLogReaderState *record)
 	_hash_initbitmapbuffer(bitmapbuf, xlrec->bmsize, true);
 	PageSetLSN(BufferGetPage(bitmapbuf), lsn);
 	MarkBufferDirty(bitmapbuf);
+
+	/*
+	 * Force the on-disk state of init forks to always be in sync with the
+	 * state in shared buffers.  See XLogReadBufferForRedoExtended.  We need
+	 * special handling for init forks as create index operations don't log a
+	 * full page image of the metapage.
+	 */
+	XLogRecGetBlockTag(record, 0, NULL, &forknum, NULL);
+	if (forknum == INIT_FORKNUM)
+		FlushOneBuffer(bitmapbuf);
 	UnlockReleaseBuffer(bitmapbuf);
 
 	/* add the new bitmap page to the metapage's list of bitmaps */
@@ -90,6 +113,10 @@ hash_xlog_init_bitmap_page(XLogReaderState *record)
 
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(metabuf);
+
+		XLogRecGetBlockTag(record, 1, NULL, &forknum, NULL);
+		if (forknum == INIT_FORKNUM)
+			FlushOneBuffer(metabuf);
 	}
 	if (BufferIsValid(metabuf))
 		UnlockReleaseBuffer(metabuf);
@@ -161,7 +188,7 @@ hash_xlog_add_ovfl_page(XLogReaderState *record)
 	HashPageOpaque ovflopaque;
 	uint32	   *num_bucket;
 	char	   *data;
-	Size datalen PG_USED_FOR_ASSERTS_ONLY;
+	Size		datalen PG_USED_FOR_ASSERTS_ONLY;
 	bool		new_bmpage = false;
 
 	XLogRecGetBlockTag(record, 0, NULL, NULL, &rightblk);
@@ -293,7 +320,7 @@ hash_xlog_split_allocate_page(XLogReaderState *record)
 	Buffer		oldbuf;
 	Buffer		newbuf;
 	Buffer		metabuf;
-	Size datalen PG_USED_FOR_ASSERTS_ONLY;
+	Size		datalen PG_USED_FOR_ASSERTS_ONLY;
 	char	   *data;
 	XLogRedoAction action;
 
@@ -950,22 +977,22 @@ hash_xlog_update_meta_page(XLogReaderState *record)
 static TransactionId
 hash_xlog_vacuum_get_latestRemovedXid(XLogReaderState *record)
 {
-	xl_hash_vacuum_one_page	*xlrec;
-	OffsetNumber	*unused;
+	xl_hash_vacuum_one_page *xlrec;
+	OffsetNumber *unused;
 	Buffer		ibuffer,
 				hbuffer;
 	Page		ipage,
 				hpage;
-	RelFileNode	rnode;
-	BlockNumber	blkno;
+	RelFileNode rnode;
+	BlockNumber blkno;
 	ItemId		iitemid,
 				hitemid;
 	IndexTuple	itup;
-	HeapTupleHeader	htuphdr;
-	BlockNumber	hblkno;
-	OffsetNumber	hoffnum;
-	TransactionId	latestRemovedXid = InvalidTransactionId;
-	int		i;
+	HeapTupleHeader htuphdr;
+	BlockNumber hblkno;
+	OffsetNumber hoffnum;
+	TransactionId latestRemovedXid = InvalidTransactionId;
+	int			i;
 
 	xlrec = (xl_hash_vacuum_one_page *) XLogRecGetData(record);
 
@@ -984,9 +1011,9 @@ hash_xlog_vacuum_get_latestRemovedXid(XLogReaderState *record)
 		return latestRemovedXid;
 
 	/*
-	 * Check if WAL replay has reached a consistent database state. If not,
-	 * we must PANIC. See the definition of btree_xlog_delete_get_latestRemovedXid
-	 * for more details.
+	 * Check if WAL replay has reached a consistent database state. If not, we
+	 * must PANIC. See the definition of
+	 * btree_xlog_delete_get_latestRemovedXid for more details.
 	 */
 	if (!reachedConsistency)
 		elog(PANIC, "hash_xlog_vacuum_get_latestRemovedXid: cannot operate with inconsistent data");
@@ -1098,11 +1125,11 @@ hash_xlog_vacuum_get_latestRemovedXid(XLogReaderState *record)
 static void
 hash_xlog_vacuum_one_page(XLogReaderState *record)
 {
-	XLogRecPtr lsn = record->EndRecPtr;
+	XLogRecPtr	lsn = record->EndRecPtr;
 	xl_hash_vacuum_one_page *xldata;
-	Buffer buffer;
-	Buffer metabuf;
-	Page page;
+	Buffer		buffer;
+	Buffer		metabuf;
+	Page		page;
 	XLogRedoAction action;
 	HashPageOpaque pageopaque;
 
@@ -1123,7 +1150,7 @@ hash_xlog_vacuum_one_page(XLogReaderState *record)
 	if (InHotStandby)
 	{
 		TransactionId latestRemovedXid =
-					hash_xlog_vacuum_get_latestRemovedXid(record);
+		hash_xlog_vacuum_get_latestRemovedXid(record);
 		RelFileNode rnode;
 
 		XLogRecGetBlockTag(record, 0, &rnode, NULL, NULL);
@@ -1146,8 +1173,8 @@ hash_xlog_vacuum_one_page(XLogReaderState *record)
 		}
 
 		/*
-		 * Mark the page as not containing any LP_DEAD items. See comments
-		 * in _hash_vacuum_one_page() for details.
+		 * Mark the page as not containing any LP_DEAD items. See comments in
+		 * _hash_vacuum_one_page() for details.
 		 */
 		pageopaque = (HashPageOpaque) PageGetSpecialPointer(page);
 		pageopaque->hasho_flag &= ~LH_PAGE_HAS_DEAD_TUPLES;
@@ -1160,7 +1187,7 @@ hash_xlog_vacuum_one_page(XLogReaderState *record)
 
 	if (XLogReadBufferForRedo(record, 1, &metabuf) == BLK_NEEDS_REDO)
 	{
-		Page metapage;
+		Page		metapage;
 		HashMetaPage metap;
 
 		metapage = BufferGetPage(metabuf);
@@ -1236,7 +1263,7 @@ hash_mask(char *pagedata, BlockNumber blkno)
 	HashPageOpaque opaque;
 	int			pagetype;
 
-	mask_page_lsn(page);
+	mask_page_lsn_and_checksum(page);
 
 	mask_page_hint_bits(page);
 	mask_unused_space(page);

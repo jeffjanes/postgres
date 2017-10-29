@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern SampleScanState *ExecInitSampleScan(SampleScan *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecSampleScan(SampleScanState *node);
 extern void ExecEndSampleScan(SampleScanState *node);
 extern void ExecReScanSampleScan(SampleScanState *node);
 
-#endif   /* NODESAMPLESCAN_H */
+#endif							/* NODESAMPLESCAN_H */

@@ -17,8 +17,7 @@
 #include "nodes/execnodes.h"
 
 extern AppendState *ExecInitAppend(Append *node, EState *estate, int eflags);
-extern TupleTableSlot *ExecAppend(AppendState *node);
 extern void ExecEndAppend(AppendState *node);
 extern void ExecReScanAppend(AppendState *node);
 
-#endif   /* NODEAPPEND_H */
+#endif							/* NODEAPPEND_H */

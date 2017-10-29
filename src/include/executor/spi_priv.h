@@ -26,12 +26,15 @@ typedef struct
 	Oid			lastoid;
 	SPITupleTable *tuptable;	/* tuptable currently being built */
 
+	/* subtransaction in which current Executor call was started */
+	SubTransactionId execSubid;
+
 	/* resources of this execution context */
 	slist_head	tuptables;		/* list of all live SPITupleTables */
 	MemoryContext procCxt;		/* procedure context */
 	MemoryContext execCxt;		/* executor context */
 	MemoryContext savedcxt;		/* context of SPI_connect's caller */
-	SubTransactionId connectSubid;		/* ID of connecting subtransaction */
+	SubTransactionId connectSubid;	/* ID of connecting subtransaction */
 	QueryEnvironment *queryEnv; /* query environment setup for SPI level */
 } _SPI_connection;
 
@@ -88,4 +91,4 @@ typedef struct _SPI_plan
 	void	   *parserSetupArg;
 } _SPI_plan;
 
-#endif   /* SPI_PRIV_H */
+#endif							/* SPI_PRIV_H */

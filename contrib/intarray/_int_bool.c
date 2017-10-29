@@ -245,7 +245,7 @@ checkcondition_arr(void *checkval, ITEM *item)
 	{
 		StopMiddle = StopLow + (StopHigh - StopLow) / 2;
 		if (*StopMiddle == item->val)
-			return (true);
+			return true;
 		else if (*StopMiddle < item->val)
 			StopLow = StopMiddle + 1;
 		else
@@ -274,7 +274,7 @@ execute(ITEM *curitem, void *checkval, bool calcnot,
 		return (*chkcond) (checkval, curitem);
 	else if (curitem->val == (int32) '!')
 	{
-		return (calcnot) ?
+		return calcnot ?
 			((execute(curitem - 1, checkval, calcnot, chkcond)) ? false : true)
 			: true;
 	}
@@ -506,8 +506,8 @@ bqarr_in(PG_FUNCTION_ARGS)
 	if (state.num > QUERYTYPEMAXITEMS)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-		errmsg("number of query items (%d) exceeds the maximum allowed (%d)",
-			   state.num, (int) QUERYTYPEMAXITEMS)));
+				 errmsg("number of query items (%d) exceeds the maximum allowed (%d)",
+						state.num, (int) QUERYTYPEMAXITEMS)));
 	commonlen = COMPUTESIZE(state.num);
 
 	query = (QUERYTYPE *) palloc(commonlen);

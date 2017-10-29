@@ -132,8 +132,8 @@ TransactionIdInRecentPast(uint64 xid_with_epoch, TransactionId *extracted_xid)
 		|| (xid_epoch == now_epoch && xid > now_epoch_last_xid))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("transaction ID " UINT64_FORMAT " is in the future",
-						xid_with_epoch)));
+				 errmsg("transaction ID %s is in the future",
+						psprintf(UINT64_FORMAT, xid_with_epoch))));
 
 	/*
 	 * ShmemVariableCache->oldestClogXid is protected by CLogTruncationLock,
@@ -147,8 +147,8 @@ TransactionIdInRecentPast(uint64 xid_with_epoch, TransactionId *extracted_xid)
 	/*
 	 * If the transaction ID has wrapped around, it's definitely too old to
 	 * determine the commit status.  Otherwise, we can compare it to
-	 * ShmemVariableCache->oldestClogXid to determine whether the relevant CLOG
-	 * entry is guaranteed to still exist.
+	 * ShmemVariableCache->oldestClogXid to determine whether the relevant
+	 * CLOG entry is guaranteed to still exist.
 	 */
 	if (xid_epoch + 1 < now_epoch
 		|| (xid_epoch + 1 == now_epoch && xid < now_epoch_last_xid)
@@ -454,7 +454,7 @@ txid_current_if_assigned(PG_FUNCTION_ARGS)
 {
 	txid		val;
 	TxidEpoch	state;
-	TransactionId	topxid = GetTopTransactionIdIfAny();
+	TransactionId topxid = GetTopTransactionIdIfAny();
 
 	if (topxid == InvalidTransactionId)
 		PG_RETURN_NULL();
@@ -640,7 +640,7 @@ txid_snapshot_send(PG_FUNCTION_ARGS)
 	uint32		i;
 
 	pq_begintypsend(&buf);
-	pq_sendint(&buf, snap->nxip, 4);
+	pq_sendint32(&buf, snap->nxip);
 	pq_sendint64(&buf, snap->xmin);
 	pq_sendint64(&buf, snap->xmax);
 	for (i = 0; i < snap->nxip; i++)
@@ -741,9 +741,9 @@ txid_snapshot_xip(PG_FUNCTION_ARGS)
 Datum
 txid_status(PG_FUNCTION_ARGS)
 {
-	const char	   *status;
-	uint64			xid_with_epoch = PG_GETARG_INT64(0);
-	TransactionId	xid;
+	const char *status;
+	uint64		xid_with_epoch = PG_GETARG_INT64(0);
+	TransactionId xid;
 
 	/*
 	 * We must protect against concurrent truncation of clog entries to avoid
@@ -755,11 +755,11 @@ txid_status(PG_FUNCTION_ARGS)
 		Assert(TransactionIdIsValid(xid));
 
 		if (TransactionIdIsCurrentTransactionId(xid))
-			status = gettext_noop("in progress");
+			status = "in progress";
 		else if (TransactionIdDidCommit(xid))
-			status = gettext_noop("committed");
+			status = "committed";
 		else if (TransactionIdDidAbort(xid))
-			status = gettext_noop("aborted");
+			status = "aborted";
 		else
 		{
 			/*
@@ -770,13 +770,13 @@ txid_status(PG_FUNCTION_ARGS)
 			 * it's aborted if it isn't committed and is older than our
 			 * snapshot xmin.
 			 *
-			 * Otherwise it must be in-progress (or have been at the time
-			 * we checked commit/abort status).
+			 * Otherwise it must be in-progress (or have been at the time we
+			 * checked commit/abort status).
 			 */
 			if (TransactionIdPrecedes(xid, GetActiveSnapshot()->xmin))
-				status = gettext_noop("aborted");
+				status = "aborted";
 			else
-				status = gettext_noop("in progress");
+				status = "in progress";
 		}
 	}
 	else

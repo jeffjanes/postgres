@@ -152,21 +152,21 @@ PLy_input_tuple_funcs(PLyTypeInfo *arg, TupleDesc desc)
 	for (i = 0; i < desc->natts; i++)
 	{
 		HeapTuple	typeTup;
+		Form_pg_attribute attr = TupleDescAttr(desc, i);
 
-		if (desc->attrs[i]->attisdropped)
+		if (attr->attisdropped)
 			continue;
 
-		if (arg->in.r.atts[i].typoid == desc->attrs[i]->atttypid)
+		if (arg->in.r.atts[i].typoid == attr->atttypid)
 			continue;			/* already set up this entry */
 
-		typeTup = SearchSysCache1(TYPEOID,
-								  ObjectIdGetDatum(desc->attrs[i]->atttypid));
+		typeTup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(attr->atttypid));
 		if (!HeapTupleIsValid(typeTup))
 			elog(ERROR, "cache lookup failed for type %u",
-				 desc->attrs[i]->atttypid);
+				 attr->atttypid);
 
 		PLy_input_datum_func2(&(arg->in.r.atts[i]), arg->mcxt,
-							  desc->attrs[i]->atttypid,
+							  attr->atttypid,
 							  typeTup,
 							  exec_ctx->curr_proc->langid,
 							  exec_ctx->curr_proc->trftypes);
@@ -224,18 +224,18 @@ PLy_output_tuple_funcs(PLyTypeInfo *arg, TupleDesc desc)
 	for (i = 0; i < desc->natts; i++)
 	{
 		HeapTuple	typeTup;
+		Form_pg_attribute attr = TupleDescAttr(desc, i);
 
-		if (desc->attrs[i]->attisdropped)
+		if (attr->attisdropped)
 			continue;
 
-		if (arg->out.r.atts[i].typoid == desc->attrs[i]->atttypid)
+		if (arg->out.r.atts[i].typoid == attr->atttypid)
 			continue;			/* already set up this entry */
 
-		typeTup = SearchSysCache1(TYPEOID,
-								  ObjectIdGetDatum(desc->attrs[i]->atttypid));
+		typeTup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(attr->atttypid));
 		if (!HeapTupleIsValid(typeTup))
 			elog(ERROR, "cache lookup failed for type %u",
-				 desc->attrs[i]->atttypid);
+				 attr->atttypid);
 
 		PLy_output_datum_func2(&(arg->out.r.atts[i]), arg->mcxt, typeTup,
 							   exec_ctx->curr_proc->langid,
@@ -306,11 +306,12 @@ PLyDict_FromTuple(PLyTypeInfo *info, HeapTuple tuple, TupleDesc desc)
 			Datum		vattr;
 			bool		is_null;
 			PyObject   *value;
+			Form_pg_attribute attr = TupleDescAttr(desc, i);
 
-			if (desc->attrs[i]->attisdropped)
+			if (attr->attisdropped)
 				continue;
 
-			key = NameStr(desc->attrs[i]->attname);
+			key = NameStr(attr->attname);
 			vattr = heap_getattr(tuple, (i + 1), desc, &is_null);
 
 			if (is_null || info->in.r.atts[i].func == NULL)
@@ -647,9 +648,10 @@ PLyList_FromArray(PLyDatumToOb *arg, Datum d)
 
 	/*
 	 * We iterate the SQL array in the physical order it's stored in the
-	 * datum. For example, for a 3-dimensional array the order of iteration would
-	 * be the following: [0,0,0] elements through [0,0,k], then [0,1,0] through
-	 * [0,1,k] till [0,m,k], then [1,0,0] through [1,0,k] till [1,m,k], and so on.
+	 * datum. For example, for a 3-dimensional array the order of iteration
+	 * would be the following: [0,0,0] elements through [0,0,k], then [0,1,0]
+	 * through [0,1,k] till [0,m,k], then [1,0,0] through [1,0,k] till
+	 * [1,m,k], and so on.
 	 *
 	 * In Python, there are no multi-dimensional lists as such, but they are
 	 * represented as a list of lists. So a 3-d array of [n,m,k] elements is a
@@ -682,7 +684,7 @@ PLyList_FromArray_recurse(PLyDatumToOb *elm, int *dims, int ndim, int dim,
 			PyObject   *sublist;
 
 			sublist = PLyList_FromArray_recurse(elm, dims, ndim, dim + 1,
-											 dataptr_p, bitmap_p, bitmask_p);
+												dataptr_p, bitmap_p, bitmask_p);
 			PyList_SET_ITEM(list, i, sublist);
 		}
 	}
@@ -927,11 +929,11 @@ PLyObject_ToDatum(PLyObToDatum *arg, int32 typmod, PyObject *plrv, bool inarray)
 	 * literal.
 	 *
 	 * To make that less confusing to users who are upgrading from older
-	 * versions, try to give a hint in the typical instances of that. If we are
-	 * parsing an array of composite types, and we see a string literal that
-	 * is not a valid record literal, give a hint. We only want to give the
-	 * hint in the narrow case of a malformed string literal, not any error
-	 * from record_in(), so check for that case here specifically.
+	 * versions, try to give a hint in the typical instances of that. If we
+	 * are parsing an array of composite types, and we see a string literal
+	 * that is not a valid record literal, give a hint. We only want to give
+	 * the hint in the narrow case of a malformed string literal, not any
+	 * error from record_in(), so check for that case here specifically.
 	 *
 	 * This check better match the one in record_in(), so that we don't forbid
 	 * literals that are actually valid!
@@ -948,7 +950,7 @@ PLyObject_ToDatum(PLyObToDatum *arg, int32 typmod, PyObject *plrv, bool inarray)
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 					 errmsg("malformed record literal: \"%s\"", str),
 					 errdetail("Missing left parenthesis."),
-					 errhint("To return a composite type in an array, return the composite type as a Python tuple, e.g. \"[('foo')]\"")));
+					 errhint("To return a composite type in an array, return the composite type as a Python tuple, e.g., \"[('foo',)]\".")));
 	}
 
 	return InputFunctionCall(&arg->typfunc,
@@ -1001,7 +1003,7 @@ PLySequence_ToArray(PLyObToDatum *arg, int32 typmod, PyObject *plrv, bool inarra
 
 		dims[ndim] = PySequence_Length(pyptr);
 		if (dims[ndim] < 0)
-			PLy_elog(ERROR, "cannot determine sequence length for function return value");
+			PLy_elog(ERROR, "could not determine sequence length for function return value");
 
 		if (dims[ndim] > MaxAllocSize)
 			PLy_elog(ERROR, "array size exceeds the maximum allowed");
@@ -1086,10 +1088,10 @@ PLySequence_ToArray_recurse(PLyObToDatum *elm, PyObject *list,
 	int			i;
 
 	if (PySequence_Length(list) != dims[dim])
-		PLy_elog(ERROR,
-				 "multidimensional arrays must have array expressions with matching dimensions. "
-				 "PL/Python function return value has sequence length %d while expected %d",
-				 (int) PySequence_Length(list), dims[dim]);
+		ereport(ERROR,
+				(errmsg("wrong length of inner sequence: has length %d, but %d was expected",
+						(int) PySequence_Length(list), dims[dim]),
+				 (errdetail("To construct a multidimensional array, the inner sequences must all have the same length."))));
 
 	if (dim < ndim - 1)
 	{
@@ -1182,15 +1184,16 @@ PLyMapping_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping)
 		char	   *key;
 		PyObject   *volatile value;
 		PLyObToDatum *att;
+		Form_pg_attribute attr = TupleDescAttr(desc, i);
 
-		if (desc->attrs[i]->attisdropped)
+		if (attr->attisdropped)
 		{
 			values[i] = (Datum) 0;
 			nulls[i] = true;
 			continue;
 		}
 
-		key = NameStr(desc->attrs[i]->attname);
+		key = NameStr(attr->attname);
 		value = NULL;
 		att = &info->out.r.atts[i];
 		PG_TRY();
@@ -1255,7 +1258,7 @@ PLySequence_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence)
 	idx = 0;
 	for (i = 0; i < desc->natts; i++)
 	{
-		if (!desc->attrs[i]->attisdropped)
+		if (!TupleDescAttr(desc, i)->attisdropped)
 			idx++;
 	}
 	if (PySequence_Length(sequence) != idx)
@@ -1276,7 +1279,7 @@ PLySequence_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence)
 		PyObject   *volatile value;
 		PLyObToDatum *att;
 
-		if (desc->attrs[i]->attisdropped)
+		if (TupleDescAttr(desc, i)->attisdropped)
 		{
 			values[i] = (Datum) 0;
 			nulls[i] = true;
@@ -1345,15 +1348,16 @@ PLyGenericObject_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *object
 		char	   *key;
 		PyObject   *volatile value;
 		PLyObToDatum *att;
+		Form_pg_attribute attr = TupleDescAttr(desc, i);
 
-		if (desc->attrs[i]->attisdropped)
+		if (attr->attisdropped)
 		{
 			values[i] = (Datum) 0;
 			nulls[i] = true;
 			continue;
 		}
 
-		key = NameStr(desc->attrs[i]->attname);
+		key = NameStr(attr->attname);
 		value = NULL;
 		att = &info->out.r.atts[i];
 		PG_TRY();
@@ -1386,7 +1390,7 @@ PLyGenericObject_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *object
 						(errcode(ERRCODE_UNDEFINED_COLUMN),
 						 errmsg("attribute \"%s\" does not exist in Python object", key),
 						 inarray ?
-						 errhint("To return a composite type in an array, return the composite type as a Python tuple, e.g. \"[('foo')]\"") :
+						 errhint("To return a composite type in an array, return the composite type as a Python tuple, e.g., \"[('foo',)]\".") :
 						 errhint("To return null in a column, let the returned object have an attribute named after column with value None.")));
 			}
 

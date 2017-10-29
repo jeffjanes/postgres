@@ -151,7 +151,7 @@ execCurrentOf(CurrentOfExpr *cexpr,
 	{
 		ScanState  *scanstate;
 		bool		lisnull;
-		Oid tuple_tableoid PG_USED_FOR_ASSERTS_ONLY;
+		Oid			tuple_tableoid PG_USED_FOR_ASSERTS_ONLY;
 		ItemPointer tuple_tid;
 
 		/*
@@ -220,7 +220,7 @@ fetch_cursor_param_value(ExprContext *econtext, int paramId)
 
 		/* give hook a chance in case parameter is dynamic */
 		if (!OidIsValid(prm->ptype) && paramInfo->paramFetch != NULL)
-			(*paramInfo->paramFetch) (paramInfo, paramId);
+			paramInfo->paramFetch(paramInfo, paramId);
 
 		if (OidIsValid(prm->ptype) && !prm->isnull)
 		{

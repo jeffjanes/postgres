@@ -146,23 +146,23 @@ typedef struct RewriteStateData
 	BlockNumber rs_blockno;		/* block where page will go */
 	bool		rs_buffer_valid;	/* T if any tuples in buffer */
 	bool		rs_use_wal;		/* must we WAL-log inserts? */
-	bool		rs_logical_rewrite;		/* do we need to do logical rewriting */
-	TransactionId rs_oldest_xmin;		/* oldest xmin used by caller to
-										 * determine tuple visibility */
-	TransactionId rs_freeze_xid;/* Xid that will be used as freeze cutoff
-								 * point */
-	TransactionId rs_logical_xmin;		/* Xid that will be used as cutoff
-										 * point for logical rewrites */
-	MultiXactId rs_cutoff_multi;/* MultiXactId that will be used as cutoff
-								 * point for multixacts */
+	bool		rs_logical_rewrite; /* do we need to do logical rewriting */
+	TransactionId rs_oldest_xmin;	/* oldest xmin used by caller to determine
+									 * tuple visibility */
+	TransactionId rs_freeze_xid;	/* Xid that will be used as freeze cutoff
+									 * point */
+	TransactionId rs_logical_xmin;	/* Xid that will be used as cutoff point
+									 * for logical rewrites */
+	MultiXactId rs_cutoff_multi;	/* MultiXactId that will be used as cutoff
+									 * point for multixacts */
 	MemoryContext rs_cxt;		/* for hash tables and entries and tuples in
 								 * them */
 	XLogRecPtr	rs_begin_lsn;	/* XLogInsertLsn when starting the rewrite */
-	HTAB	   *rs_unresolved_tups;		/* unmatched A tuples */
-	HTAB	   *rs_old_new_tid_map;		/* unmatched B tuples */
+	HTAB	   *rs_unresolved_tups; /* unmatched A tuples */
+	HTAB	   *rs_old_new_tid_map; /* unmatched B tuples */
 	HTAB	   *rs_logical_mappings;	/* logical remapping files */
-	uint32		rs_num_rewrite_mappings;		/* # in memory mappings */
-}	RewriteStateData;
+	uint32		rs_num_rewrite_mappings;	/* # in memory mappings */
+}			RewriteStateData;
 
 /*
  * The lookup keys for the hash tables are tuple TID and xmin (we must check
@@ -216,8 +216,8 @@ typedef struct RewriteMappingFile
  */
 typedef struct RewriteMappingDataEntry
 {
-	LogicalRewriteMappingData map;		/* map between old and new location of
-										 * the tuple */
+	LogicalRewriteMappingData map;	/* map between old and new location of the
+									 * tuple */
 	dlist_node	node;
 } RewriteMappingDataEntry;
 
@@ -655,7 +655,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 	else
 		heaptup = tup;
 
-	len = MAXALIGN(heaptup->t_len);		/* be conservative */
+	len = MAXALIGN(heaptup->t_len); /* be conservative */
 
 	/*
 	 * If we're gonna fail for oversize tuple, do it right away
@@ -1013,8 +1013,7 @@ logical_rewrite_log_mapping(RewriteState state, TransactionId xid,
 		src->off = 0;
 		memcpy(src->path, path, sizeof(path));
 		src->vfd = PathNameOpenFile(path,
-									O_CREAT | O_EXCL | O_WRONLY | PG_BINARY,
-									S_IRUSR | S_IWUSR);
+									O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
 		if (src->vfd < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -1133,8 +1132,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 			 xlrec->mapped_xid, XLogRecGetXid(r));
 
 	fd = OpenTransientFile(path,
-						   O_CREAT | O_WRONLY | PG_BINARY,
-						   S_IRUSR | S_IWUSR);
+						   O_CREAT | O_WRONLY | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -1258,7 +1256,7 @@ CheckPointLogicalRewriteHeap(void)
 		}
 		else
 		{
-			int			fd = OpenTransientFile(path, O_RDONLY | PG_BINARY, 0);
+			int			fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
 
 			/*
 			 * The file cannot vanish due to concurrency since this function

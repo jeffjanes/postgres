@@ -115,7 +115,7 @@ TransactionId *ParallelCurrentXids;
  * globally accessible, so can be set from anywhere in the code that requires
  * recording flags.
  */
-int  MyXactFlags;
+int			MyXactFlags;
 
 /*
  *	transaction states - transaction state from server perspective
@@ -145,6 +145,7 @@ typedef enum TBlockState
 	/* transaction block states */
 	TBLOCK_BEGIN,				/* starting transaction block */
 	TBLOCK_INPROGRESS,			/* live transaction */
+	TBLOCK_IMPLICIT_INPROGRESS, /* live transaction after implicit BEGIN */
 	TBLOCK_PARALLEL_INPROGRESS, /* live transaction inside parallel worker */
 	TBLOCK_END,					/* COMMIT received */
 	TBLOCK_ABORT,				/* failed xact, awaiting ROLLBACK */
@@ -177,18 +178,18 @@ typedef struct TransactionStateData
 	TBlockState blockState;		/* high-level state */
 	int			nestingLevel;	/* transaction nesting depth */
 	int			gucNestLevel;	/* GUC context nesting depth */
-	MemoryContext curTransactionContext;		/* my xact-lifetime context */
+	MemoryContext curTransactionContext;	/* my xact-lifetime context */
 	ResourceOwner curTransactionOwner;	/* my query resources */
 	TransactionId *childXids;	/* subcommitted child XIDs, in XID order */
 	int			nChildXids;		/* # of subcommitted child XIDs */
 	int			maxChildXids;	/* allocated size of childXids[] */
 	Oid			prevUser;		/* previous CurrentUserId setting */
 	int			prevSecContext; /* previous SecurityRestrictionContext */
-	bool		prevXactReadOnly;		/* entry-time xact r/o state */
-	bool		startedInRecovery;		/* did we start in recovery? */
+	bool		prevXactReadOnly;	/* entry-time xact r/o state */
+	bool		startedInRecovery;	/* did we start in recovery? */
 	bool		didLogXid;		/* has xid been included in WAL record? */
-	int			parallelModeLevel;		/* Enter/ExitParallelMode counter */
-	struct TransactionStateData *parent;		/* back link to parent */
+	int			parallelModeLevel;	/* Enter/ExitParallelMode counter */
+	struct TransactionStateData *parent;	/* back link to parent */
 } TransactionStateData;
 
 typedef TransactionStateData *TransactionState;
@@ -559,7 +560,7 @@ AssignTransactionId(TransactionState s)
 		XactTopTransactionId = s->transactionId;
 
 	if (isSubXact)
-		SubTransSetParent(s->transactionId, s->parent->transactionId, false);
+		SubTransSetParent(s->transactionId, s->parent->transactionId);
 
 	/*
 	 * If it's a top-level transaction, the predicate locking system needs to
@@ -574,18 +575,10 @@ AssignTransactionId(TransactionState s)
 	 * ResourceOwner.
 	 */
 	currentOwner = CurrentResourceOwner;
-	PG_TRY();
-	{
-		CurrentResourceOwner = s->curTransactionOwner;
-		XactLockTableInsert(s->transactionId);
-	}
-	PG_CATCH();
-	{
-		/* Ensure CurrentResourceOwner is restored on error */
-		CurrentResourceOwner = currentOwner;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+	CurrentResourceOwner = s->curTransactionOwner;
+
+	XactLockTableInsert(s->transactionId);
+
 	CurrentResourceOwner = currentOwner;
 
 	/*
@@ -1482,7 +1475,7 @@ AtSubCommit_childXids(void)
 								   new_maxChildXids * sizeof(TransactionId));
 		else
 			new_childXids = repalloc(s->parent->childXids,
-								   new_maxChildXids * sizeof(TransactionId));
+									 new_maxChildXids * sizeof(TransactionId));
 
 		s->parent->childXids = new_childXids;
 		s->parent->maxChildXids = new_maxChildXids;
@@ -2124,9 +2117,6 @@ CommitTransaction(void)
 	 */
 	smgrDoPendingDeletes(true);
 
-	/* Check we've released all catcache entries */
-	AtEOXact_CatCache(true);
-
 	AtCommit_Notify();
 	AtEOXact_GUC(true, 1);
 	AtEOXact_SPI(true);
@@ -2138,7 +2128,7 @@ CommitTransaction(void)
 	AtEOXact_HashTables(true);
 	AtEOXact_PgStat(true);
 	AtEOXact_Snapshot(true, false);
-	AtCommit_ApplyLauncher();
+	AtEOXact_ApplyLauncher(true);
 	pgstat_report_xact_timestamp(0);
 
 	CurrentResourceOwner = NULL;
@@ -2275,7 +2265,16 @@ PrepareTransaction(void)
 	if (XactHasExportedSnapshots())
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		errmsg("cannot PREPARE a transaction that has exported snapshots")));
+				 errmsg("cannot PREPARE a transaction that has exported snapshots")));
+
+	/*
+	 * Don't allow PREPARE but for transaction that has/might kill logical
+	 * replication workers.
+	 */
+	if (XactManipulatesLogicalReplicationWorkers())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot PREPARE a transaction that has manipulated logical replication workers")));
 
 	/* Prevent cancel/die interrupt while cleaning up */
 	HOLD_INTERRUPTS();
@@ -2395,9 +2394,6 @@ PrepareTransaction(void)
 	 * backend.  The rest is just non-critical cleanup of backend-local state.
 	 */
 	PostPrepare_Twophase();
-
-	/* Check we've released all catcache entries */
-	AtEOXact_CatCache(true);
 
 	/* PREPARE acts the same as COMMIT as far as GUC is concerned */
 	AtEOXact_GUC(true, 1);
@@ -2601,7 +2597,6 @@ AbortTransaction(void)
 							 RESOURCE_RELEASE_AFTER_LOCKS,
 							 false, true);
 		smgrDoPendingDeletes(false);
-		AtEOXact_CatCache(false);
 
 		AtEOXact_GUC(false, 1);
 		AtEOXact_SPI(false);
@@ -2612,6 +2607,7 @@ AbortTransaction(void)
 		AtEOXact_ComboCid();
 		AtEOXact_HashTables(false);
 		AtEOXact_PgStat(false);
+		AtEOXact_ApplyLauncher(false);
 		pgstat_report_xact_timestamp(0);
 	}
 
@@ -2697,6 +2693,7 @@ StartTransactionCommand(void)
 			 * previous CommitTransactionCommand.)
 			 */
 		case TBLOCK_INPROGRESS:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_SUBINPROGRESS:
 			break;
 
@@ -2787,6 +2784,7 @@ CommitTransactionCommand(void)
 			 * counter and return.
 			 */
 		case TBLOCK_INPROGRESS:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_SUBINPROGRESS:
 			CommandCounterIncrement();
 			break;
@@ -3011,10 +3009,12 @@ AbortCurrentTransaction(void)
 			break;
 
 			/*
-			 * if we aren't in a transaction block, we just do the basic abort
-			 * & cleanup transaction.
+			 * If we aren't in a transaction block, we just do the basic abort
+			 * & cleanup transaction.  For this purpose, we treat an implicit
+			 * transaction block as if it were a simple statement.
 			 */
 		case TBLOCK_STARTED:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 			AbortTransaction();
 			CleanupTransaction();
 			s->blockState = TBLOCK_DEFAULT;
@@ -3145,9 +3145,8 @@ AbortCurrentTransaction(void)
  *	completes).  Subtransactions are verboten too.
  *
  *	isTopLevel: passed down from ProcessUtility to determine whether we are
- *	inside a function or multi-query querystring.  (We will always fail if
- *	this is false, but it's convenient to centralize the check here instead of
- *	making callers do it.)
+ *	inside a function.  (We will always fail if this is false, but it's
+ *	convenient to centralize the check here instead of making callers do it.)
  *	stmtType: statement type name, for error messages.
  */
 void
@@ -3180,8 +3179,7 @@ PreventTransactionChain(bool isTopLevel, const char *stmtType)
 		ereport(ERROR,
 				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
 		/* translator: %s represents an SQL statement name */
-				 errmsg("%s cannot be executed from a function or multi-command string",
-						stmtType)));
+				 errmsg("%s cannot be executed from a function", stmtType)));
 
 	/* If we got past IsTransactionBlock test, should be in default state */
 	if (CurrentTransactionState->blockState != TBLOCK_DEFAULT &&
@@ -3341,7 +3339,7 @@ CallXactCallbacks(XactEvent event)
 	XactCallbackItem *item;
 
 	for (item = Xact_callbacks; item; item = item->next)
-		(*item->callback) (event, item->arg);
+		item->callback(event, item->arg);
 }
 
 
@@ -3398,7 +3396,7 @@ CallSubXactCallbacks(SubXactEvent event,
 	SubXactCallbackItem *item;
 
 	for (item = SubXact_callbacks; item; item = item->next)
-		(*item->callback) (event, mySubid, parentSubid, item->arg);
+		item->callback(event, mySubid, parentSubid, item->arg);
 }
 
 
@@ -3422,6 +3420,15 @@ BeginTransactionBlock(void)
 			 * We are not inside a transaction block, so allow one to begin.
 			 */
 		case TBLOCK_STARTED:
+			s->blockState = TBLOCK_BEGIN;
+			break;
+
+			/*
+			 * BEGIN converts an implicit transaction block to a regular one.
+			 * (Note that we allow this even if we've already done some
+			 * commands, which is a bit odd but matches historical practice.)
+			 */
+		case TBLOCK_IMPLICIT_INPROGRESS:
 			s->blockState = TBLOCK_BEGIN;
 			break;
 
@@ -3500,7 +3507,8 @@ PrepareTransactionBlock(char *gid)
 			 * ignore case where we are not in a transaction;
 			 * EndTransactionBlock already issued a warning.
 			 */
-			Assert(s->blockState == TBLOCK_STARTED);
+			Assert(s->blockState == TBLOCK_STARTED ||
+				   s->blockState == TBLOCK_IMPLICIT_INPROGRESS);
 			/* Don't send back a PREPARE result tag... */
 			result = false;
 		}
@@ -3534,6 +3542,18 @@ EndTransactionBlock(void)
 			 * to COMMIT.
 			 */
 		case TBLOCK_INPROGRESS:
+			s->blockState = TBLOCK_END;
+			result = true;
+			break;
+
+			/*
+			 * In an implicit transaction block, commit, but issue a warning
+			 * because there was no explicit BEGIN before this.
+			 */
+		case TBLOCK_IMPLICIT_INPROGRESS:
+			ereport(WARNING,
+					(errcode(ERRCODE_NO_ACTIVE_SQL_TRANSACTION),
+					 errmsg("there is no transaction in progress")));
 			s->blockState = TBLOCK_END;
 			result = true;
 			break;
@@ -3702,8 +3722,14 @@ UserAbortTransactionBlock(void)
 			 * WARNING and go to abort state.  The upcoming call to
 			 * CommitTransactionCommand() will then put us back into the
 			 * default state.
+			 *
+			 * We do the same thing with ABORT inside an implicit transaction,
+			 * although in this case we might be rolling back actual database
+			 * state changes.  (It's debatable whether we should issue a
+			 * WARNING in this case, but we have done so historically.)
 			 */
 		case TBLOCK_STARTED:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 			ereport(WARNING,
 					(errcode(ERRCODE_NO_ACTIVE_SQL_TRANSACTION),
 					 errmsg("there is no transaction in progress")));
@@ -3741,6 +3767,58 @@ UserAbortTransactionBlock(void)
 }
 
 /*
+ * BeginImplicitTransactionBlock
+ *		Start an implicit transaction block if we're not already in one.
+ *
+ * Unlike BeginTransactionBlock, this is called directly from the main loop
+ * in postgres.c, not within a Portal.  So we can just change blockState
+ * without a lot of ceremony.  We do not expect caller to do
+ * CommitTransactionCommand/StartTransactionCommand.
+ */
+void
+BeginImplicitTransactionBlock(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	/*
+	 * If we are in STARTED state (that is, no transaction block is open),
+	 * switch to IMPLICIT_INPROGRESS state, creating an implicit transaction
+	 * block.
+	 *
+	 * For caller convenience, we consider all other transaction states as
+	 * legal here; otherwise the caller would need its own state check, which
+	 * seems rather pointless.
+	 */
+	if (s->blockState == TBLOCK_STARTED)
+		s->blockState = TBLOCK_IMPLICIT_INPROGRESS;
+}
+
+/*
+ * EndImplicitTransactionBlock
+ *		End an implicit transaction block, if we're in one.
+ *
+ * Like EndTransactionBlock, we just make any needed blockState change here.
+ * The real work will be done in the upcoming CommitTransactionCommand().
+ */
+void
+EndImplicitTransactionBlock(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	/*
+	 * If we are in IMPLICIT_INPROGRESS state, switch back to STARTED state,
+	 * allowing CommitTransactionCommand to commit whatever happened during
+	 * the implicit transaction block as though it were a single statement.
+	 *
+	 * For caller convenience, we consider all other transaction states as
+	 * legal here; otherwise the caller would need its own state check, which
+	 * seems rather pointless.
+	 */
+	if (s->blockState == TBLOCK_IMPLICIT_INPROGRESS)
+		s->blockState = TBLOCK_STARTED;
+}
+
+/*
  * DefineSavepoint
  *		This executes a SAVEPOINT command.
  */
@@ -3759,7 +3837,7 @@ DefineSavepoint(char *name)
 	if (IsInParallelMode())
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-			errmsg("cannot define savepoints during a parallel operation")));
+				 errmsg("cannot define savepoints during a parallel operation")));
 
 	switch (s->blockState)
 	{
@@ -3767,7 +3845,7 @@ DefineSavepoint(char *name)
 		case TBLOCK_SUBINPROGRESS:
 			/* Normal subtransaction start */
 			PushTransaction();
-			s = CurrentTransactionState;		/* changed by push */
+			s = CurrentTransactionState;	/* changed by push */
 
 			/*
 			 * Savepoint names, like the TransactionState block itself, live
@@ -3775,6 +3853,28 @@ DefineSavepoint(char *name)
 			 */
 			if (name)
 				s->name = MemoryContextStrdup(TopTransactionContext, name);
+			break;
+
+			/*
+			 * We disallow savepoint commands in implicit transaction blocks.
+			 * There would be no great difficulty in allowing them so far as
+			 * this module is concerned, but a savepoint seems inconsistent
+			 * with exec_simple_query's behavior of abandoning the whole query
+			 * string upon error.  Also, the point of an implicit transaction
+			 * block (as opposed to a regular one) is to automatically close
+			 * after an error, so it's hard to see how a savepoint would fit
+			 * into that.
+			 *
+			 * The error messages for this are phrased as if there were no
+			 * active transaction block at all, which is historical but
+			 * perhaps could be improved.
+			 */
+		case TBLOCK_IMPLICIT_INPROGRESS:
+			ereport(ERROR,
+					(errcode(ERRCODE_NO_ACTIVE_SQL_TRANSACTION),
+			/* translator: %s represents an SQL statement name */
+					 errmsg("%s can only be used in transaction blocks",
+							"SAVEPOINT")));
 			break;
 
 			/* These cases are invalid. */
@@ -3826,18 +3926,26 @@ ReleaseSavepoint(List *options)
 	if (IsInParallelMode())
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-		   errmsg("cannot release savepoints during a parallel operation")));
+				 errmsg("cannot release savepoints during a parallel operation")));
 
 	switch (s->blockState)
 	{
 			/*
-			 * We can't rollback to a savepoint if there is no savepoint
-			 * defined.
+			 * We can't release a savepoint if there is no savepoint defined.
 			 */
 		case TBLOCK_INPROGRESS:
 			ereport(ERROR,
 					(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
 					 errmsg("no such savepoint")));
+			break;
+
+		case TBLOCK_IMPLICIT_INPROGRESS:
+			/* See comment about implicit transactions in DefineSavepoint */
+			ereport(ERROR,
+					(errcode(ERRCODE_NO_ACTIVE_SQL_TRANSACTION),
+			/* translator: %s represents an SQL statement name */
+					 errmsg("%s can only be used in transaction blocks",
+							"RELEASE SAVEPOINT")));
 			break;
 
 			/*
@@ -3939,7 +4047,7 @@ RollbackToSavepoint(List *options)
 	if (IsInParallelMode())
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-		errmsg("cannot rollback to savepoints during a parallel operation")));
+				 errmsg("cannot rollback to savepoints during a parallel operation")));
 
 	switch (s->blockState)
 	{
@@ -3952,6 +4060,15 @@ RollbackToSavepoint(List *options)
 			ereport(ERROR,
 					(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
 					 errmsg("no such savepoint")));
+			break;
+
+		case TBLOCK_IMPLICIT_INPROGRESS:
+			/* See comment about implicit transactions in DefineSavepoint */
+			ereport(ERROR,
+					(errcode(ERRCODE_NO_ACTIVE_SQL_TRANSACTION),
+			/* translator: %s represents an SQL statement name */
+					 errmsg("%s can only be used in transaction blocks",
+							"ROLLBACK TO SAVEPOINT")));
 			break;
 
 			/*
@@ -4043,11 +4160,12 @@ RollbackToSavepoint(List *options)
 /*
  * BeginInternalSubTransaction
  *		This is the same as DefineSavepoint except it allows TBLOCK_STARTED,
- *		TBLOCK_END, and TBLOCK_PREPARE states, and therefore it can safely be
- *		used in functions that might be called when not inside a BEGIN block
- *		or when running deferred triggers at COMMIT/PREPARE time.  Also, it
- *		automatically does CommitTransactionCommand/StartTransactionCommand
- *		instead of expecting the caller to do it.
+ *		TBLOCK_IMPLICIT_INPROGRESS, TBLOCK_END, and TBLOCK_PREPARE states,
+ *		and therefore it can safely be used in functions that might be called
+ *		when not inside a BEGIN block or when running deferred triggers at
+ *		COMMIT/PREPARE time.  Also, it automatically does
+ *		CommitTransactionCommand/StartTransactionCommand instead of expecting
+ *		the caller to do it.
  */
 void
 BeginInternalSubTransaction(char *name)
@@ -4067,18 +4185,19 @@ BeginInternalSubTransaction(char *name)
 	if (IsInParallelMode())
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-		errmsg("cannot start subtransactions during a parallel operation")));
+				 errmsg("cannot start subtransactions during a parallel operation")));
 
 	switch (s->blockState)
 	{
 		case TBLOCK_STARTED:
 		case TBLOCK_INPROGRESS:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_END:
 		case TBLOCK_PREPARE:
 		case TBLOCK_SUBINPROGRESS:
 			/* Normal subtransaction start */
 			PushTransaction();
-			s = CurrentTransactionState;		/* changed by push */
+			s = CurrentTransactionState;	/* changed by push */
 
 			/*
 			 * Savepoint names, like the TransactionState block itself, live
@@ -4134,7 +4253,7 @@ ReleaseCurrentSubTransaction(void)
 	if (IsInParallelMode())
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-		errmsg("cannot commit subtransactions during a parallel operation")));
+				 errmsg("cannot commit subtransactions during a parallel operation")));
 
 	if (s->blockState != TBLOCK_SUBINPROGRESS)
 		elog(ERROR, "ReleaseCurrentSubTransaction: unexpected state %s",
@@ -4177,6 +4296,7 @@ RollbackAndReleaseCurrentSubTransaction(void)
 		case TBLOCK_DEFAULT:
 		case TBLOCK_STARTED:
 		case TBLOCK_BEGIN:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_PARALLEL_INPROGRESS:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_INPROGRESS:
@@ -4208,6 +4328,7 @@ RollbackAndReleaseCurrentSubTransaction(void)
 	s = CurrentTransactionState;	/* changed by pop */
 	AssertState(s->blockState == TBLOCK_SUBINPROGRESS ||
 				s->blockState == TBLOCK_INPROGRESS ||
+				s->blockState == TBLOCK_IMPLICIT_INPROGRESS ||
 				s->blockState == TBLOCK_STARTED);
 }
 
@@ -4222,6 +4343,9 @@ void
 AbortOutOfAnyTransaction(void)
 {
 	TransactionState s = CurrentTransactionState;
+
+	/* Ensure we're not running in a doomed memory context */
+	AtAbort_Memory();
 
 	/*
 	 * Get out of any transaction or nested transaction
@@ -4253,6 +4377,7 @@ AbortOutOfAnyTransaction(void)
 			case TBLOCK_STARTED:
 			case TBLOCK_BEGIN:
 			case TBLOCK_INPROGRESS:
+			case TBLOCK_IMPLICIT_INPROGRESS:
 			case TBLOCK_PARALLEL_INPROGRESS:
 			case TBLOCK_END:
 			case TBLOCK_ABORT_PENDING:
@@ -4264,7 +4389,14 @@ AbortOutOfAnyTransaction(void)
 				break;
 			case TBLOCK_ABORT:
 			case TBLOCK_ABORT_END:
-				/* AbortTransaction already done, still need Cleanup */
+
+				/*
+				 * AbortTransaction is already done, still need Cleanup.
+				 * However, if we failed partway through running ROLLBACK,
+				 * there will be an active portal running that command, which
+				 * we need to shut down before doing CleanupTransaction.
+				 */
+				AtAbort_Portals();
 				CleanupTransaction();
 				s->blockState = TBLOCK_DEFAULT;
 				break;
@@ -4287,6 +4419,14 @@ AbortOutOfAnyTransaction(void)
 			case TBLOCK_SUBABORT_END:
 			case TBLOCK_SUBABORT_RESTART:
 				/* As above, but AbortSubTransaction already done */
+				if (s->curTransactionOwner)
+				{
+					/* As in TBLOCK_ABORT, might have a live portal to zap */
+					AtSubAbort_Portals(s->subTransactionId,
+									   s->parent->subTransactionId,
+									   s->curTransactionOwner,
+									   s->parent->curTransactionOwner);
+				}
 				CleanupSubTransaction();
 				s = CurrentTransactionState;	/* changed by pop */
 				break;
@@ -4295,6 +4435,9 @@ AbortOutOfAnyTransaction(void)
 
 	/* Should be out of all subxacts now */
 	Assert(s->parent == NULL);
+
+	/* If we didn't actually have anything to do, revert to TopMemoryContext */
+	AtCleanup_Memory();
 }
 
 /*
@@ -4345,6 +4488,7 @@ TransactionBlockStatusCode(void)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_INPROGRESS:
+		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_PARALLEL_INPROGRESS:
 		case TBLOCK_SUBINPROGRESS:
 		case TBLOCK_END:
@@ -5012,6 +5156,8 @@ BlockStateAsString(TBlockState blockState)
 			return "BEGIN";
 		case TBLOCK_INPROGRESS:
 			return "INPROGRESS";
+		case TBLOCK_IMPLICIT_INPROGRESS:
+			return "IMPLICIT_INPROGRESS";
 		case TBLOCK_PARALLEL_INPROGRESS:
 			return "PARALLEL_INPROGRESS";
 		case TBLOCK_END:
@@ -5349,6 +5495,8 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 	int			i;
 	TimestampTz commit_time;
 
+	Assert(TransactionIdIsValid(xid));
+
 	max_xid = TransactionIdLatest(xid, parsed->nsubxacts, parsed->subxacts);
 
 	/*
@@ -5409,13 +5557,13 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 		 * recovered. It's unlikely but it's good to be safe.
 		 */
 		TransactionIdAsyncCommitTree(
-							  xid, parsed->nsubxacts, parsed->subxacts, lsn);
+									 xid, parsed->nsubxacts, parsed->subxacts, lsn);
 
 		/*
 		 * We must mark clog before we update the ProcArray.
 		 */
 		ExpireTreeKnownAssignedTransactionIds(
-						  xid, parsed->nsubxacts, parsed->subxacts, max_xid);
+											  xid, parsed->nsubxacts, parsed->subxacts, max_xid);
 
 		/*
 		 * Send any cache invalidations attached to the commit. We must
@@ -5424,7 +5572,7 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 		 */
 		ProcessCommittedInvalidationMessages(
 											 parsed->msgs, parsed->nmsgs,
-						  XactCompletionRelcacheInitFileInval(parsed->xinfo),
+											 XactCompletionRelcacheInitFileInval(parsed->xinfo),
 											 parsed->dbId, parsed->tsId);
 
 		/*
@@ -5516,6 +5664,8 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid)
 	int			i;
 	TransactionId max_xid;
 
+	Assert(TransactionIdIsValid(xid));
+
 	/*
 	 * Make sure nextXid is beyond any XID mentioned in the record.
 	 *
@@ -5561,7 +5711,7 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid)
 		 * We must update the ProcArray after we have marked clog.
 		 */
 		ExpireTreeKnownAssignedTransactionIds(
-						  xid, parsed->nsubxacts, parsed->subxacts, max_xid);
+											  xid, parsed->nsubxacts, parsed->subxacts, max_xid);
 
 		/*
 		 * There are no flat files that need updating, nor invalidation
@@ -5596,61 +5746,61 @@ xact_redo(XLogReaderState *record)
 	/* Backup blocks are not used in xact records */
 	Assert(!XLogRecHasAnyBlockRefs(record));
 
-	if (info == XLOG_XACT_COMMIT || info == XLOG_XACT_COMMIT_PREPARED)
+	if (info == XLOG_XACT_COMMIT)
 	{
 		xl_xact_commit *xlrec = (xl_xact_commit *) XLogRecGetData(record);
 		xl_xact_parsed_commit parsed;
 
-		ParseCommitRecord(XLogRecGetInfo(record), xlrec,
-						  &parsed);
-
-		if (info == XLOG_XACT_COMMIT)
-		{
-			Assert(!TransactionIdIsValid(parsed.twophase_xid));
-			xact_redo_commit(&parsed, XLogRecGetXid(record),
-							 record->EndRecPtr, XLogRecGetOrigin(record));
-		}
-		else
-		{
-			Assert(TransactionIdIsValid(parsed.twophase_xid));
-			xact_redo_commit(&parsed, parsed.twophase_xid,
-							 record->EndRecPtr, XLogRecGetOrigin(record));
-
-			/* Delete TwoPhaseState gxact entry and/or 2PC file. */
-			PrepareRedoRemove(parsed.twophase_xid, false);
-		}
+		ParseCommitRecord(XLogRecGetInfo(record), xlrec, &parsed);
+		xact_redo_commit(&parsed, XLogRecGetXid(record),
+						 record->EndRecPtr, XLogRecGetOrigin(record));
 	}
-	else if (info == XLOG_XACT_ABORT || info == XLOG_XACT_ABORT_PREPARED)
+	else if (info == XLOG_XACT_COMMIT_PREPARED)
+	{
+		xl_xact_commit *xlrec = (xl_xact_commit *) XLogRecGetData(record);
+		xl_xact_parsed_commit parsed;
+
+		ParseCommitRecord(XLogRecGetInfo(record), xlrec, &parsed);
+		xact_redo_commit(&parsed, parsed.twophase_xid,
+						 record->EndRecPtr, XLogRecGetOrigin(record));
+
+		/* Delete TwoPhaseState gxact entry and/or 2PC file. */
+		LWLockAcquire(TwoPhaseStateLock, LW_EXCLUSIVE);
+		PrepareRedoRemove(parsed.twophase_xid, false);
+		LWLockRelease(TwoPhaseStateLock);
+	}
+	else if (info == XLOG_XACT_ABORT)
 	{
 		xl_xact_abort *xlrec = (xl_xact_abort *) XLogRecGetData(record);
 		xl_xact_parsed_abort parsed;
 
-		ParseAbortRecord(XLogRecGetInfo(record), xlrec,
-						 &parsed);
+		ParseAbortRecord(XLogRecGetInfo(record), xlrec, &parsed);
+		xact_redo_abort(&parsed, XLogRecGetXid(record));
+	}
+	else if (info == XLOG_XACT_ABORT_PREPARED)
+	{
+		xl_xact_abort *xlrec = (xl_xact_abort *) XLogRecGetData(record);
+		xl_xact_parsed_abort parsed;
 
-		if (info == XLOG_XACT_ABORT)
-		{
-			Assert(!TransactionIdIsValid(parsed.twophase_xid));
-			xact_redo_abort(&parsed, XLogRecGetXid(record));
-		}
-		else
-		{
-			Assert(TransactionIdIsValid(parsed.twophase_xid));
-			xact_redo_abort(&parsed, parsed.twophase_xid);
+		ParseAbortRecord(XLogRecGetInfo(record), xlrec, &parsed);
+		xact_redo_abort(&parsed, parsed.twophase_xid);
 
-			/* Delete TwoPhaseState gxact entry and/or 2PC file. */
-			PrepareRedoRemove(parsed.twophase_xid, false);
-		}
+		/* Delete TwoPhaseState gxact entry and/or 2PC file. */
+		LWLockAcquire(TwoPhaseStateLock, LW_EXCLUSIVE);
+		PrepareRedoRemove(parsed.twophase_xid, false);
+		LWLockRelease(TwoPhaseStateLock);
 	}
 	else if (info == XLOG_XACT_PREPARE)
 	{
 		/*
-		 * Store xid and start/end pointers of the WAL record in
-		 * TwoPhaseState gxact entry.
+		 * Store xid and start/end pointers of the WAL record in TwoPhaseState
+		 * gxact entry.
 		 */
+		LWLockAcquire(TwoPhaseStateLock, LW_EXCLUSIVE);
 		PrepareRedoAdd(XLogRecGetData(record),
 					   record->ReadRecPtr,
 					   record->EndRecPtr);
+		LWLockRelease(TwoPhaseStateLock);
 	}
 	else if (info == XLOG_XACT_ASSIGNMENT)
 	{

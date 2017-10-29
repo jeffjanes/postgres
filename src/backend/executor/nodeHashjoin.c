@@ -58,9 +58,10 @@ static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
  *			  the other one is "outer".
  * ----------------------------------------------------------------
  */
-TupleTableSlot *				/* return: a tuple or NULL */
-ExecHashJoin(HashJoinState *node)
+static TupleTableSlot *			/* return: a tuple or NULL */
+ExecHashJoin(PlanState *pstate)
 {
+	HashJoinState *node = castNode(HashJoinState, pstate);
 	PlanState  *outerNode;
 	HashState  *hashNode;
 	ExprState  *joinqual;
@@ -92,6 +93,14 @@ ExecHashJoin(HashJoinState *node)
 	 */
 	for (;;)
 	{
+		/*
+		 * It's possible to iterate this loop many times before returning a
+		 * tuple, in some pathological cases such as needing to move much of
+		 * the current batch to a later batch.  So let's check for interrupts
+		 * each time through.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
 		switch (node->hj_JoinState)
 		{
 			case HJ_BUILD_HASHTABLE:
@@ -234,7 +243,7 @@ ExecHashJoin(HashJoinState *node)
 					Assert(batchno > hashtable->curbatch);
 					ExecHashJoinSaveTuple(ExecFetchSlotMinimalTuple(outerTupleSlot),
 										  hashvalue,
-										&hashtable->outerBatchFile[batchno]);
+										  &hashtable->outerBatchFile[batchno]);
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
@@ -245,13 +254,6 @@ ExecHashJoin(HashJoinState *node)
 				/* FALL THRU */
 
 			case HJ_SCAN_BUCKET:
-
-				/*
-				 * We check for interrupts here because this corresponds to
-				 * where we'd fetch a row from a child plan node in other join
-				 * types.
-				 */
-				CHECK_FOR_INTERRUPTS();
 
 				/*
 				 * Scan the selected hash bucket for matches to current outer
@@ -398,6 +400,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate = makeNode(HashJoinState);
 	hjstate->js.ps.plan = (Plan *) node;
 	hjstate->js.ps.state = estate;
+	hjstate->js.ps.ExecProcNode = ExecHashJoin;
 
 	/*
 	 * Miscellaneous initialization
@@ -452,20 +455,20 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 		case JOIN_ANTI:
 			hjstate->hj_NullInnerTupleSlot =
 				ExecInitNullTupleSlot(estate,
-								 ExecGetResultType(innerPlanState(hjstate)));
+									  ExecGetResultType(innerPlanState(hjstate)));
 			break;
 		case JOIN_RIGHT:
 			hjstate->hj_NullOuterTupleSlot =
 				ExecInitNullTupleSlot(estate,
-								 ExecGetResultType(outerPlanState(hjstate)));
+									  ExecGetResultType(outerPlanState(hjstate)));
 			break;
 		case JOIN_FULL:
 			hjstate->hj_NullOuterTupleSlot =
 				ExecInitNullTupleSlot(estate,
-								 ExecGetResultType(outerPlanState(hjstate)));
+									  ExecGetResultType(outerPlanState(hjstate)));
 			hjstate->hj_NullInnerTupleSlot =
 				ExecInitNullTupleSlot(estate,
-								 ExecGetResultType(innerPlanState(hjstate)));
+									  ExecGetResultType(innerPlanState(hjstate)));
 			break;
 		default:
 			elog(ERROR, "unrecognized join type: %d",
@@ -618,7 +621,7 @@ ExecHashJoinOuterGetTuple(PlanState *outerNode,
 			econtext->ecxt_outertuple = slot;
 			if (ExecHashGetHashValue(hashtable, econtext,
 									 hjstate->hj_OuterHashKeys,
-									 true,		/* outer tuple */
+									 true,	/* outer tuple */
 									 HJ_FILL_OUTER(hjstate),
 									 hashvalue))
 			{
@@ -687,7 +690,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 			BufFileClose(hashtable->outerBatchFile[curbatch]);
 		hashtable->outerBatchFile[curbatch] = NULL;
 	}
-	else	/* we just finished the first batch */
+	else						/* we just finished the first batch */
 	{
 		/*
 		 * Reset some of the skew optimization state variables, since we no
@@ -764,7 +767,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 		if (BufFileSeek(innerFile, 0, 0L, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
-				   errmsg("could not rewind hash-join temporary file: %m")));
+					 errmsg("could not rewind hash-join temporary file: %m")));
 
 		while ((slot = ExecHashJoinGetSavedTuple(hjstate,
 												 innerFile,
@@ -794,7 +797,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 		if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
-				   errmsg("could not rewind hash-join temporary file: %m")));
+					 errmsg("could not rewind hash-join temporary file: %m")));
 	}
 
 	return true;

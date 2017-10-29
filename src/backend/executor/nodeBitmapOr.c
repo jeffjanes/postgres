@@ -34,6 +34,19 @@
 
 
 /* ----------------------------------------------------------------
+ *		ExecBitmapOr
+ *
+ *		stub for pro forma compliance
+ * ----------------------------------------------------------------
+ */
+static TupleTableSlot *
+ExecBitmapOr(PlanState *pstate)
+{
+	elog(ERROR, "BitmapOr node does not support ExecProcNode call convention");
+	return NULL;
+}
+
+/* ----------------------------------------------------------------
  *		ExecInitBitmapOr
  *
  *		Begin all of the subscans of the BitmapOr node.
@@ -64,6 +77,7 @@ ExecInitBitmapOr(BitmapOr *node, EState *estate, int eflags)
 	 */
 	bitmaporstate->ps.plan = (Plan *) node;
 	bitmaporstate->ps.state = estate;
+	bitmaporstate->ps.ExecProcNode = ExecBitmapOr;
 	bitmaporstate->bitmapplans = bitmapplanstates;
 	bitmaporstate->nplans = nplans;
 
@@ -150,7 +164,7 @@ MultiExecBitmapOr(BitmapOrState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			if (result == NULL)
-				result = subresult;		/* first subplan */
+				result = subresult; /* first subplan */
 			else
 			{
 				tbm_union(result, subresult);

@@ -72,9 +72,9 @@
  */
 #define RELMAPPER_FILENAME		"pg_filenode.map"
 
-#define RELMAPPER_FILEMAGIC		0x592717		/* version ID value */
+#define RELMAPPER_FILEMAGIC		0x592717	/* version ID value */
 
-#define MAX_MAPPINGS			62		/* 62 * 8 + 16 = 512 */
+#define MAX_MAPPINGS			62	/* 62 * 8 + 16 = 512 */
 
 typedef struct RelMapping
 {
@@ -644,8 +644,7 @@ load_relmap_file(bool shared)
 	}
 
 	/* Read data ... */
-	fd = OpenTransientFile(mapfilename,
-						   O_RDONLY | PG_BINARY, S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(mapfilename, O_RDONLY | PG_BINARY);
 	if (fd < 0)
 		ereport(FATAL,
 				(errcode_for_file_access(),
@@ -684,8 +683,8 @@ load_relmap_file(bool shared)
 
 	if (!EQ_CRC32C(crc, map->crc))
 		ereport(FATAL,
-		  (errmsg("relation mapping file \"%s\" contains incorrect checksum",
-				  mapfilename)));
+				(errmsg("relation mapping file \"%s\" contains incorrect checksum",
+						mapfilename)));
 }
 
 /*
@@ -745,9 +744,7 @@ write_relmap_file(bool shared, RelMapFile *newmap,
 		realmap = &local_map;
 	}
 
-	fd = OpenTransientFile(mapfilename,
-						   O_WRONLY | O_CREAT | PG_BINARY,
-						   S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(mapfilename, O_WRONLY | O_CREAT | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),

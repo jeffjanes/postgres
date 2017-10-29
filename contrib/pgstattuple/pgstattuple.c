@@ -62,7 +62,7 @@ typedef struct pgstattuple_type
 } pgstattuple_type;
 
 typedef void (*pgstat_page) (pgstattuple_type *, Relation, BlockNumber,
-										 BufferAccessStrategy);
+							 BufferAccessStrategy);
 
 static Datum build_pgstattuple_type(pgstattuple_type *stat,
 					   FunctionCallInfo fcinfo);
@@ -386,7 +386,7 @@ pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 	heap_endscan(scan);
 	relation_close(rel, AccessShareLock);
 
-	stat.table_len = (uint64) nblocks *BLCKSZ;
+	stat.table_len = (uint64) nblocks * BLCKSZ;
 
 	return build_pgstattuple_type(&stat, fcinfo);
 }
@@ -416,7 +416,7 @@ pgstat_btree_page(pgstattuple_type *stat, Relation rel, BlockNumber blkno,
 		BTPageOpaque opaque;
 
 		opaque = (BTPageOpaque) PageGetSpecialPointer(page);
-		if (opaque->btpo_flags & (BTP_DELETED | BTP_HALF_DEAD))
+		if (P_IGNORE(opaque))
 		{
 			/* recyclable page */
 			stat->free_space += BLCKSZ;
@@ -531,7 +531,7 @@ pgstat_index(Relation rel, BlockNumber start, pgstat_page pagefn,
 		/* Quit if we've scanned the whole relation */
 		if (blkno >= nblocks)
 		{
-			stat.table_len = (uint64) nblocks *BLCKSZ;
+			stat.table_len = (uint64) nblocks * BLCKSZ;
 
 			break;
 		}

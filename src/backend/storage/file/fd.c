@@ -116,6 +116,11 @@
  */
 #define FD_MINFREE				10
 
+/*
+ * Default mode for created files, unless something else is specified using
+ * the *Perm() function variants.
+ */
+#define PG_FILE_MODE_DEFAULT	(S_IRUSR | S_IWUSR)
 
 /*
  * A number of platforms allow individual processes to open many more files
@@ -186,7 +191,7 @@ typedef struct vfd
 	char	   *fileName;		/* name of file, or NULL for unused VFD */
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
-	int			fileMode;		/* mode to pass to open(2) */
+	mode_t		fileMode;		/* mode to pass to open(2) */
 } Vfd;
 
 /*
@@ -522,7 +527,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 				/* FATAL error because mapping would remain */
 				ereport(FATAL,
 						(errcode_for_file_access(),
-					  errmsg("could not munmap() while flushing data: %m")));
+						 errmsg("could not munmap() while flushing data: %m")));
 			}
 
 			return;
@@ -604,7 +609,7 @@ durable_rename(const char *oldfile, const char *newfile, int elevel)
 	if (fsync_fname_ext(oldfile, false, false, elevel) != 0)
 		return -1;
 
-	fd = OpenTransientFile((char *) newfile, PG_BINARY | O_RDWR, 0);
+	fd = OpenTransientFile(newfile, PG_BINARY | O_RDWR);
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
@@ -685,8 +690,8 @@ durable_unlink(const char *fname, int elevel)
 	}
 
 	/*
-	 * To guarantee that the removal of the file is persistent, fsync
-	 * its parent directory.
+	 * To guarantee that the removal of the file is persistent, fsync its
+	 * parent directory.
 	 */
 	if (fsync_parent_path(fname, elevel) != 0)
 		return -1;
@@ -815,10 +820,10 @@ count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
 	getrlimit_status = getrlimit(RLIMIT_NOFILE, &rlim);
 #else							/* but BSD doesn't ... */
 	getrlimit_status = getrlimit(RLIMIT_OFILE, &rlim);
-#endif   /* RLIMIT_NOFILE */
+#endif							/* RLIMIT_NOFILE */
 	if (getrlimit_status != 0)
 		ereport(WARNING, (errmsg("getrlimit failed: %m")));
-#endif   /* HAVE_GETRLIMIT */
+#endif							/* HAVE_GETRLIMIT */
 
 	/* dup until failure or probe limit reached */
 	for (;;)
@@ -917,7 +922,17 @@ set_max_safe_fds(void)
 }
 
 /*
- * BasicOpenFile --- same as open(2) except can free other FDs if needed
+ * Open a file with BasicOpenFilePerm() and pass default file mode for the
+ * fileMode parameter.
+ */
+int
+BasicOpenFile(const char *fileName, int fileFlags)
+{
+	return BasicOpenFilePerm(fileName, fileFlags, PG_FILE_MODE_DEFAULT);
+}
+
+/*
+ * BasicOpenFilePerm --- same as open(2) except can free other FDs if needed
  *
  * This is exported for use by places that really want a plain kernel FD,
  * but need to be proof against running out of FDs.  Once an FD has been
@@ -933,7 +948,7 @@ set_max_safe_fds(void)
  * this module wouldn't have any open files to close at that point anyway.
  */
 int
-BasicOpenFile(FileName fileName, int fileFlags, int fileMode)
+BasicOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	int			fd;
 
@@ -978,7 +993,7 @@ _dump_lru(void)
 	snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "LEAST");
 	elog(LOG, "%s", buf);
 }
-#endif   /* FDDEBUG */
+#endif							/* FDDEBUG */
 
 static void
 Delete(File file)
@@ -1084,8 +1099,8 @@ LruInsert(File file)
 		 * overall system file table being full.  So, be prepared to release
 		 * another FD if necessary...
 		 */
-		vfdP->fd = BasicOpenFile(vfdP->fileName, vfdP->fileFlags,
-								 vfdP->fileMode);
+		vfdP->fd = BasicOpenFilePerm(vfdP->fileName, vfdP->fileFlags,
+									 vfdP->fileMode);
 		if (vfdP->fd < 0)
 		{
 			DO_DB(elog(LOG, "re-open failed: %m"));
@@ -1293,6 +1308,16 @@ FileInvalidate(File file)
 #endif
 
 /*
+ * Open a file with PathNameOpenFilePerm() and pass default file mode for the
+ * fileMode parameter.
+ */
+File
+PathNameOpenFile(const char *fileName, int fileFlags)
+{
+	return PathNameOpenFilePerm(fileName, fileFlags, PG_FILE_MODE_DEFAULT);
+}
+
+/*
  * open a file in an arbitrary directory
  *
  * NB: if the passed pathname is relative (which it usually is),
@@ -1300,13 +1325,13 @@ FileInvalidate(File file)
  * (which should always be $PGDATA when this code is running).
  */
 File
-PathNameOpenFile(FileName fileName, int fileFlags, int fileMode)
+PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	char	   *fnamecopy;
 	File		file;
 	Vfd		   *vfdP;
 
-	DO_DB(elog(LOG, "PathNameOpenFile: %s %x %o",
+	DO_DB(elog(LOG, "PathNameOpenFilePerm: %s %x %o",
 			   fileName, fileFlags, fileMode));
 
 	/*
@@ -1324,7 +1349,7 @@ PathNameOpenFile(FileName fileName, int fileFlags, int fileMode)
 	/* Close excess kernel FDs. */
 	ReleaseLruFiles();
 
-	vfdP->fd = BasicOpenFile(fileName, fileFlags, fileMode);
+	vfdP->fd = BasicOpenFilePerm(fileName, fileFlags, fileMode);
 
 	if (vfdP->fd < 0)
 	{
@@ -1461,8 +1486,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 	 * temp file that can be reused.
 	 */
 	file = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
-							0600);
+							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
 	if (file <= 0)
 	{
 		/*
@@ -1476,8 +1500,7 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 		mkdir(tempdirpath, S_IRWXU);
 
 		file = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
-								0600);
+								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY);
 		if (file <= 0 && rejectError)
 			elog(ERROR, "could not create temporary file \"%s\": %m",
 				 tempfilepath);
@@ -1757,8 +1780,8 @@ FileWrite(File file, char *buffer, int amount, uint32 wait_event_info)
 			if (newTotal > (uint64) temp_file_limit * (uint64) 1024)
 				ereport(ERROR,
 						(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
-				 errmsg("temporary file size exceeds temp_file_limit (%dkB)",
-						temp_file_limit)));
+						 errmsg("temporary file size exceeds temp_file_limit (%dkB)",
+								temp_file_limit)));
 		}
 	}
 
@@ -2006,7 +2029,7 @@ FileGetRawFlags(File file)
 /*
  * FileGetRawMode - returns the mode bitmask passed to open(2)
  */
-int
+mode_t
 FileGetRawMode(File file)
 {
 	Assert(FileIsValid(file));
@@ -2136,12 +2159,21 @@ TryAgain:
 	return NULL;
 }
 
+/*
+ * Open a file with OpenTransientFilePerm() and pass default file mode for
+ * the fileMode parameter.
+ */
+int
+OpenTransientFile(const char *fileName, int fileFlags)
+{
+	return OpenTransientFilePerm(fileName, fileFlags, PG_FILE_MODE_DEFAULT);
+}
 
 /*
  * Like AllocateFile, but returns an unbuffered fd like open(2)
  */
 int
-OpenTransientFile(FileName fileName, int fileFlags, int fileMode)
+OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 {
 	int			fd;
 
@@ -2158,7 +2190,7 @@ OpenTransientFile(FileName fileName, int fileFlags, int fileMode)
 	/* Close excess kernel FDs. */
 	ReleaseLruFiles();
 
-	fd = BasicOpenFile(fileName, fileFlags, fileMode);
+	fd = BasicOpenFilePerm(fileName, fileFlags, fileMode);
 
 	if (fd >= 0)
 	{
@@ -2502,7 +2534,7 @@ closeAllVfds(void)
 
 	if (SizeVfdCache > 0)
 	{
-		Assert(FileIsNotOpen(0));		/* Make sure ring not corrupted */
+		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
 		for (i = 1; i < SizeVfdCache; i++)
 		{
 			if (!FileIsNotOpen(i))
@@ -2653,7 +2685,7 @@ CleanupTempFiles(bool isProcExit)
 	 */
 	if (isProcExit || have_xact_temporary_files)
 	{
-		Assert(FileIsNotOpen(0));		/* Make sure ring not corrupted */
+		Assert(FileIsNotOpen(0));	/* Make sure ring not corrupted */
 		for (i = 1; i < SizeVfdCache; i++)
 		{
 			unsigned short fdstate = VfdCache[i].fdstate;
@@ -2728,7 +2760,7 @@ RemovePgTempFiles(void)
 			continue;
 
 		snprintf(temp_path, sizeof(temp_path), "pg_tblspc/%s/%s/%s",
-			spc_de->d_name, TABLESPACE_VERSION_DIRECTORY, PG_TEMP_FILES_DIR);
+				 spc_de->d_name, TABLESPACE_VERSION_DIRECTORY, PG_TEMP_FILES_DIR);
 		RemovePgTempFilesInDir(temp_path);
 
 		snprintf(temp_path, sizeof(temp_path), "pg_tblspc/%s/%s",
@@ -3081,7 +3113,7 @@ pre_sync_fname(const char *fname, bool isdir, int elevel)
 	if (isdir)
 		return;
 
-	fd = OpenTransientFile((char *) fname, O_RDONLY | PG_BINARY, 0);
+	fd = OpenTransientFile(fname, O_RDONLY | PG_BINARY);
 
 	if (fd < 0)
 	{
@@ -3102,7 +3134,7 @@ pre_sync_fname(const char *fname, bool isdir, int elevel)
 	(void) CloseTransientFile(fd);
 }
 
-#endif   /* PG_FLUSH_DATA_WORKS */
+#endif							/* PG_FLUSH_DATA_WORKS */
 
 static void
 datadir_fsync_fname(const char *fname, bool isdir, int elevel)
@@ -3141,7 +3173,7 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 	else
 		flags |= O_RDONLY;
 
-	fd = OpenTransientFile((char *) fname, flags, 0);
+	fd = OpenTransientFile(fname, flags);
 
 	/*
 	 * Some OSs don't allow us to open directories at all (Windows returns

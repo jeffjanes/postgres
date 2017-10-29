@@ -73,7 +73,7 @@ copyParamList(ParamListInfo from)
 
 		/* give hook a chance in case parameter is dynamic */
 		if (!OidIsValid(oprm->ptype) && from->paramFetch != NULL)
-			(*from->paramFetch) (from, i + 1);
+			from->paramFetch(from, i + 1);
 
 		/* flat-copy the parameter info */
 		*nprm = *oprm;
@@ -115,12 +115,12 @@ EstimateParamListSpace(ParamListInfo paramLI)
 		{
 			/* give hook a chance in case parameter is dynamic */
 			if (!OidIsValid(prm->ptype) && paramLI->paramFetch != NULL)
-				(*paramLI->paramFetch) (paramLI, i + 1);
+				paramLI->paramFetch(paramLI, i + 1);
 			typeOid = prm->ptype;
 		}
 
 		sz = add_size(sz, sizeof(Oid)); /* space for type OID */
-		sz = add_size(sz, sizeof(uint16));		/* space for pflags */
+		sz = add_size(sz, sizeof(uint16));	/* space for pflags */
 
 		/* space for datum/isnull */
 		if (OidIsValid(typeOid))
@@ -132,7 +132,7 @@ EstimateParamListSpace(ParamListInfo paramLI)
 			typByVal = true;
 		}
 		sz = add_size(sz,
-			  datumEstimateSpace(prm->value, prm->isnull, typByVal, typLen));
+					  datumEstimateSpace(prm->value, prm->isnull, typByVal, typLen));
 	}
 
 	return sz;
@@ -184,7 +184,7 @@ SerializeParamList(ParamListInfo paramLI, char **start_address)
 		{
 			/* give hook a chance in case parameter is dynamic */
 			if (!OidIsValid(prm->ptype) && paramLI->paramFetch != NULL)
-				(*paramLI->paramFetch) (paramLI, i + 1);
+				paramLI->paramFetch(paramLI, i + 1);
 			typeOid = prm->ptype;
 		}
 

@@ -75,22 +75,22 @@ enum SysCacheIdentifier
 	PARTRELID,
 	PROCNAMEARGSNSP,
 	PROCOID,
+	PUBLICATIONNAME,
+	PUBLICATIONOID,
+	PUBLICATIONREL,
+	PUBLICATIONRELMAP,
 	RANGETYPE,
 	RELNAMENSP,
 	RELOID,
 	REPLORIGIDENT,
 	REPLORIGNAME,
-	PUBLICATIONOID,
-	PUBLICATIONNAME,
-	PUBLICATIONREL,
-	PUBLICATIONRELMAP,
 	RULERELNAME,
 	SEQRELID,
 	STATEXTNAMENSP,
 	STATEXTOID,
 	STATRELATTINH,
-	SUBSCRIPTIONOID,
 	SUBSCRIPTIONNAME,
+	SUBSCRIPTIONOID,
 	SUBSCRIPTIONRELMAP,
 	TABLESPACEOID,
 	TRFOID,
@@ -108,6 +108,8 @@ enum SysCacheIdentifier
 	TYPEOID,
 	USERMAPPINGOID,
 	USERMAPPINGUSERSERVER
+
+#define SysCacheSize (USERMAPPINGUSERSERVER + 1)
 };
 
 extern void InitCatalogCache(void);
@@ -115,6 +117,20 @@ extern void InitCatalogCachePhase2(void);
 
 extern HeapTuple SearchSysCache(int cacheId,
 			   Datum key1, Datum key2, Datum key3, Datum key4);
+
+/*
+ * The use of argument specific numbers is encouraged. They're faster, and
+ * insulates the caller from changes in the maximum number of keys.
+ */
+extern HeapTuple SearchSysCache1(int cacheId,
+				Datum key1);
+extern HeapTuple SearchSysCache2(int cacheId,
+				Datum key1, Datum key2);
+extern HeapTuple SearchSysCache3(int cacheId,
+				Datum key1, Datum key2, Datum key3);
+extern HeapTuple SearchSysCache4(int cacheId,
+				Datum key1, Datum key2, Datum key3, Datum key4);
+
 extern void ReleaseSysCache(HeapTuple tuple);
 
 /* convenience routines */
@@ -129,6 +145,9 @@ extern HeapTuple SearchSysCacheAttName(Oid relid, const char *attname);
 extern HeapTuple SearchSysCacheCopyAttName(Oid relid, const char *attname);
 extern bool SearchSysCacheExistsAttName(Oid relid, const char *attname);
 
+extern HeapTuple SearchSysCacheAttNum(Oid relid, int16 attnum);
+extern HeapTuple SearchSysCacheCopyAttNum(Oid relid, int16 attnum);
+
 extern Datum SysCacheGetAttr(int cacheId, HeapTuple tup,
 				AttrNumber attributeNumber, bool *isNull);
 
@@ -140,6 +159,8 @@ struct catclist;
 extern struct catclist *SearchSysCacheList(int cacheId, int nkeys,
 				   Datum key1, Datum key2, Datum key3, Datum key4);
 
+extern void SysCacheInvalidate(int cacheId, uint32 hashValue);
+
 extern bool RelationInvalidatesSnapshotsOnly(Oid relid);
 extern bool RelationHasSysCache(Oid relid);
 extern bool RelationSupportsSysCache(Oid relid);
@@ -149,15 +170,6 @@ extern bool RelationSupportsSysCache(Oid relid);
  * functions is encouraged, as it insulates the caller from changes in the
  * maximum number of keys.
  */
-#define SearchSysCache1(cacheId, key1) \
-	SearchSysCache(cacheId, key1, 0, 0, 0)
-#define SearchSysCache2(cacheId, key1, key2) \
-	SearchSysCache(cacheId, key1, key2, 0, 0)
-#define SearchSysCache3(cacheId, key1, key2, key3) \
-	SearchSysCache(cacheId, key1, key2, key3, 0)
-#define SearchSysCache4(cacheId, key1, key2, key3, key4) \
-	SearchSysCache(cacheId, key1, key2, key3, key4)
-
 #define SearchSysCacheCopy1(cacheId, key1) \
 	SearchSysCacheCopy(cacheId, key1, 0, 0, 0)
 #define SearchSysCacheCopy2(cacheId, key1, key2) \
@@ -205,4 +217,4 @@ extern bool RelationSupportsSysCache(Oid relid);
 
 #define ReleaseSysCacheList(x)	ReleaseCatCacheList(x)
 
-#endif   /* SYSCACHE_H */
+#endif							/* SYSCACHE_H */

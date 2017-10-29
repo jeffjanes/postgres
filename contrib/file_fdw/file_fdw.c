@@ -250,7 +250,7 @@ file_fdw_validator(PG_FUNCTION_ARGS)
 					 buf.len > 0
 					 ? errhint("Valid options in this context are: %s",
 							   buf.data)
-				  : errhint("There are no valid options in this context.")));
+					 : errhint("There are no valid options in this context.")));
 		}
 
 		/*
@@ -430,7 +430,7 @@ get_file_fdw_attribute_options(Oid relid)
 	/* Retrieve FDW options for all user-defined attributes. */
 	for (attnum = 1; attnum <= natts; attnum++)
 	{
-		Form_pg_attribute attr = tupleDesc->attrs[attnum - 1];
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum - 1);
 		List	   *options;
 		ListCell   *lc;
 
@@ -544,13 +544,13 @@ fileGetForeignPaths(PlannerInfo *root,
 	 */
 	add_path(baserel, (Path *)
 			 create_foreignscan_path(root, baserel,
-									 NULL,		/* default pathtarget */
+									 NULL,	/* default pathtarget */
 									 baserel->rows,
 									 startup_cost,
 									 total_cost,
-									 NIL,		/* no pathkeys */
-									 NULL,		/* no outer rel either */
-									 NULL,		/* no extra plan */
+									 NIL,	/* no pathkeys */
+									 NULL,	/* no outer rel either */
+									 NULL,	/* no extra plan */
 									 coptions));
 
 	/*
@@ -898,7 +898,7 @@ check_selective_binary_conversion(RelOptInfo *baserel,
 		/* Get user attributes. */
 		if (attnum > 0)
 		{
-			Form_pg_attribute attr = tupleDesc->attrs[attnum - 1];
+			Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum - 1);
 			char	   *attname = NameStr(attr->attname);
 
 			/* Skip dropped attributes (probably shouldn't see any here). */
@@ -912,7 +912,7 @@ check_selective_binary_conversion(RelOptInfo *baserel,
 	numattrs = 0;
 	for (i = 0; i < tupleDesc->natts; i++)
 	{
-		Form_pg_attribute attr = tupleDesc->attrs[i];
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
 
 		if (attr->attisdropped)
 			continue;

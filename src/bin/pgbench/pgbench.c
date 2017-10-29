@@ -29,7 +29,7 @@
 
 #ifdef WIN32
 #define FD_SETSIZE 1024			/* set before winsock2.h is included */
-#endif   /* ! WIN32 */
+#endif							/* ! WIN32 */
 
 #include "postgres_fe.h"
 
@@ -93,7 +93,7 @@ static int	pthread_join(pthread_t th, void **thread_return);
 #define LOG_STEP_SECONDS	5	/* seconds between log messages */
 #define DEFAULT_NXACTS	10		/* default nxacts */
 
-#define MIN_GAUSSIAN_PARAM		2.0		/* minimum parameter for gauss */
+#define MIN_GAUSSIAN_PARAM		2.0 /* minimum parameter for gauss */
 
 int			nxacts = 0;			/* number of transactions per client */
 int			duration = 0;		/* duration in seconds */
@@ -229,7 +229,7 @@ typedef struct SimpleStats
 typedef struct StatsData
 {
 	time_t		start_time;		/* interval start time, for aggregates */
-	int64		cnt;			/* number of transactions */
+	int64		cnt;			/* number of transactions, including skipped */
 	int64		skipped;		/* number of transactions skipped under --rate
 								 * and --latency-limit */
 	SimpleStats latency;
@@ -329,7 +329,7 @@ typedef struct
 	bool		prepared[MAX_SCRIPTS];	/* whether client prepared the script */
 
 	/* per client collected stats */
-	int64		cnt;			/* transaction count */
+	int64		cnt;			/* client transaction count, for -t */
 	int			ecnt;			/* error count */
 } CState;
 
@@ -342,8 +342,8 @@ typedef struct
 	pthread_t	thread;			/* thread handle */
 	CState	   *state;			/* array of CState */
 	int			nstate;			/* length of state[] */
-	unsigned short random_state[3];		/* separate randomness for each thread */
-	int64		throttle_trigger;		/* previous/next throttling (us) */
+	unsigned short random_state[3]; /* separate randomness for each thread */
+	int64		throttle_trigger;	/* previous/next throttling (us) */
 	FILE	   *logfile;		/* where to log, or NULL */
 
 	/* per thread collected stats */
@@ -476,17 +476,17 @@ usage(void)
 		   "\nInitialization options:\n"
 		   "  -i, --initialize         invokes initialization mode\n"
 		   "  -F, --fillfactor=NUM     set fill factor\n"
-		"  -n, --no-vacuum          do not run VACUUM after initialization\n"
-	"  -q, --quiet              quiet logging (one message each 5 seconds)\n"
+		   "  -n, --no-vacuum          do not run VACUUM after initialization\n"
+		   "  -q, --quiet              quiet logging (one message each 5 seconds)\n"
 		   "  -s, --scale=NUM          scaling factor\n"
 		   "  --foreign-keys           create foreign key constraints between tables\n"
 		   "  --index-tablespace=TABLESPACE\n"
-	"                           create indexes in the specified tablespace\n"
-	 "  --tablespace=TABLESPACE  create tables in the specified tablespace\n"
+		   "                           create indexes in the specified tablespace\n"
+		   "  --tablespace=TABLESPACE  create tables in the specified tablespace\n"
 		   "  --unlogged-tables        create tables as unlogged tables\n"
 		   "\nOptions to select what to run:\n"
 		   "  -b, --builtin=NAME[@W]   add builtin script NAME weighted at W (default: 1)\n"
-	"                           (use \"-b list\" to list available scripts)\n"
+		   "                           (use \"-b list\" to list available scripts)\n"
 		   "  -f, --file=FILENAME[@W]  add script FILENAME weighted at W (default: 1)\n"
 		   "  -N, --skip-some-updates  skip updates of pgbench_tellers and pgbench_branches\n"
 		   "                           (same as \"-b simple-update\")\n"
@@ -496,7 +496,7 @@ usage(void)
 		   "  -c, --client=NUM         number of concurrent database clients (default: 1)\n"
 		   "  -C, --connect            establish new connection for each transaction\n"
 		   "  -D, --define=VARNAME=VALUE\n"
-	  "                           define variable for use by custom script\n"
+		   "                           define variable for use by custom script\n"
 		   "  -j, --jobs=NUM           number of threads (default: 1)\n"
 		   "  -l, --log                write transaction times to log file\n"
 		   "  -L, --latency-limit=NUM  count transactions lasting more than NUM ms as late\n"
@@ -505,22 +505,22 @@ usage(void)
 		   "  -n, --no-vacuum          do not run VACUUM before tests\n"
 		   "  -P, --progress=NUM       show thread progress report every NUM seconds\n"
 		   "  -r, --report-latencies   report average latency per command\n"
-		"  -R, --rate=NUM           target rate in transactions per second\n"
+		   "  -R, --rate=NUM           target rate in transactions per second\n"
 		   "  -s, --scale=NUM          report this scale factor in output\n"
 		   "  -t, --transactions=NUM   number of transactions each client runs (default: 10)\n"
-		 "  -T, --time=NUM           duration of benchmark test in seconds\n"
+		   "  -T, --time=NUM           duration of benchmark test in seconds\n"
 		   "  -v, --vacuum-all         vacuum all four standard tables before tests\n"
 		   "  --aggregate-interval=NUM aggregate data over NUM seconds\n"
-		"  --progress-timestamp     use Unix epoch timestamps for progress\n"
-		   "  --sampling-rate=NUM      fraction of transactions to log (e.g., 0.01 for 1%%)\n"
 		   "  --log-prefix=PREFIX      prefix for transaction time log file\n"
 		   "                           (default: \"pgbench_log\")\n"
+		   "  --progress-timestamp     use Unix epoch timestamps for progress\n"
+		   "  --sampling-rate=NUM      fraction of transactions to log (e.g., 0.01 for 1%%)\n"
 		   "\nCommon options:\n"
 		   "  -d, --debug              print debugging output\n"
-	  "  -h, --host=HOSTNAME      database server host or socket directory\n"
+		   "  -h, --host=HOSTNAME      database server host or socket directory\n"
 		   "  -p, --port=PORT          database server port number\n"
 		   "  -U, --username=USERNAME  connect as specified database user\n"
-		 "  -V, --version            output version information, then exit\n"
+		   "  -V, --version            output version information, then exit\n"
 		   "  -?, --help               show this help, then exit\n"
 		   "\n"
 		   "Report bugs to <pgsql-bugs@postgresql.org>.\n",
@@ -605,7 +605,7 @@ strtoint64(const char *str)
 	{
 		int64		tmp = result * 10 + (*ptr++ - '0');
 
-		if ((tmp / 10) != result)		/* overflow? */
+		if ((tmp / 10) != result)	/* overflow? */
 			fprintf(stderr, "value \"%s\" is out of range for type bigint\n", str);
 		result = tmp;
 	}
@@ -1002,7 +1002,7 @@ makeVariableNumeric(Variable *var)
 		setIntValue(&var->num_value, strtoint64(var->value));
 		var->is_numeric = true;
 	}
-	else	/* type should be double */
+	else						/* type should be double */
 	{
 		double		dv;
 		char		xs;
@@ -1020,19 +1020,38 @@ makeVariableNumeric(Variable *var)
 	return true;
 }
 
-/* check whether the name consists of alphabets, numerals and underscores. */
+/*
+ * Check whether a variable's name is allowed.
+ *
+ * We allow any non-ASCII character, as well as ASCII letters, digits, and
+ * underscore.
+ *
+ * Keep this in sync with the definitions of variable name characters in
+ * "src/fe_utils/psqlscan.l", "src/bin/psql/psqlscanslash.l" and
+ * "src/bin/pgbench/exprscan.l".  Also see parseVariable(), below.
+ *
+ * Note: this static function is copied from "src/bin/psql/variables.c"
+ */
 static bool
-isLegalVariableName(const char *name)
+valid_variable_name(const char *name)
 {
-	int			i;
+	const unsigned char *ptr = (const unsigned char *) name;
 
-	for (i = 0; name[i] != '\0'; i++)
+	/* Mustn't be zero-length */
+	if (*ptr == '\0')
+		return false;
+
+	while (*ptr)
 	{
-		if (!isalnum((unsigned char) name[i]) && name[i] != '_')
+		if (IS_HIGHBIT_SET(*ptr) ||
+			strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz"
+				   "_0123456789", *ptr) != NULL)
+			ptr++;
+		else
 			return false;
 	}
 
-	return (i > 0);				/* must be non-empty */
+	return true;
 }
 
 /*
@@ -1054,7 +1073,7 @@ lookupCreateVariable(CState *st, const char *context, char *name)
 		 * Check for the name only when declaring a new variable to avoid
 		 * overhead.
 		 */
-		if (!isLegalVariableName(name))
+		if (!valid_variable_name(name))
 		{
 			fprintf(stderr, "%s: invalid variable name: \"%s\"\n",
 					context, name);
@@ -1064,7 +1083,7 @@ lookupCreateVariable(CState *st, const char *context, char *name)
 		/* Create variable at the end of the array */
 		if (st->variables)
 			newvars = (Variable *) pg_realloc(st->variables,
-									(st->nvariables + 1) * sizeof(Variable));
+											  (st->nvariables + 1) * sizeof(Variable));
 		else
 			newvars = (Variable *) pg_malloc(sizeof(Variable));
 
@@ -1139,6 +1158,14 @@ putVariableInt(CState *st, const char *context, char *name, int64 value)
 	return putVariableNumber(st, context, name, &val);
 }
 
+/*
+ * Parse a possible variable reference (:varname).
+ *
+ * "sql" points at a colon.  If what follows it looks like a valid
+ * variable name, return a malloc'd string containing the variable name,
+ * and set *eaten to the number of characters consumed.
+ * Otherwise, return NULL.
+ */
 static char *
 parseVariable(const char *sql, int *eaten)
 {
@@ -1148,9 +1175,11 @@ parseVariable(const char *sql, int *eaten)
 	do
 	{
 		i++;
-	} while (isalnum((unsigned char) sql[i]) || sql[i] == '_');
+	} while (IS_HIGHBIT_SET(sql[i]) ||
+			 strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz"
+					"_0123456789", sql[i]) != NULL);
 	if (i == 1)
-		return NULL;
+		return NULL;			/* no valid variable name chars */
 
 	name = pg_malloc(i);
 	memcpy(name, &sql[1], i - 1);
@@ -1357,7 +1386,7 @@ evalFunc(TState *thread, CState *st,
 							Assert(0);
 					}
 				}
-				else	/* we have integer operands, or % */
+				else			/* we have integer operands, or % */
 				{
 					int64		li,
 								ri;
@@ -1595,7 +1624,7 @@ evalFunc(TState *thread, CState *st,
 					Assert(nargs == 2);
 					setIntValue(retval, getrand(thread, imin, imax));
 				}
-				else	/* gaussian & exponential */
+				else			/* gaussian & exponential */
 				{
 					double		param;
 
@@ -1615,20 +1644,20 @@ evalFunc(TState *thread, CState *st,
 						}
 
 						setIntValue(retval,
-								 getGaussianRand(thread, imin, imax, param));
+									getGaussianRand(thread, imin, imax, param));
 					}
-					else	/* exponential */
+					else		/* exponential */
 					{
 						if (param <= 0.0)
 						{
 							fprintf(stderr,
-							"exponential parameter must be greater than zero"
+									"exponential parameter must be greater than zero"
 									" (got %f)\n", param);
 							return false;
 						}
 
 						setIntValue(retval,
-							  getExponentialRand(thread, imin, imax, param));
+									getExponentialRand(thread, imin, imax, param));
 					}
 				}
 
@@ -1883,7 +1912,7 @@ sendCommand(CState *st, Command *command)
 					continue;
 				preparedStatementName(name, st->use_file, j);
 				res = PQprepare(st->con, name,
-						  commands[j]->argv[0], commands[j]->argc - 1, NULL);
+								commands[j]->argv[0], commands[j]->argc - 1, NULL);
 				if (PQresultStatus(res) != PGRES_COMMAND_OK)
 					fprintf(stderr, "%s", PQerrorMessage(st->con));
 				PQclear(res);
@@ -1899,7 +1928,7 @@ sendCommand(CState *st, Command *command)
 		r = PQsendQueryPrepared(st->con, name, command->argc - 1,
 								params, NULL, NULL, 0);
 	}
-	else	/* unknown sql mode */
+	else						/* unknown sql mode */
 		r = 0;
 
 	if (r == 0)
@@ -2033,10 +2062,11 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 				}
 
 				/*
-				 * If this --latency-limit is used, and this slot is already
-				 * late so that the transaction will miss the latency limit
-				 * even if it completed immediately, we skip this time slot
-				 * and iterate till the next slot that isn't late yet.
+				 * If --latency-limit is used, and this slot is already late
+				 * so that the transaction will miss the latency limit even if
+				 * it completed immediately, we skip this time slot and
+				 * iterate till the next slot that isn't late yet.  But don't
+				 * iterate beyond the -t limit, if one is given.
 				 */
 				if (latency_limit)
 				{
@@ -2045,13 +2075,20 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 					if (INSTR_TIME_IS_ZERO(now))
 						INSTR_TIME_SET_CURRENT(now);
 					now_us = INSTR_TIME_GET_MICROSEC(now);
-					while (thread->throttle_trigger < now_us - latency_limit)
+					while (thread->throttle_trigger < now_us - latency_limit &&
+						   (nxacts <= 0 || st->cnt < nxacts))
 					{
 						processXactStats(thread, st, &now, true, agg);
 						/* next rendez-vous */
 						wait = getPoissonRand(thread, throttle_delay);
 						thread->throttle_trigger += wait;
 						st->txn_scheduled = thread->throttle_trigger;
+					}
+					/* stop client if -t exceeded */
+					if (nxacts > 0 && st->cnt >= nxacts)
+					{
+						st->state = CSTATE_FINISHED;
+						break;
 					}
 				}
 
@@ -2157,12 +2194,8 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 				{
 					if (!sendCommand(st, command))
 					{
-						/*
-						 * Failed. Stay in CSTATE_START_COMMAND state, to
-						 * retry. ??? What the point or retrying? Should
-						 * rather abort?
-						 */
-						return;
+						commandFailed(st, "SQL command send failed");
+						st->state = CSTATE_ABORTED;
 					}
 					else
 						st->state = CSTATE_WAIT_RESULT;
@@ -2235,7 +2268,7 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 								st->state = CSTATE_FINISHED;
 								break;
 							}
-							else if (!ret)		/* on error */
+							else if (!ret)	/* on error */
 							{
 								commandFailed(st, "execution of meta-command 'setshell' failed");
 								st->state = CSTATE_ABORTED;
@@ -2255,7 +2288,7 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 								st->state = CSTATE_FINISHED;
 								break;
 							}
-							else if (!ret)		/* on error */
+							else if (!ret)	/* on error */
 							{
 								commandFailed(st, "execution of meta-command 'shell' failed");
 								st->state = CSTATE_ABORTED;
@@ -2364,15 +2397,8 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 				 */
 			case CSTATE_END_TX:
 
-				/*
-				 * transaction finished: calculate latency and log the
-				 * transaction
-				 */
-				if (progress || throttle_delay || latency_limit ||
-					per_script_stats || use_log)
-					processXactStats(thread, st, &now, false, agg);
-				else
-					thread->stats.cnt++;
+				/* transaction finished: calculate latency and do log */
+				processXactStats(thread, st, &now, false, agg);
 
 				if (is_connect)
 				{
@@ -2381,7 +2407,6 @@ doCustom(TState *thread, CState *st, StatsData *agg)
 					INSTR_TIME_SET_ZERO(now);
 				}
 
-				++st->cnt;
 				if ((st->cnt >= nxacts && duration <= 0) || timer_exceeded)
 				{
 					/* exit success */
@@ -2511,7 +2536,8 @@ doLog(TState *thread, CState *st,
 /*
  * Accumulate and report statistics at end of a transaction.
  *
- * (This is also called when a transaction is late and thus skipped.)
+ * (This is also called when a transaction is late and thus skipped.
+ * Note that even skipped transactions are counted in the "cnt" fields.)
  */
 static void
 processXactStats(TState *thread, CState *st, instr_time *now,
@@ -2519,19 +2545,22 @@ processXactStats(TState *thread, CState *st, instr_time *now,
 {
 	double		latency = 0.0,
 				lag = 0.0;
+	bool		thread_details = progress || throttle_delay || latency_limit,
+				detailed = thread_details || use_log || per_script_stats;
 
-	if ((!skipped) && INSTR_TIME_IS_ZERO(*now))
-		INSTR_TIME_SET_CURRENT(*now);
-
-	if (!skipped)
+	if (detailed && !skipped)
 	{
+		if (INSTR_TIME_IS_ZERO(*now))
+			INSTR_TIME_SET_CURRENT(*now);
+
 		/* compute latency & lag */
 		latency = INSTR_TIME_GET_MICROSEC(*now) - st->txn_scheduled;
 		lag = INSTR_TIME_GET_MICROSEC(st->txn_begin) - st->txn_scheduled;
 	}
 
-	if (progress || throttle_delay || latency_limit)
+	if (thread_details)
 	{
+		/* keep detailed thread stats */
 		accumStats(&thread->stats, skipped, latency, lag);
 
 		/* count transactions over the latency limit, if needed */
@@ -2539,7 +2568,13 @@ processXactStats(TState *thread, CState *st, instr_time *now,
 			thread->latency_late++;
 	}
 	else
+	{
+		/* no detailed stats, just count */
 		thread->stats.cnt++;
+	}
+
+	/* client stat is just counting */
+	st->cnt++;
 
 	if (use_log)
 		doLog(thread, st, agg, skipped, latency, lag);
@@ -2703,7 +2738,7 @@ init(bool is_no_vacuum)
 	{
 		/* "filler" column defaults to NULL */
 		snprintf(sql, sizeof(sql),
-			"insert into pgbench_tellers(tid,bid,tbalance) values (%d,%d,0)",
+				 "insert into pgbench_tellers(tid,bid,tbalance) values (%d,%d,0)",
 				 i + 1, i / ntellers + 1);
 		executeStatement(con, sql);
 	}
@@ -2844,15 +2879,18 @@ init(bool is_no_vacuum)
 }
 
 /*
- * Parse the raw sql and replace :param to $n.
+ * Replace :param with $n throughout the command's SQL text, which
+ * is a modifiable string in cmd->argv[0].
  */
 static bool
-parseQuery(Command *cmd, const char *raw_sql)
+parseQuery(Command *cmd)
 {
 	char	   *sql,
 			   *p;
 
-	sql = pg_strdup(raw_sql);
+	/* We don't want to scribble on cmd->argv[0] until done */
+	sql = pg_strdup(cmd->argv[0]);
+
 	cmd->argc = 1;
 
 	p = sql;
@@ -2874,7 +2912,8 @@ parseQuery(Command *cmd, const char *raw_sql)
 
 		if (cmd->argc >= MAX_ARGS)
 		{
-			fprintf(stderr, "statement has too many arguments (maximum is %d): %s\n", MAX_ARGS - 1, raw_sql);
+			fprintf(stderr, "statement has too many arguments (maximum is %d): %s\n",
+					MAX_ARGS - 1, cmd->argv[0]);
 			pg_free(name);
 			return false;
 		}
@@ -2886,6 +2925,7 @@ parseQuery(Command *cmd, const char *raw_sql)
 		cmd->argc++;
 	}
 
+	pg_free(cmd->argv[0]);
 	cmd->argv[0] = sql;
 	return true;
 }
@@ -2983,8 +3023,14 @@ process_sql_command(PQExpBuffer buf, const char *source)
 	my_command = (Command *) pg_malloc0(sizeof(Command));
 	my_command->command_num = num_commands++;
 	my_command->type = SQL_COMMAND;
-	my_command->argc = 0;
 	initSimpleStats(&my_command->stats);
+
+	/*
+	 * Install query text as the sole argv string.  If we are using a
+	 * non-simple query mode, we'll extract parameters from it later.
+	 */
+	my_command->argv[0] = pg_strdup(p);
+	my_command->argc = 1;
 
 	/*
 	 * If SQL command is multi-line, we only want to save the first line as
@@ -3000,21 +3046,6 @@ process_sql_command(PQExpBuffer buf, const char *source)
 	else
 		my_command->line = pg_strdup(p);
 
-	switch (querymode)
-	{
-		case QUERY_SIMPLE:
-			my_command->argv[0] = pg_strdup(p);
-			my_command->argc++;
-			break;
-		case QUERY_EXTENDED:
-		case QUERY_PREPARED:
-			if (!parseQuery(my_command, p))
-				exit(1);
-			break;
-		default:
-			exit(1);
-	}
-
 	return my_command;
 }
 
@@ -3029,9 +3060,8 @@ process_backslash_command(PsqlScanState sstate, const char *source)
 	Command    *my_command;
 	PQExpBufferData word_buf;
 	int			word_offset;
-	int			offsets[MAX_ARGS];		/* offsets of argument words */
-	int			start_offset,
-				end_offset;
+	int			offsets[MAX_ARGS];	/* offsets of argument words */
+	int			start_offset;
 	int			lineno;
 	int			j;
 
@@ -3085,13 +3115,11 @@ process_backslash_command(PsqlScanState sstate, const char *source)
 
 		my_command->expr = expr_parse_result;
 
-		/* Get location of the ending newline */
-		end_offset = expr_scanner_offset(sstate) - 1;
-
-		/* Save line */
+		/* Save line, trimming any trailing newline */
 		my_command->line = expr_scanner_get_substring(sstate,
 													  start_offset,
-													  end_offset);
+													  expr_scanner_offset(sstate),
+													  true);
 
 		expr_scanner_finish(yyscanner);
 
@@ -3112,13 +3140,11 @@ process_backslash_command(PsqlScanState sstate, const char *source)
 		my_command->argc++;
 	}
 
-	/* Get location of the ending newline */
-	end_offset = expr_scanner_offset(sstate) - 1;
-
-	/* Save line */
+	/* Save line, trimming any trailing newline */
 	my_command->line = expr_scanner_get_substring(sstate,
 												  start_offset,
-												  end_offset);
+												  expr_scanner_offset(sstate),
+												  true);
 
 	if (pg_strcasecmp(my_command->argv[0], "sleep") == 0)
 	{
@@ -3397,7 +3423,7 @@ findBuiltin(const char *name)
 	/* error cases */
 	if (found == 0)
 		fprintf(stderr, "no builtin script found for name \"%s\"\n", name);
-	else	/* found > 1 */
+	else						/* found > 1 */
 		fprintf(stderr,
 				"ambiguous builtin name: %d builtin scripts found for prefix \"%s\"\n", found, name);
 
@@ -3438,7 +3464,7 @@ parseScriptWeight(const char *option, char **script)
 		if (wtmp > INT_MAX || wtmp < 0)
 		{
 			fprintf(stderr,
-			"weight specification out of range (0 .. %u): " INT64_FORMAT "\n",
+					"weight specification out of range (0 .. %u): " INT64_FORMAT "\n",
 					INT_MAX, (int64) wtmp);
 			exit(1);
 		}
@@ -3496,7 +3522,7 @@ printResults(TState *threads, StatsData *total, instr_time total_time,
 	time_include = INSTR_TIME_GET_DOUBLE(total_time);
 	tps_include = total->cnt / time_include;
 	tps_exclude = total->cnt / (time_include -
-						(INSTR_TIME_GET_DOUBLE(conn_total_time) / nclients));
+								(INSTR_TIME_GET_DOUBLE(conn_total_time) / nclients));
 
 	/* Report test parameters. */
 	printf("transaction type: %s\n",
@@ -3509,7 +3535,7 @@ printResults(TState *threads, StatsData *total, instr_time total_time,
 	{
 		printf("number of transactions per client: %d\n", nxacts);
 		printf("number of transactions actually processed: " INT64_FORMAT "/%d\n",
-			   total->cnt, nxacts * nclients);
+			   total->cnt - total->skipped, nxacts * nclients);
 	}
 	else
 	{
@@ -3525,12 +3551,12 @@ printResults(TState *threads, StatsData *total, instr_time total_time,
 	if (throttle_delay && latency_limit)
 		printf("number of transactions skipped: " INT64_FORMAT " (%.3f %%)\n",
 			   total->skipped,
-			   100.0 * total->skipped / (total->skipped + total->cnt));
+			   100.0 * total->skipped / total->cnt);
 
 	if (latency_limit)
 		printf("number of transactions above the %.1f ms latency limit: %d (%.3f %%)\n",
 			   latency_limit / 1000.0, latency_late,
-			   100.0 * latency_late / (total->skipped + total->cnt));
+			   100.0 * latency_late / total->cnt);
 
 	if (throttle_delay || progress || latency_limit)
 		printSimpleStats("latency", &total->latency);
@@ -3579,8 +3605,7 @@ printResults(TState *threads, StatsData *total, instr_time total_time,
 			if (latency_limit)
 				printf(" - number of transactions skipped: " INT64_FORMAT " (%.3f%%)\n",
 					   sql_script[i].stats.skipped,
-					   100.0 * sql_script[i].stats.skipped /
-					(sql_script[i].stats.skipped + sql_script[i].stats.cnt));
+					   100.0 * sql_script[i].stats.skipped / sql_script[i].stats.cnt);
 
 			if (num_scripts > 1)
 				printSimpleStats(" - latency", &sql_script[i].stats.latency);
@@ -3649,8 +3674,8 @@ main(int argc, char **argv)
 	};
 
 	int			c;
-	int			is_init_mode = 0;		/* initialize mode? */
-	int			is_no_vacuum = 0;		/* no vacuum at all before testing? */
+	int			is_init_mode = 0;	/* initialize mode? */
+	int			is_no_vacuum = 0;	/* no vacuum at all before testing? */
 	int			do_vacuum_accounts = 0; /* do vacuum accounts before testing? */
 	int			optindex;
 	bool		scale_given = false;
@@ -3749,7 +3774,7 @@ main(int argc, char **argv)
 				if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
 #else							/* but BSD doesn't ... */
 				if (getrlimit(RLIMIT_OFILE, &rlim) == -1)
-#endif   /* RLIMIT_NOFILE */
+#endif							/* RLIMIT_NOFILE */
 				{
 					fprintf(stderr, "getrlimit failed: %s\n", strerror(errno));
 					exit(1);
@@ -3761,7 +3786,7 @@ main(int argc, char **argv)
 					fprintf(stderr, "Reduce number of clients, or use limit/ulimit to increase the system limit.\n");
 					exit(1);
 				}
-#endif   /* HAVE_GETRLIMIT */
+#endif							/* HAVE_GETRLIMIT */
 				break;
 			case 'j':			/* jobs */
 				benchmarking_option_set = true;
@@ -3778,7 +3803,7 @@ main(int argc, char **argv)
 					fprintf(stderr, "threads are not supported on this platform; use -j1\n");
 					exit(1);
 				}
-#endif   /* !ENABLE_THREAD_SAFETY */
+#endif							/* !ENABLE_THREAD_SAFETY */
 				break;
 			case 'C':
 				benchmarking_option_set = true;
@@ -3896,11 +3921,6 @@ main(int argc, char **argv)
 				break;
 			case 'M':
 				benchmarking_option_set = true;
-				if (num_scripts > 0)
-				{
-					fprintf(stderr, "query mode (-M) should be specified before any transaction scripts (-f or -b)\n");
-					exit(1);
-				}
 				for (querymode = 0; querymode < NUM_QUERYMODE; querymode++)
 					if (strcmp(optarg, QUERYMODE[querymode]) == 0)
 						break;
@@ -4006,6 +4026,24 @@ main(int argc, char **argv)
 		internal_script_used = true;
 	}
 
+	/* if not simple query mode, parse the script(s) to find parameters */
+	if (querymode != QUERY_SIMPLE)
+	{
+		for (i = 0; i < num_scripts; i++)
+		{
+			Command   **commands = sql_script[i].commands;
+			int			j;
+
+			for (j = 0; commands[j] != NULL; j++)
+			{
+				if (commands[j]->type != SQL_COMMAND)
+					continue;
+				if (!parseQuery(commands[j]))
+					exit(1);
+			}
+		}
+	}
+
 	/* compute total_weight */
 	for (i = 0; i < num_scripts; i++)
 		/* cannot overflow: weight is 32b, total_weight 64b */
@@ -4103,6 +4141,12 @@ main(int argc, char **argv)
 	if (duration > 0 && agg_interval > 0 && duration % agg_interval != 0)
 	{
 		fprintf(stderr, "duration (%d) must be a multiple of aggregation interval (%d)\n", duration, agg_interval);
+		exit(1);
+	}
+
+	if (progress_timestamp && progress == 0)
+	{
+		fprintf(stderr, "--progress-timestamp is allowed only under --progress\n");
 		exit(1);
 	}
 
@@ -4290,7 +4334,7 @@ main(int argc, char **argv)
 		/* compute when to stop */
 		if (duration > 0)
 			end_time = INSTR_TIME_GET_MICROSEC(thread->start_time) +
-				(int64) 1000000 *duration;
+				(int64) 1000000 * duration;
 
 		/* the first thread (i = 0) is executed by main thread */
 		if (i > 0)
@@ -4313,9 +4357,9 @@ main(int argc, char **argv)
 	/* compute when to stop */
 	if (duration > 0)
 		end_time = INSTR_TIME_GET_MICROSEC(threads[0].start_time) +
-			(int64) 1000000 *duration;
+			(int64) 1000000 * duration;
 	threads[0].thread = INVALID_THREAD;
-#endif   /* ENABLE_THREAD_SAFETY */
+#endif							/* ENABLE_THREAD_SAFETY */
 
 	/* wait for threads and accumulate results */
 	initStats(&stats, 0);
@@ -4333,7 +4377,7 @@ main(int argc, char **argv)
 			pthread_join(thread->thread, NULL);
 #else
 		(void) threadRun(thread);
-#endif   /* ENABLE_THREAD_SAFETY */
+#endif							/* ENABLE_THREAD_SAFETY */
 
 		/* aggregate thread level stats */
 		mergeSimpleStats(&stats.latency, &thread->stats.latency);
@@ -4370,7 +4414,7 @@ threadRun(void *arg)
 	instr_time	start,
 				end;
 	int			nstate = thread->nstate;
-	int			remains = nstate;		/* number of remaining clients */
+	int			remains = nstate;	/* number of remaining clients */
 	int			i;
 
 	/* for reporting progress: */
@@ -4441,7 +4485,7 @@ threadRun(void *arg)
 		fd_set		input_mask;
 		int			maxsock;	/* max socket number to be waited for */
 		int64		min_usec;
-		int64		now_usec = 0;		/* set this only if needed */
+		int64		now_usec = 0;	/* set this only if needed */
 
 		/* identify which client sockets should be checked for input */
 		FD_ZERO(&input_mask);
@@ -4534,20 +4578,30 @@ threadRun(void *arg)
 		 * or it's time to print a progress report.  Update input_mask to show
 		 * which client(s) received data.
 		 */
-		if (min_usec > 0 && maxsock != -1)
+		if (min_usec > 0)
 		{
-			int			nsocks; /* return from select(2) */
+			int			nsocks = 0; /* return from select(2) if called */
 
 			if (min_usec != PG_INT64_MAX)
 			{
-				struct timeval timeout;
+				if (maxsock != -1)
+				{
+					struct timeval timeout;
 
-				timeout.tv_sec = min_usec / 1000000;
-				timeout.tv_usec = min_usec % 1000000;
-				nsocks = select(maxsock + 1, &input_mask, NULL, NULL, &timeout);
+					timeout.tv_sec = min_usec / 1000000;
+					timeout.tv_usec = min_usec % 1000000;
+					nsocks = select(maxsock + 1, &input_mask, NULL, NULL, &timeout);
+				}
+				else /* nothing active, simple sleep */
+				{
+					pg_usleep(min_usec);
+				}
 			}
-			else
+			else /* no explicit delay, select without timeout */
+			{
 				nsocks = select(maxsock + 1, &input_mask, NULL, NULL, NULL);
+			}
+
 			if (nsocks < 0)
 			{
 				if (errno == EINTR)
@@ -4560,7 +4614,7 @@ threadRun(void *arg)
 				goto done;
 			}
 		}
-		else
+		else /* min_usec == 0, i.e. something needs to be executed */
 		{
 			/* If we didn't call select(), don't try to read any data */
 			FD_ZERO(&input_mask);
@@ -4690,7 +4744,7 @@ threadRun(void *arg)
 				 */
 				do
 				{
-					next_report += (int64) progress *1000000;
+					next_report += (int64) progress * 1000000;
 				} while (now >= next_report);
 			}
 		}
@@ -4825,4 +4879,4 @@ pthread_join(pthread_t th, void **thread_return)
 	return 0;
 }
 
-#endif   /* WIN32 */
+#endif							/* WIN32 */

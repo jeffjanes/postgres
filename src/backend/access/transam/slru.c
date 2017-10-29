@@ -76,7 +76,7 @@ typedef struct SlruFlushData
 {
 	int			num_files;		/* # files actually open */
 	int			fd[MAX_FLUSH_BUFFERS];	/* their FD's */
-	int			segno[MAX_FLUSH_BUFFERS];		/* their log seg#s */
+	int			segno[MAX_FLUSH_BUFFERS];	/* their log seg#s */
 } SlruFlushData;
 
 typedef struct SlruFlushData *SlruFlush;
@@ -150,10 +150,10 @@ SimpleLruShmemSize(int nslots, int nlsns)
 	sz = MAXALIGN(sizeof(SlruSharedData));
 	sz += MAXALIGN(nslots * sizeof(char *));	/* page_buffer[] */
 	sz += MAXALIGN(nslots * sizeof(SlruPageStatus));	/* page_status[] */
-	sz += MAXALIGN(nslots * sizeof(bool));		/* page_dirty[] */
-	sz += MAXALIGN(nslots * sizeof(int));		/* page_number[] */
-	sz += MAXALIGN(nslots * sizeof(int));		/* page_lru_count[] */
-	sz += MAXALIGN(nslots * sizeof(LWLockPadded));		/* buffer_locks[] */
+	sz += MAXALIGN(nslots * sizeof(bool));	/* page_dirty[] */
+	sz += MAXALIGN(nslots * sizeof(int));	/* page_number[] */
+	sz += MAXALIGN(nslots * sizeof(int));	/* page_lru_count[] */
+	sz += MAXALIGN(nslots * sizeof(LWLockPadded));	/* buffer_locks[] */
 
 	if (nlsns > 0)
 		sz += MAXALIGN(nslots * nlsns * sizeof(XLogRecPtr));	/* group_lsn[] */
@@ -205,14 +205,15 @@ SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
 		shared->page_lru_count = (int *) (ptr + offset);
 		offset += MAXALIGN(nslots * sizeof(int));
 
+		/* Initialize LWLocks */
+		shared->buffer_locks = (LWLockPadded *) (ptr + offset);
+		offset += MAXALIGN(nslots * sizeof(LWLockPadded));
+
 		if (nlsns > 0)
 		{
 			shared->group_lsn = (XLogRecPtr *) (ptr + offset);
 			offset += MAXALIGN(nslots * nlsns * sizeof(XLogRecPtr));
 		}
-
-		/* Initialize LWLocks */
-		shared->buffer_locks = (LWLockPadded *) ShmemAlloc(sizeof(LWLockPadded) * nslots);
 
 		Assert(strlen(name) + 1 < SLRU_MAX_NAME_LENGTH);
 		strlcpy(shared->lwlock_tranche_name, name, SLRU_MAX_NAME_LENGTH);
@@ -230,6 +231,9 @@ SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
 			shared->page_lru_count[slotno] = 0;
 			ptr += BLCKSZ;
 		}
+
+		/* Should fit to estimated shmem size */
+		Assert(ptr - (char *) shared <= SimpleLruShmemSize(nslots, nlsns));
 	}
 	else
 		Assert(found);
@@ -340,7 +344,7 @@ SimpleLruWaitIO(SlruCtl ctl, int slotno)
 			/* indeed, the I/O must have failed */
 			if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS)
 				shared->page_status[slotno] = SLRU_PAGE_EMPTY;
-			else	/* write_in_progress */
+			else				/* write_in_progress */
 			{
 				shared->page_status[slotno] = SLRU_PAGE_VALID;
 				shared->page_dirty[slotno] = true;
@@ -595,7 +599,7 @@ SimpleLruDoesPhysicalPageExist(SlruCtl ctl, int pageno)
 
 	SlruFileName(ctl, path, segno);
 
-	fd = OpenTransientFile(path, O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 	if (fd < 0)
 	{
 		/* expected: file doesn't exist */
@@ -650,7 +654,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
 	 * SlruPhysicalWritePage).  Hence, if we are InRecovery, allow the case
 	 * where the file doesn't exist, and return zeroes instead.
 	 */
-	fd = OpenTransientFile(path, O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 	if (fd < 0)
 	{
 		if (errno != ENOENT || !InRecovery)
@@ -800,8 +804,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 		 * don't use O_EXCL or O_TRUNC or anything like that.
 		 */
 		SlruFileName(ctl, path, segno);
-		fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY,
-							   S_IRUSR | S_IWUSR);
+		fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY);
 		if (fd < 0)
 		{
 			slru_errcause = SLRU_OPEN_FAILED;
@@ -907,22 +910,22 @@ SlruReportIOError(SlruCtl ctl, int pageno, TransactionId xid)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not access status of transaction %u", xid),
-				 errdetail("Could not seek in file \"%s\" to offset %u: %m.",
-						   path, offset)));
+					 errdetail("Could not seek in file \"%s\" to offset %u: %m.",
+							   path, offset)));
 			break;
 		case SLRU_READ_FAILED:
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not access status of transaction %u", xid),
-			   errdetail("Could not read from file \"%s\" at offset %u: %m.",
-						 path, offset)));
+					 errdetail("Could not read from file \"%s\" at offset %u: %m.",
+							   path, offset)));
 			break;
 		case SLRU_WRITE_FAILED:
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not access status of transaction %u", xid),
-				errdetail("Could not write to file \"%s\" at offset %u: %m.",
-						  path, offset)));
+					 errdetail("Could not write to file \"%s\" at offset %u: %m.",
+							   path, offset)));
 			break;
 		case SLRU_FSYNC_FAILED:
 			ereport(ERROR,
@@ -972,9 +975,9 @@ SlruSelectLRUPage(SlruCtl ctl, int pageno)
 		int			bestvalidslot = 0;	/* keep compiler quiet */
 		int			best_valid_delta = -1;
 		int			best_valid_page_number = 0; /* keep compiler quiet */
-		int			bestinvalidslot = 0;		/* keep compiler quiet */
+		int			bestinvalidslot = 0;	/* keep compiler quiet */
 		int			best_invalid_delta = -1;
-		int			best_invalid_page_number = 0;		/* keep compiler quiet */
+		int			best_invalid_page_number = 0;	/* keep compiler quiet */
 
 		/* See if page already has a buffer assigned */
 		for (slotno = 0; slotno < shared->num_slots; slotno++)
@@ -1192,8 +1195,8 @@ restart:;
 	{
 		LWLockRelease(shared->ControlLock);
 		ereport(LOG,
-		  (errmsg("could not truncate directory \"%s\": apparent wraparound",
-				  ctl->Dir)));
+				(errmsg("could not truncate directory \"%s\": apparent wraparound",
+						ctl->Dir)));
 		return;
 	}
 

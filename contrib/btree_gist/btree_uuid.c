@@ -171,7 +171,7 @@ static double
 uuid_2_double(const pg_uuid_t *u)
 {
 	uint64		uu[2];
-	const double two64 = 18446744073709551616.0;		/* 2^64 */
+	const double two64 = 18446744073709551616.0;	/* 2^64 */
 
 	/* Source data may not be suitably aligned, so copy */
 	memcpy(uu, u->data, UUID_LEN);
@@ -182,8 +182,8 @@ uuid_2_double(const pg_uuid_t *u)
 	 * machine, byte-swap each half so we can use native uint64 arithmetic.
 	 */
 #ifndef WORDS_BIGENDIAN
-	uu[0] = BSWAP64(uu[0]);
-	uu[1] = BSWAP64(uu[1]);
+	uu[0] = pg_bswap64(uu[0]);
+	uu[1] = pg_bswap64(uu[1]);
 #endif
 
 	/*
@@ -220,8 +220,8 @@ Datum
 gbt_uuid_picksplit(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(gbt_num_picksplit(
-									(GistEntryVector *) PG_GETARG_POINTER(0),
-									  (GIST_SPLITVEC *) PG_GETARG_POINTER(1),
+										(GistEntryVector *) PG_GETARG_POINTER(0),
+										(GIST_SPLITVEC *) PG_GETARG_POINTER(1),
 										&tinfo, fcinfo->flinfo
 										));
 }
