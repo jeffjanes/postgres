@@ -113,6 +113,7 @@
 extern bool Log_disconnections;
 extern int	CommitDelay;
 extern int	CommitSiblings;
+extern int	JJFsyncLock;
 extern char *default_tablespace;
 extern char *temp_tablespaces;
 extern bool ignore_checksum_failure;
@@ -1895,6 +1896,15 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&NBuffers,
 		1024, 16, INT_MAX / 2,
+		NULL, NULL, NULL
+	},
+	{
+		{"JJFsyncLock", PGC_POSTMASTER, RESOURCES_MEM,
+			gettext_noop("Drop WALWriteLock before fsync"),
+			NULL
+		},
+		&JJFsyncLock,
+		0, 0, 100000,
 		NULL, NULL, NULL
 	},
 

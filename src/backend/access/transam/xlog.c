@@ -100,6 +100,7 @@ bool		wal_compression = false;
 char	   *wal_consistency_checking_string = NULL;
 bool	   *wal_consistency_checking = NULL;
 bool		log_checkpoints = false;
+int		JJFsyncLock = 0;
 int			sync_method = DEFAULT_SYNC_METHOD;
 int			wal_level = WAL_LEVEL_MINIMAL;
 int			CommitDelay = 0;	/* precommit delay in microseconds */
@@ -2562,6 +2563,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 		 * have no open file or the wrong one.  However, we do not need to
 		 * fsync more than one file.
 		 */
+		bool jjdropped=false;
 		if (sync_method != SYNC_METHOD_OPEN &&
 			sync_method != SYNC_METHOD_OPEN_DSYNC)
 		{
@@ -2576,9 +2578,26 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 				openLogFile = XLogFileOpen(openLogSegNo);
 				openLogOff = 0;
 			}
-
+			if (JJFsyncLock) {
+				{
+					/* use volatile pointer to prevent code rearrangement */
+					volatile XLogCtlData *xlogctl = XLogCtl;
+						
+					SpinLockAcquire(&xlogctl->info_lck);
+					xlogctl->LogwrtResult = LogwrtResult;
+					if (xlogctl->LogwrtRqst.Write < LogwrtResult.Write)
+						xlogctl->LogwrtRqst.Write = LogwrtResult.Write;
+					if (xlogctl->LogwrtRqst.Flush < LogwrtResult.Flush)
+						xlogctl->LogwrtRqst.Flush = LogwrtResult.Flush;
+					SpinLockRelease(&xlogctl->info_lck);
+				}
+				LWLockRelease(WALWriteLock);
+				jjdropped=true;
+			}
 			issue_xlog_fsync(openLogFile, openLogSegNo);
 		}
+		if (jjdropped)
+		   	LWLockAcquire(WALWriteLock, LW_EXCLUSIVE);
 
 		/* signal that we need to wakeup walsenders later */
 		WalSndWakeupRequest();
