@@ -77,6 +77,7 @@
 #include "pg_trace.h"
 
 extern uint32 bootstrap_data_checksum_version;
+int       JJNOWAL=0;
 
 /* File path names (all relative to $PGDATA) */
 #define RECOVERY_COMMAND_FILE	"recovery.conf"

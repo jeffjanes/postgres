@@ -113,6 +113,7 @@
 extern bool Log_disconnections;
 extern int	CommitDelay;
 extern int	CommitSiblings;
+extern int	JJNOWAL;
 extern char *default_tablespace;
 extern char *temp_tablespaces;
 extern bool ignore_checksum_failure;
@@ -1795,6 +1796,15 @@ static struct config_int ConfigureNamesInt[] =
 		&Geqo_pool_size,
 		0, 0, INT_MAX,
 		NULL, NULL, NULL
+	},
+
+	{
+		{"JJNOWAL", PGC_USERSET, WAL_SETTINGS,
+			gettext_noop("turn of most WAL logging. A crash will eat your data"),
+			NULL
+		},
+		&JJNOWAL,
+		0, 0, 100000, NULL, NULL
 	},
 	{
 		{"geqo_generations", PGC_USERSET, QUERY_TUNING_GEQO,

@@ -35,6 +35,8 @@
 /* Buffer size required to store a compressed version of backup block image */
 #define PGLZ_MAX_BLCKSZ PGLZ_MAX_OUTPUT(BLCKSZ)
 
+extern int JJNOWAL;
+
 /*
  * For each block reference registered with XLogRegisterBuffer, we fill in
  * a registered_buffer struct.
@@ -436,6 +438,18 @@ XLogInsert(RmgrId rmid, uint8 info)
 	 * return a phony record pointer.
 	 */
 	if (IsBootstrapProcessingMode() && rmid != RM_XLOG_ID)
+	{
+		XLogResetInsertion();
+		EndPos = SizeOfXLogLongPHD; /* start of 1st chkpt record */
+		return EndPos;
+	}
+
+	/*
+	 * If requested not to WAL log, skip logging except for the ones
+	 * vital to bootstrap, start up, and shutdown.
+	 * return a phony record pointer.
+	 */
+	if (JJNOWAL && (rmid != RM_XLOG_ID || info == XLOG_FPI_FOR_HINT) )
 	{
 		XLogResetInsertion();
 		EndPos = SizeOfXLogLongPHD; /* start of 1st chkpt record */
