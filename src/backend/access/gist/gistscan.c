@@ -4,7 +4,7 @@
  *	  routines to manage scans on GiST index relations
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -313,6 +313,9 @@ gistrescan(IndexScanDesc scan, ScanKey key, int nkeys,
 		if (!first_time)
 			pfree(fn_extras);
 	}
+
+	/* any previous xs_hitup will have been pfree'd in context resets above */
+	scan->xs_hitup = NULL;
 }
 
 void

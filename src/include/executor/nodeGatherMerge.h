@@ -4,7 +4,7 @@
  *		prototypes for nodeGatherMerge.c
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/executor/nodeGatherMerge.h
@@ -16,12 +16,11 @@
 
 #include "nodes/execnodes.h"
 
-extern GatherMergeState *ExecInitGatherMerge(GatherMerge * node,
+extern GatherMergeState *ExecInitGatherMerge(GatherMerge *node,
 					EState *estate,
 					int eflags);
-extern TupleTableSlot *ExecGatherMerge(GatherMergeState * node);
-extern void ExecEndGatherMerge(GatherMergeState * node);
-extern void ExecReScanGatherMerge(GatherMergeState * node);
-extern void ExecShutdownGatherMerge(GatherMergeState * node);
+extern void ExecEndGatherMerge(GatherMergeState *node);
+extern void ExecReScanGatherMerge(GatherMergeState *node);
+extern void ExecShutdownGatherMerge(GatherMergeState *node);
 
-#endif   /* NODEGATHERMERGE_H */
+#endif							/* NODEGATHERMERGE_H */

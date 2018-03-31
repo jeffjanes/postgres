@@ -8,7 +8,7 @@
  * but also length coercion functions.
  *
  *
- * Copyright (c) 2002-2017, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2018, PostgreSQL Global Development Group
  *
  * src/include/catalog/pg_cast.h
  *
@@ -52,8 +52,8 @@ typedef FormData_pg_cast *Form_pg_cast;
 
 typedef enum CoercionCodes
 {
-	COERCION_CODE_IMPLICIT = 'i',		/* coercion in context of expression */
-	COERCION_CODE_ASSIGNMENT = 'a',		/* coercion in context of assignment */
+	COERCION_CODE_IMPLICIT = 'i',	/* coercion in context of expression */
+	COERCION_CODE_ASSIGNMENT = 'a', /* coercion in context of assignment */
 	COERCION_CODE_EXPLICIT = 'e'	/* explicit cast operation */
 } CoercionCodes;
 
@@ -64,8 +64,8 @@ typedef enum CoercionCodes
  */
 typedef enum CoercionMethod
 {
-	COERCION_METHOD_FUNCTION = 'f',		/* use a function */
-	COERCION_METHOD_BINARY = 'b',		/* types are binary-compatible */
+	COERCION_METHOD_FUNCTION = 'f', /* use a function */
+	COERCION_METHOD_BINARY = 'b',	/* types are binary-compatible */
 	COERCION_METHOD_INOUT = 'i' /* use input/output functions */
 } CoercionMethod;
 
@@ -254,6 +254,14 @@ DATA(insert (	23	 18   78 e f ));
 /* pg_node_tree can be coerced to, but not from, text */
 DATA(insert (  194	 25    0 i b ));
 
+/* pg_ndistinct can be coerced to, but not from, bytea and text */
+DATA(insert (  3361  17    0 i b ));
+DATA(insert (  3361  25    0 i i ));
+
+/* pg_dependencies can be coerced to, but not from, bytea and text */
+DATA(insert (  3402  17    0 i b ));
+DATA(insert (  3402  25    0 i i ));
+
 /*
  * Datetime category
  */
@@ -384,4 +392,13 @@ DATA(insert ( 1700 1700 1703 i f ));
 DATA(insert (  114 3802    0 a i ));
 DATA(insert ( 3802	114    0 a i ));
 
-#endif   /* PG_CAST_H */
+/* jsonb to numeric and bool types */
+DATA(insert ( 3802	16	 3556 e f ));
+DATA(insert ( 3802	1700 3449 e f ));
+DATA(insert ( 3802	21   3450 e f ));
+DATA(insert ( 3802	23   3451 e f ));
+DATA(insert ( 3802	20   3452 e f ));
+DATA(insert ( 3802	700  3453 e f ));
+DATA(insert ( 3802	701  2580 e f ));
+
+#endif							/* PG_CAST_H */

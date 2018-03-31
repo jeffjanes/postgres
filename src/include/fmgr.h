@@ -8,7 +8,7 @@
  * or call fmgr-callable functions.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/fmgr.h
@@ -49,6 +49,9 @@ typedef Datum (*PGFunction) (FunctionCallInfo fcinfo);
  * arguments, rather than about the function itself.  But it's convenient
  * to store it here rather than in FunctionCallInfoData, where it might more
  * logically belong.
+ *
+ * fn_extra is available for use by the called function; all other fields
+ * should be treated as read-only after the struct is created.
  */
 typedef struct FmgrInfo
 {
@@ -65,6 +68,11 @@ typedef struct FmgrInfo
 
 /*
  * This struct is the data actually passed to an fmgr-called function.
+ *
+ * The called function is expected to set isnull, and possibly resultinfo or
+ * fields in whatever resultinfo points to.  It should not change any other
+ * fields.  (In particular, scribbling on the argument arrays is a bad idea,
+ * since some callers assume they can re-call with the same arguments.)
  */
 typedef struct FunctionCallInfoData
 {
@@ -72,9 +80,12 @@ typedef struct FunctionCallInfoData
 	fmNodePtr	context;		/* pass info about context of call */
 	fmNodePtr	resultinfo;		/* pass or return extra info about result */
 	Oid			fncollation;	/* collation for function to use */
+#define FIELDNO_FUNCTIONCALLINFODATA_ISNULL 4
 	bool		isnull;			/* function must set true if result is NULL */
 	short		nargs;			/* # arguments actually passed */
-	Datum		arg[FUNC_MAX_ARGS];		/* Arguments passed to function */
+#define FIELDNO_FUNCTIONCALLINFODATA_ARG 6
+	Datum		arg[FUNC_MAX_ARGS]; /* Arguments passed to function */
+#define FIELDNO_FUNCTIONCALLINFODATA_ARGNULL 7
 	bool		argnull[FUNC_MAX_ARGS]; /* T if arg[i] is actually NULL */
 } FunctionCallInfoData;
 
@@ -101,6 +112,8 @@ extern void fmgr_info_cxt(Oid functionId, FmgrInfo *finfo,
  */
 extern void fmgr_info_copy(FmgrInfo *dstinfo, FmgrInfo *srcinfo,
 			   MemoryContext destcxt);
+
+extern void fmgr_symbol(Oid functionId, char **mod, char **fn);
 
 /*
  * This macro initializes all the fields of a FunctionCallInfoData except
@@ -188,11 +201,11 @@ extern void fmgr_info_copy(FmgrInfo *dstinfo, FmgrInfo *srcinfo,
  * Note: it'd be nice if these could be macros, but I see no way to do that
  * without evaluating the arguments multiple times, which is NOT acceptable.
  */
-extern struct varlena *pg_detoast_datum(struct varlena * datum);
-extern struct varlena *pg_detoast_datum_copy(struct varlena * datum);
-extern struct varlena *pg_detoast_datum_slice(struct varlena * datum,
+extern struct varlena *pg_detoast_datum(struct varlena *datum);
+extern struct varlena *pg_detoast_datum_copy(struct varlena *datum);
+extern struct varlena *pg_detoast_datum_slice(struct varlena *datum,
 					   int32 first, int32 count);
-extern struct varlena *pg_detoast_datum_packed(struct varlena * datum);
+extern struct varlena *pg_detoast_datum_packed(struct varlena *datum);
 
 #define PG_DETOAST_DATUM(datum) \
 	pg_detoast_datum((struct varlena *) DatumGetPointer(datum))
@@ -317,6 +330,7 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena * datum);
 #define PG_RETURN_FLOAT4(x)  return Float4GetDatum(x)
 #define PG_RETURN_FLOAT8(x)  return Float8GetDatum(x)
 #define PG_RETURN_INT64(x)	 return Int64GetDatum(x)
+#define PG_RETURN_UINT64(x)  return UInt64GetDatum(x)
 /* RETURN macros for other pass-by-ref types will typically look like this: */
 #define PG_RETURN_BYTEA_P(x)   PG_RETURN_POINTER(x)
 #define PG_RETURN_TEXT_P(x)    PG_RETURN_POINTER(x)
@@ -328,10 +342,10 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena * datum);
 /*-------------------------------------------------------------------------
  *		Support for detecting call convention of dynamically-loaded functions
  *
- * Dynamically loaded functions may use either the version-1 ("new style")
- * or version-0 ("old style") calling convention.  Version 1 is the call
- * convention defined in this header file; version 0 is the old "plain C"
- * convention.  A version-1 function must be accompanied by the macro call
+ * Dynamically loaded functions currently can only use the version-1 ("new
+ * style") calling convention.  Version-0 ("old style") is not supported
+ * anymore.  Version 1 is the call convention defined in this header file, and
+ * must be accompanied by the macro call
  *
  *		PG_FUNCTION_INFO_V1(function_name);
  *
@@ -649,7 +663,7 @@ extern bytea *OidSendFunctionCall(Oid functionId, Datum val);
 /*
  * Routines in fmgr.c
  */
-extern const Pg_finfo_record *fetch_finfo_record(void *filehandle, char *funcname);
+extern const Pg_finfo_record *fetch_finfo_record(void *filehandle, const char *funcname);
 extern void clear_external_function_hash(void *filehandle);
 extern Oid	fmgr_internal_function(const char *proname);
 extern Oid	get_fn_expr_rettype(FmgrInfo *flinfo);
@@ -665,9 +679,9 @@ extern bool CheckFunctionValidatorAccess(Oid validatorOid, Oid functionOid);
  */
 extern char *Dynamic_library_path;
 
-extern PGFunction load_external_function(char *filename, char *funcname,
+extern PGFunction load_external_function(const char *filename, const char *funcname,
 					   bool signalNotFound, void **filehandle);
-extern PGFunction lookup_external_function(void *filehandle, char *funcname);
+extern PGFunction lookup_external_function(void *filehandle, const char *funcname);
 extern void load_file(const char *filename, bool restricted);
 extern void **find_rendezvous_variable(const char *varName);
 extern Size EstimateLibraryStateSpace(void);
@@ -682,13 +696,14 @@ extern void RestoreLibraryState(char *start_address);
  */
 
 /* AggCheckCallContext can return one of the following codes, or 0: */
-#define AGG_CONTEXT_AGGREGATE	1		/* regular aggregate */
-#define AGG_CONTEXT_WINDOW		2		/* window function */
+#define AGG_CONTEXT_AGGREGATE	1	/* regular aggregate */
+#define AGG_CONTEXT_WINDOW		2	/* window function */
 
 extern int AggCheckCallContext(FunctionCallInfo fcinfo,
 					MemoryContext *aggcontext);
 extern fmAggrefPtr AggGetAggref(FunctionCallInfo fcinfo);
 extern MemoryContext AggGetTempMemoryContext(FunctionCallInfo fcinfo);
+extern bool AggStateIsShared(FunctionCallInfo fcinfo);
 extern void AggRegisterCallback(FunctionCallInfo fcinfo,
 					fmExprContextCallbackFunction func,
 					Datum arg);
@@ -712,7 +727,7 @@ typedef enum FmgrHookEventType
 typedef bool (*needs_fmgr_hook_type) (Oid fn_oid);
 
 typedef void (*fmgr_hook_type) (FmgrHookEventType event,
-											FmgrInfo *flinfo, Datum *arg);
+								FmgrInfo *flinfo, Datum *arg);
 
 extern PGDLLIMPORT needs_fmgr_hook_type needs_fmgr_hook;
 extern PGDLLIMPORT fmgr_hook_type fmgr_hook;
@@ -720,19 +735,4 @@ extern PGDLLIMPORT fmgr_hook_type fmgr_hook;
 #define FmgrHookIsNeeded(fn_oid)							\
 	(!needs_fmgr_hook ? false : (*needs_fmgr_hook)(fn_oid))
 
-/*
- * !!! OLD INTERFACE !!!
- *
- * fmgr() is the only remaining vestige of the old-style caller support
- * functions.  It's no longer used anywhere in the Postgres distribution,
- * but we should leave it around for a release or two to ease the transition
- * for user-supplied C functions.  OidFunctionCallN() replaces it for new
- * code.
- */
-
-/*
- * DEPRECATED, DO NOT USE IN NEW CODE
- */
-extern char *fmgr(Oid procedureId,...);
-
-#endif   /* FMGR_H */
+#endif							/* FMGR_H */

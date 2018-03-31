@@ -3,7 +3,7 @@
  * username.c
  *	  get user name
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -42,7 +42,7 @@ get_user_name(char **errstr)
 	{
 		*errstr = psprintf(_("could not look up effective user ID %ld: %s"),
 						   (long) user_id,
-						 errno ? strerror(errno) : _("user does not exist"));
+						   errno ? strerror(errno) : _("user does not exist"));
 		return NULL;
 	}
 

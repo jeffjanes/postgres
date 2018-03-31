@@ -3,7 +3,7 @@
  * win32security.c
  *	  Microsoft Windows Win32 Security Support Functions
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/port/win32security.c
@@ -128,7 +128,7 @@ pgwin32_is_service(void)
 
 	/* First check for LocalSystem */
 	if (!AllocateAndInitializeSid(&NtAuthority, 1,
-							  SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0,
+								  SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0,
 								  &LocalSystemSid))
 	{
 		fprintf(stderr, "could not get SID for local system account\n");

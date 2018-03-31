@@ -28,7 +28,7 @@
  * all these files commit in a single map file update rather than being tied
  * to transaction commit.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -72,9 +72,9 @@
  */
 #define RELMAPPER_FILENAME		"pg_filenode.map"
 
-#define RELMAPPER_FILEMAGIC		0x592717		/* version ID value */
+#define RELMAPPER_FILEMAGIC		0x592717	/* version ID value */
 
-#define MAX_MAPPINGS			62		/* 62 * 8 + 16 = 512 */
+#define MAX_MAPPINGS			62	/* 62 * 8 + 16 = 512 */
 
 typedef struct RelMapping
 {
@@ -644,8 +644,7 @@ load_relmap_file(bool shared)
 	}
 
 	/* Read data ... */
-	fd = OpenTransientFile(mapfilename,
-						   O_RDONLY | PG_BINARY, S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(mapfilename, O_RDONLY | PG_BINARY);
 	if (fd < 0)
 		ereport(FATAL,
 				(errcode_for_file_access(),
@@ -684,8 +683,8 @@ load_relmap_file(bool shared)
 
 	if (!EQ_CRC32C(crc, map->crc))
 		ereport(FATAL,
-		  (errmsg("relation mapping file \"%s\" contains incorrect checksum",
-				  mapfilename)));
+				(errmsg("relation mapping file \"%s\" contains incorrect checksum",
+						mapfilename)));
 }
 
 /*
@@ -694,13 +693,13 @@ load_relmap_file(bool shared)
  * The magic number and CRC are automatically updated in *newmap.  On
  * success, we copy the data to the appropriate permanent static variable.
  *
- * If write_wal is TRUE then an appropriate WAL message is emitted.
+ * If write_wal is true then an appropriate WAL message is emitted.
  * (It will be false for bootstrap and WAL replay cases.)
  *
- * If send_sinval is TRUE then a SI invalidation message is sent.
+ * If send_sinval is true then a SI invalidation message is sent.
  * (This should be true except in bootstrap case.)
  *
- * If preserve_files is TRUE then the storage manager is warned not to
+ * If preserve_files is true then the storage manager is warned not to
  * delete the files listed in the map.
  *
  * Because this may be called during WAL replay when MyDatabaseId,
@@ -745,9 +744,7 @@ write_relmap_file(bool shared, RelMapFile *newmap,
 		realmap = &local_map;
 	}
 
-	fd = OpenTransientFile(mapfilename,
-						   O_WRONLY | O_CREAT | PG_BINARY,
-						   S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(mapfilename, O_WRONLY | O_CREAT | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),

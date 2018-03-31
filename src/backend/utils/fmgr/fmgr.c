@@ -3,7 +3,7 @@
  * fmgr.c
  *	  The Postgres function manager.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -37,37 +37,6 @@ PGDLLIMPORT needs_fmgr_hook_type needs_fmgr_hook = NULL;
 PGDLLIMPORT fmgr_hook_type fmgr_hook = NULL;
 
 /*
- * Declaration for old-style function pointer type.  This is now used only
- * in fmgr_oldstyle() and is no longer exported.
- *
- * The m68k SVR4 ABI defines that pointers are returned in %a0 instead of
- * %d0. So if a function pointer is declared to return a pointer, the
- * compiler may look only into %a0, but if the called function was declared
- * to return an integer type, it puts its value only into %d0. So the
- * caller doesn't pick up the correct return value. The solution is to
- * declare the function pointer to return int, so the compiler picks up the
- * return value from %d0. (Functions returning pointers put their value
- * *additionally* into %d0 for compatibility.) The price is that there are
- * some warnings about int->pointer conversions ... which we can suppress
- * with suitably ugly casts in fmgr_oldstyle().
- */
-#if (defined(__mc68000__) || (defined(__m68k__))) && defined(__ELF__)
-typedef int32 (*func_ptr) ();
-#else
-typedef char *(*func_ptr) ();
-#endif
-
-/*
- * For an oldstyle function, fn_extra points to a record like this:
- */
-typedef struct
-{
-	func_ptr	func;			/* Address of the oldstyle function */
-	bool		arg_toastable[FUNC_MAX_ARGS];	/* is n'th arg of a toastable
-												 * datatype? */
-} Oldstyle_fnextra;
-
-/*
  * Hashtable for fast lookup of external C functions
  */
 typedef struct
@@ -77,7 +46,7 @@ typedef struct
 	TransactionId fn_xmin;		/* for checking up-to-dateness */
 	ItemPointerData fn_tid;
 	PGFunction	user_fn;		/* the function's address */
-	const Pg_finfo_record *inforec;		/* address of its info record */
+	const Pg_finfo_record *inforec; /* address of its info record */
 } CFuncHashTabEntry;
 
 static HTAB *CFuncHash = NULL;
@@ -90,8 +59,8 @@ static void fmgr_info_other_lang(Oid functionId, FmgrInfo *finfo, HeapTuple proc
 static CFuncHashTabEntry *lookup_C_func(HeapTuple procedureTuple);
 static void record_C_func(HeapTuple procedureTuple,
 			  PGFunction user_fn, const Pg_finfo_record *inforec);
-static Datum fmgr_oldstyle(PG_FUNCTION_ARGS);
-static Datum fmgr_security_definer(PG_FUNCTION_ARGS);
+/* extern so it's callable via JIT */
+extern Datum fmgr_security_definer(PG_FUNCTION_ARGS);
 
 
 /*
@@ -102,26 +71,21 @@ static Datum fmgr_security_definer(PG_FUNCTION_ARGS);
 static const FmgrBuiltin *
 fmgr_isbuiltin(Oid id)
 {
-	int			low = 0;
-	int			high = fmgr_nbuiltins - 1;
+	uint16		index;
+
+	/* fast lookup only possible if original oid still assigned */
+	if (id >= FirstBootstrapObjectId)
+		return NULL;
 
 	/*
-	 * Loop invariant: low is the first index that could contain target entry,
-	 * and high is the last index that could contain it.
+	 * Lookup function data. If there's a miss in that range it's likely a
+	 * nonexistant function, returning NULL here will trigger an ERROR later.
 	 */
-	while (low <= high)
-	{
-		int			i = (high + low) / 2;
-		const FmgrBuiltin *ptr = &fmgr_builtins[i];
+	index = fmgr_builtin_oid_index[id];
+	if (index == InvalidOidBuiltinMapping)
+		return NULL;
 
-		if (id == ptr->foid)
-			return ptr;
-		else if (id > ptr->foid)
-			low = i + 1;
-		else
-			high = i - 1;
-	}
-	return NULL;
+	return &fmgr_builtins[index];
 }
 
 /*
@@ -204,7 +168,7 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 		finfo->fn_nargs = fbp->nargs;
 		finfo->fn_strict = fbp->strict;
 		finfo->fn_retset = fbp->retset;
-		finfo->fn_stats = TRACK_FUNC_ALL;		/* ie, never track */
+		finfo->fn_stats = TRACK_FUNC_ALL;	/* ie, never track */
 		finfo->fn_addr = fbp->func;
 		finfo->fn_oid = functionId;
 		return;
@@ -236,11 +200,11 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 	 */
 	if (!ignore_security &&
 		(procedureStruct->prosecdef ||
-		 !heap_attisnull(procedureTuple, Anum_pg_proc_proconfig) ||
+		 !heap_attisnull(procedureTuple, Anum_pg_proc_proconfig, NULL) ||
 		 FmgrHookIsNeeded(functionId)))
 	{
 		finfo->fn_addr = fmgr_security_definer;
-		finfo->fn_stats = TRACK_FUNC_ALL;		/* ie, never track */
+		finfo->fn_stats = TRACK_FUNC_ALL;	/* ie, never track */
 		finfo->fn_oid = functionId;
 		ReleaseSysCache(procedureTuple);
 		return;
@@ -298,19 +262,105 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 }
 
 /*
+ * Return module and C function name providing implementation of functionId.
+ *
+ * If *mod == NULL and *fn == NULL, no C symbol is known to implement
+ * function.
+ *
+ * If *mod == NULL and *fn != NULL, the function is implemented by a symbol in
+ * the main binary.
+ *
+ * If *mod != NULL and *fn !=NULL the function is implemented in an extension
+ * shared object.
+ *
+ * The returned module and function names are pstrdup'ed into the current
+ * memory context.
+ */
+void
+fmgr_symbol(Oid functionId, char **mod, char **fn)
+{
+	HeapTuple	procedureTuple;
+	Form_pg_proc procedureStruct;
+	bool		isnull;
+	Datum		prosrcattr;
+	Datum		probinattr;
+
+	/* Otherwise we need the pg_proc entry */
+	procedureTuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(functionId));
+	if (!HeapTupleIsValid(procedureTuple))
+		elog(ERROR, "cache lookup failed for function %u", functionId);
+	procedureStruct = (Form_pg_proc) GETSTRUCT(procedureTuple);
+
+	/*
+	 */
+	if (procedureStruct->prosecdef ||
+		!heap_attisnull(procedureTuple, Anum_pg_proc_proconfig, NULL) ||
+		FmgrHookIsNeeded(functionId))
+	{
+		*mod = NULL; /* core binary */
+		*fn = pstrdup("fmgr_security_definer");
+		ReleaseSysCache(procedureTuple);
+		return;
+	}
+
+	/* see fmgr_info_cxt_security for the individual cases */
+	switch (procedureStruct->prolang)
+	{
+		case INTERNALlanguageId:
+			prosrcattr = SysCacheGetAttr(PROCOID, procedureTuple,
+										 Anum_pg_proc_prosrc, &isnull);
+			if (isnull)
+				elog(ERROR, "null prosrc");
+
+			*mod = NULL; /* core binary */
+			*fn = TextDatumGetCString(prosrcattr);
+			break;
+
+		case ClanguageId:
+			prosrcattr = SysCacheGetAttr(PROCOID, procedureTuple,
+										 Anum_pg_proc_prosrc, &isnull);
+			if (isnull)
+				elog(ERROR, "null prosrc for C function %u", functionId);
+
+			probinattr = SysCacheGetAttr(PROCOID, procedureTuple,
+										 Anum_pg_proc_probin, &isnull);
+			if (isnull)
+				elog(ERROR, "null probin for C function %u", functionId);
+
+			/*
+			 * No need to check symbol presence / API version here, already
+			 * checked in fmgr_info_cxt_security.
+			 */
+			*mod = TextDatumGetCString(probinattr);
+			*fn = TextDatumGetCString(prosrcattr);
+			break;
+
+		case SQLlanguageId:
+			*mod = NULL;  /* core binary */
+			*fn = pstrdup("fmgr_sql");
+			break;
+
+		default:
+			*mod = NULL;
+			*fn = NULL; /* unknown, pass pointer */
+			break;
+	}
+
+	ReleaseSysCache(procedureTuple);
+}
+
+
+/*
  * Special fmgr_info processing for C-language functions.  Note that
  * finfo->fn_oid is not valid yet.
  */
 static void
 fmgr_info_C_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple)
 {
-	Form_pg_proc procedureStruct = (Form_pg_proc) GETSTRUCT(procedureTuple);
 	CFuncHashTabEntry *hashentry;
 	PGFunction	user_fn;
 	const Pg_finfo_record *inforec;
-	Oldstyle_fnextra *fnextra;
 	bool		isnull;
-	int			i;
 
 	/*
 	 * See if we have the function address cached already
@@ -362,20 +412,6 @@ fmgr_info_C_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple)
 
 	switch (inforec->api_version)
 	{
-		case 0:
-			/* Old style: need to use a handler */
-			finfo->fn_addr = fmgr_oldstyle;
-			fnextra = (Oldstyle_fnextra *)
-				MemoryContextAllocZero(finfo->fn_mcxt,
-									   sizeof(Oldstyle_fnextra));
-			finfo->fn_extra = (void *) fnextra;
-			fnextra->func = (func_ptr) user_fn;
-			for (i = 0; i < procedureStruct->pronargs; i++)
-			{
-				fnextra->arg_toastable[i] =
-					TypeIsToastable(procedureStruct->proargtypes.values[i]);
-			}
-			break;
 		case 1:
 			/* New style: call directly */
 			finfo->fn_addr = user_fn;
@@ -415,14 +451,6 @@ fmgr_info_other_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple)
 						   CurrentMemoryContext, true);
 	finfo->fn_addr = plfinfo.fn_addr;
 
-	/*
-	 * If lookup of the PL handler function produced nonnull fn_extra,
-	 * complain --- it must be an oldstyle function! We no longer support
-	 * oldstyle PL handlers.
-	 */
-	if (plfinfo.fn_extra != NULL)
-		elog(ERROR, "language %u has old-style handler", language);
-
 	ReleaseSysCache(languageTuple);
 }
 
@@ -431,22 +459,18 @@ fmgr_info_other_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple)
  * The function is specified by a handle for the containing library
  * (obtained from load_external_function) as well as the function name.
  *
- * If no info function exists for the given name, it is not an error.
- * Instead we return a default info record for a version-0 function.
- * We want to raise an error here only if the info function returns
- * something bogus.
+ * If no info function exists for the given name an error is raised.
  *
  * This function is broken out of fmgr_info_C_lang so that fmgr_c_validator
  * can validate the information record for a function not yet entered into
  * pg_proc.
  */
 const Pg_finfo_record *
-fetch_finfo_record(void *filehandle, char *funcname)
+fetch_finfo_record(void *filehandle, const char *funcname)
 {
 	char	   *infofuncname;
 	PGFInfoFunction infofunc;
 	const Pg_finfo_record *inforec;
-	static Pg_finfo_record default_inforec = {0};
 
 	infofuncname = psprintf("pg_finfo_%s", funcname);
 
@@ -455,9 +479,12 @@ fetch_finfo_record(void *filehandle, char *funcname)
 														  infofuncname);
 	if (infofunc == NULL)
 	{
-		/* Not found --- assume version 0 */
-		pfree(infofuncname);
-		return &default_inforec;
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("could not find function information for function \"%s\"",
+						funcname),
+				 errhint("SQL-callable functions need an accompanying PG_FUNCTION_INFO_V1(funcname).")));
+		return NULL;			/* silence compiler */
 	}
 
 	/* Found, so call it */
@@ -468,7 +495,6 @@ fetch_finfo_record(void *filehandle, char *funcname)
 		elog(ERROR, "null result from info function \"%s\"", infofuncname);
 	switch (inforec->api_version)
 	{
-		case 0:
 		case 1:
 			/* OK, no additional fields to validate */
 			break;
@@ -585,18 +611,7 @@ fmgr_info_copy(FmgrInfo *dstinfo, FmgrInfo *srcinfo,
 {
 	memcpy(dstinfo, srcinfo, sizeof(FmgrInfo));
 	dstinfo->fn_mcxt = destcxt;
-	if (dstinfo->fn_addr == fmgr_oldstyle)
-	{
-		/* For oldstyle functions we must copy fn_extra */
-		Oldstyle_fnextra *fnextra;
-
-		fnextra = (Oldstyle_fnextra *)
-			MemoryContextAlloc(destcxt, sizeof(Oldstyle_fnextra));
-		memcpy(fnextra, srcinfo->fn_extra, sizeof(Oldstyle_fnextra));
-		dstinfo->fn_extra = (void *) fnextra;
-	}
-	else
-		dstinfo->fn_extra = NULL;
+	dstinfo->fn_extra = NULL;
 }
 
 
@@ -613,245 +628,6 @@ fmgr_internal_function(const char *proname)
 	if (fbp == NULL)
 		return InvalidOid;
 	return fbp->foid;
-}
-
-
-/*
- * Handler for old-style "C" language functions
- */
-static Datum
-fmgr_oldstyle(PG_FUNCTION_ARGS)
-{
-	Oldstyle_fnextra *fnextra;
-	int			n_arguments = fcinfo->nargs;
-	int			i;
-	bool		isnull;
-	func_ptr	user_fn;
-	char	   *returnValue;
-
-	if (fcinfo->flinfo == NULL || fcinfo->flinfo->fn_extra == NULL)
-		elog(ERROR, "fmgr_oldstyle received NULL pointer");
-	fnextra = (Oldstyle_fnextra *) fcinfo->flinfo->fn_extra;
-
-	/*
-	 * Result is NULL if any argument is NULL, but we still call the function
-	 * (peculiar, but that's the way it worked before, and after all this is a
-	 * backwards-compatibility wrapper).  Note, however, that we'll never get
-	 * here with NULL arguments if the function is marked strict.
-	 *
-	 * We also need to detoast any TOAST-ed inputs, since it's unlikely that
-	 * an old-style function knows about TOASTing.
-	 */
-	isnull = false;
-	for (i = 0; i < n_arguments; i++)
-	{
-		if (PG_ARGISNULL(i))
-			isnull = true;
-		else if (fnextra->arg_toastable[i])
-			fcinfo->arg[i] = PointerGetDatum(PG_DETOAST_DATUM(fcinfo->arg[i]));
-	}
-	fcinfo->isnull = isnull;
-
-	user_fn = fnextra->func;
-
-	switch (n_arguments)
-	{
-		case 0:
-			returnValue = (char *) (*user_fn) ();
-			break;
-		case 1:
-
-			/*
-			 * nullvalue() used to use isNull to check if arg is NULL; perhaps
-			 * there are other functions still out there that also rely on
-			 * this undocumented hack?
-			 */
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   &fcinfo->isnull);
-			break;
-		case 2:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1]);
-			break;
-		case 3:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2]);
-			break;
-		case 4:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3]);
-			break;
-		case 5:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4]);
-			break;
-		case 6:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5]);
-			break;
-		case 7:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6]);
-			break;
-		case 8:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7]);
-			break;
-		case 9:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8]);
-			break;
-		case 10:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9]);
-			break;
-		case 11:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9],
-											   fcinfo->arg[10]);
-			break;
-		case 12:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9],
-											   fcinfo->arg[10],
-											   fcinfo->arg[11]);
-			break;
-		case 13:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9],
-											   fcinfo->arg[10],
-											   fcinfo->arg[11],
-											   fcinfo->arg[12]);
-			break;
-		case 14:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9],
-											   fcinfo->arg[10],
-											   fcinfo->arg[11],
-											   fcinfo->arg[12],
-											   fcinfo->arg[13]);
-			break;
-		case 15:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9],
-											   fcinfo->arg[10],
-											   fcinfo->arg[11],
-											   fcinfo->arg[12],
-											   fcinfo->arg[13],
-											   fcinfo->arg[14]);
-			break;
-		case 16:
-			returnValue = (char *) (*user_fn) (fcinfo->arg[0],
-											   fcinfo->arg[1],
-											   fcinfo->arg[2],
-											   fcinfo->arg[3],
-											   fcinfo->arg[4],
-											   fcinfo->arg[5],
-											   fcinfo->arg[6],
-											   fcinfo->arg[7],
-											   fcinfo->arg[8],
-											   fcinfo->arg[9],
-											   fcinfo->arg[10],
-											   fcinfo->arg[11],
-											   fcinfo->arg[12],
-											   fcinfo->arg[13],
-											   fcinfo->arg[14],
-											   fcinfo->arg[15]);
-			break;
-		default:
-
-			/*
-			 * Increasing FUNC_MAX_ARGS doesn't automatically add cases to the
-			 * above code, so mention the actual value in this error not
-			 * FUNC_MAX_ARGS.  You could add cases to the above if you needed
-			 * to support old-style functions with many arguments, but making
-			 * 'em be new-style is probably a better idea.
-			 */
-			ereport(ERROR,
-					(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-			 errmsg("function %u has too many arguments (%d, maximum is %d)",
-					fcinfo->flinfo->fn_oid, n_arguments, 16)));
-			returnValue = NULL; /* keep compiler quiet */
-			break;
-	}
-
-	return PointerGetDatum(returnValue);
 }
 
 
@@ -879,7 +655,7 @@ struct fmgr_security_definer_cache
  * the actual arguments, etc.) intact.  This is not re-entrant, but then
  * the fcinfo itself can't be used reentrantly anyway.
  */
-static Datum
+extern Datum
 fmgr_security_definer(PG_FUNCTION_ARGS)
 {
 	Datum		result;
@@ -940,7 +716,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	if (OidIsValid(fcache->userid))
 		SetUserIdAndSecContext(fcache->userid,
-							save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+							   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
 
 	if (fcache->proconfig)
 	{
@@ -2081,58 +1857,6 @@ OidSendFunctionCall(Oid functionId, Datum val)
 }
 
 
-/*
- * !!! OLD INTERFACE !!!
- *
- * fmgr() is the only remaining vestige of the old-style caller support
- * functions.  It's no longer used anywhere in the Postgres distribution,
- * but we should leave it around for a release or two to ease the transition
- * for user-supplied C functions.  OidFunctionCallN() replaces it for new
- * code.
- *
- * DEPRECATED, DO NOT USE IN NEW CODE
- */
-char *
-fmgr(Oid procedureId,...)
-{
-	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	int			n_arguments;
-	Datum		result;
-
-	fmgr_info(procedureId, &flinfo);
-
-	MemSet(&fcinfo, 0, sizeof(fcinfo));
-	fcinfo.flinfo = &flinfo;
-	fcinfo.nargs = flinfo.fn_nargs;
-	n_arguments = fcinfo.nargs;
-
-	if (n_arguments > 0)
-	{
-		va_list		pvar;
-		int			i;
-
-		if (n_arguments > FUNC_MAX_ARGS)
-			ereport(ERROR,
-					(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-			 errmsg("function %u has too many arguments (%d, maximum is %d)",
-					flinfo.fn_oid, n_arguments, FUNC_MAX_ARGS)));
-		va_start(pvar, procedureId);
-		for (i = 0; i < n_arguments; i++)
-			fcinfo.arg[i] = PointerGetDatum(va_arg(pvar, char *));
-		va_end(pvar);
-	}
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return DatumGetPointer(result);
-}
-
-
 /*-------------------------------------------------------------------------
  *		Support routines for standard maybe-pass-by-reference datatypes
  *
@@ -2156,7 +1880,7 @@ Int64GetDatum(int64 X)
 	*retval = X;
 	return PointerGetDatum(retval);
 }
-#endif   /* USE_FLOAT8_BYVAL */
+#endif							/* USE_FLOAT8_BYVAL */
 
 #ifndef USE_FLOAT4_BYVAL
 
@@ -2189,7 +1913,7 @@ Float8GetDatum(float8 X)
  */
 
 struct varlena *
-pg_detoast_datum(struct varlena * datum)
+pg_detoast_datum(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
 		return heap_tuple_untoast_attr(datum);
@@ -2198,7 +1922,7 @@ pg_detoast_datum(struct varlena * datum)
 }
 
 struct varlena *
-pg_detoast_datum_copy(struct varlena * datum)
+pg_detoast_datum_copy(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
 		return heap_tuple_untoast_attr(datum);
@@ -2214,14 +1938,14 @@ pg_detoast_datum_copy(struct varlena * datum)
 }
 
 struct varlena *
-pg_detoast_datum_slice(struct varlena * datum, int32 first, int32 count)
+pg_detoast_datum_slice(struct varlena *datum, int32 first, int32 count)
 {
 	/* Only get the specified portion from the toast rel */
 	return heap_tuple_untoast_attr_slice(datum, first, count);
 }
 
 struct varlena *
-pg_detoast_datum_packed(struct varlena * datum)
+pg_detoast_datum_packed(struct varlena *datum)
 {
 	if (VARATT_IS_COMPRESSED(datum) || VARATT_IS_EXTERNAL(datum))
 		return heap_tuple_untoast_attr(datum);
@@ -2302,8 +2026,6 @@ get_call_expr_argtype(Node *expr, int argnum)
 		args = ((DistinctExpr *) expr)->args;
 	else if (IsA(expr, ScalarArrayOpExpr))
 		args = ((ScalarArrayOpExpr *) expr)->args;
-	else if (IsA(expr, ArrayCoerceExpr))
-		args = list_make1(((ArrayCoerceExpr *) expr)->arg);
 	else if (IsA(expr, NullIfExpr))
 		args = ((NullIfExpr *) expr)->args;
 	else if (IsA(expr, WindowFunc))
@@ -2317,15 +2039,11 @@ get_call_expr_argtype(Node *expr, int argnum)
 	argtype = exprType((Node *) list_nth(args, argnum));
 
 	/*
-	 * special hack for ScalarArrayOpExpr and ArrayCoerceExpr: what the
-	 * underlying function will actually get passed is the element type of the
-	 * array.
+	 * special hack for ScalarArrayOpExpr: what the underlying function will
+	 * actually get passed is the element type of the array.
 	 */
 	if (IsA(expr, ScalarArrayOpExpr) &&
 		argnum == 1)
-		argtype = get_base_element_type(argtype);
-	else if (IsA(expr, ArrayCoerceExpr) &&
-			 argnum == 0)
 		argtype = get_base_element_type(argtype);
 
 	return argtype;
@@ -2373,8 +2091,6 @@ get_call_expr_arg_stable(Node *expr, int argnum)
 		args = ((DistinctExpr *) expr)->args;
 	else if (IsA(expr, ScalarArrayOpExpr))
 		args = ((ScalarArrayOpExpr *) expr)->args;
-	else if (IsA(expr, ArrayCoerceExpr))
-		args = list_make1(((ArrayCoerceExpr *) expr)->arg);
 	else if (IsA(expr, NullIfExpr))
 		args = ((NullIfExpr *) expr)->args;
 	else if (IsA(expr, WindowFunc))
@@ -2498,7 +2214,7 @@ CheckFunctionValidatorAccess(Oid validatorOid, Oid functionOid)
 	aclresult = pg_language_aclcheck(procStruct->prolang, GetUserId(),
 									 ACL_USAGE);
 	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_LANGUAGE,
+		aclcheck_error(aclresult, OBJECT_LANGUAGE,
 					   NameStr(langStruct->lanname));
 
 	/*
@@ -2508,7 +2224,7 @@ CheckFunctionValidatorAccess(Oid validatorOid, Oid functionOid)
 	 */
 	aclresult = pg_proc_aclcheck(functionOid, GetUserId(), ACL_EXECUTE);
 	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_PROC, NameStr(procStruct->proname));
+		aclcheck_error(aclresult, OBJECT_FUNCTION, NameStr(procStruct->proname));
 
 	ReleaseSysCache(procTup);
 	ReleaseSysCache(langTup);

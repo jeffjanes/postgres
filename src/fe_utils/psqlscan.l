@@ -23,7 +23,7 @@
  *
  * See psqlscan_int.h for additional commentary.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -70,6 +70,8 @@ typedef int YYSTYPE;
  */
 extern int	psql_yyget_column(yyscan_t yyscanner);
 extern void psql_yyset_column(int column_no, yyscan_t yyscanner);
+
+/* LCOV_EXCL_START */
 
 %}
 
@@ -699,8 +701,7 @@ other			.
 														 yyleng - 1);
 					if (cur_state->callbacks->get_variable)
 						value = cur_state->callbacks->get_variable(varname,
-																   false,
-																   false,
+																   PQUOTE_PLAIN,
 																   cur_state->cb_passthrough);
 					else
 						value = NULL;
@@ -737,16 +738,22 @@ other			.
 				}
 
 :'{variable_char}+'	{
-					psqlscan_escape_variable(cur_state, yytext, yyleng, false);
+					psqlscan_escape_variable(cur_state, yytext, yyleng,
+											 PQUOTE_SQL_LITERAL);
 				}
 
 :\"{variable_char}+\"	{
-					psqlscan_escape_variable(cur_state, yytext, yyleng, true);
+					psqlscan_escape_variable(cur_state, yytext, yyleng,
+											 PQUOTE_SQL_IDENT);
+				}
+
+:\{\?{variable_char}+\}	{
+					psqlscan_test_variable(cur_state, yytext, yyleng);
 				}
 
 	/*
 	 * These rules just avoid the need for scanner backup if one of the
-	 * two rules above fails to match completely.
+	 * three rules above fails to match completely.
 	 */
 
 :'{variable_char}*	{
@@ -756,6 +763,17 @@ other			.
 				}
 
 :\"{variable_char}*	{
+					/* Throw back everything but the colon */
+					yyless(1);
+					ECHO;
+				}
+
+:\{\?{variable_char}*	{
+					/* Throw back everything but the colon */
+					yyless(1);
+					ECHO;
+				}
+:\{	{
 					/* Throw back everything but the colon */
 					yyless(1);
 					ECHO;
@@ -882,6 +900,8 @@ other			.
 				}
 
 %%
+
+/* LCOV_EXCL_STOP */
 
 /*
  * Create a lexer working state struct.
@@ -1415,7 +1435,7 @@ psqlscan_extract_substring(PsqlScanState state, const char *txt, int len)
  */
 void
 psqlscan_escape_variable(PsqlScanState state, const char *txt, int len,
-						 bool as_ident)
+						 PsqlScanQuoteType quote)
 {
 	char	   *varname;
 	char	   *value;
@@ -1423,7 +1443,7 @@ psqlscan_escape_variable(PsqlScanState state, const char *txt, int len,
 	/* Variable lookup. */
 	varname = psqlscan_extract_substring(state, txt + 2, len - 3);
 	if (state->callbacks->get_variable)
-		value = state->callbacks->get_variable(varname, true, as_ident,
+		value = state->callbacks->get_variable(varname, quote,
 											   state->cb_passthrough);
 	else
 		value = NULL;
@@ -1439,5 +1459,30 @@ psqlscan_escape_variable(PsqlScanState state, const char *txt, int len,
 	{
 		/* Emit original token as-is */
 		psqlscan_emit(state, txt, len);
+	}
+}
+
+void
+psqlscan_test_variable(PsqlScanState state, const char *txt, int len)
+{
+	char	*varname;
+	char	*value;
+
+	varname = psqlscan_extract_substring(state, txt + 3, len - 4);
+	if (state->callbacks->get_variable)
+		value = state->callbacks->get_variable(varname, PQUOTE_PLAIN,
+											   state->cb_passthrough);
+	else
+		value = NULL;
+	free(varname);
+
+	if (value != NULL)
+	{
+		psqlscan_emit(state, "TRUE", 4);
+		free(value);
+	}
+	else
+	{
+		psqlscan_emit(state, "FALSE", 5);
 	}
 }

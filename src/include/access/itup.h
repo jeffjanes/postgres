@@ -4,7 +4,7 @@
  *	  POSTGRES index tuple definitions.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/itup.h
@@ -55,9 +55,9 @@ typedef IndexTupleData *IndexTuple;
 typedef struct IndexAttributeBitMapData
 {
 	bits8		bits[(INDEX_MAX_KEYS + 8 - 1) / 8];
-}	IndexAttributeBitMapData;
+}			IndexAttributeBitMapData;
 
-typedef IndexAttributeBitMapData *IndexAttributeBitMap;
+typedef IndexAttributeBitMapData * IndexAttributeBitMap;
 
 /*
  * t_info manipulation macros
@@ -67,8 +67,7 @@ typedef IndexAttributeBitMapData *IndexAttributeBitMap;
 #define INDEX_VAR_MASK	0x4000
 #define INDEX_NULL_MASK 0x8000
 
-#define IndexTupleSize(itup)		((Size) (((IndexTuple) (itup))->t_info & INDEX_SIZE_MASK))
-#define IndexTupleDSize(itup)		((Size) ((itup).t_info & INDEX_SIZE_MASK))
+#define IndexTupleSize(itup)		((Size) ((itup)->t_info & INDEX_SIZE_MASK))
 #define IndexTupleHasNulls(itup)	((((IndexTuple) (itup))->t_info & INDEX_NULL_MASK))
 #define IndexTupleHasVarwidths(itup) ((((IndexTuple) (itup))->t_info & INDEX_VAR_MASK))
 
@@ -103,11 +102,11 @@ typedef IndexAttributeBitMapData *IndexAttributeBitMap;
 	*(isnull) = false, \
 	!IndexTupleHasNulls(tup) ? \
 	( \
-		(tupleDesc)->attrs[(attnum)-1]->attcacheoff >= 0 ? \
+		TupleDescAttr((tupleDesc), (attnum)-1)->attcacheoff >= 0 ? \
 		( \
-			fetchatt((tupleDesc)->attrs[(attnum)-1], \
+			fetchatt(TupleDescAttr((tupleDesc), (attnum)-1), \
 			(char *) (tup) + IndexInfoFindDataOffset((tup)->t_info) \
-			+ (tupleDesc)->attrs[(attnum)-1]->attcacheoff) \
+			+ TupleDescAttr((tupleDesc), (attnum)-1)->attcacheoff) \
 		) \
 		: \
 			nocache_index_getattr((tup), (attnum), (tupleDesc)) \
@@ -148,4 +147,4 @@ extern void index_deform_tuple(IndexTuple tup, TupleDesc tupleDescriptor,
 				   Datum *values, bool *isnull);
 extern IndexTuple CopyIndexTuple(IndexTuple source);
 
-#endif   /* ITUP_H */
+#endif							/* ITUP_H */

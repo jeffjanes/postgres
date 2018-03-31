@@ -5,6 +5,7 @@
 
 #include "btree_gist.h"
 #include "btree_utils_num.h"
+#include "common/int.h"
 
 typedef struct int32key
 {
@@ -99,14 +100,13 @@ int4_dist(PG_FUNCTION_ARGS)
 	int32		r;
 	int32		ra;
 
-	r = a - b;
-	ra = Abs(r);
-
-	/* Overflow check. */
-	if (ra < 0 || (!SAMESIGN(a, b) && !SAMESIGN(r, a)))
+	if (pg_sub_s32_overflow(a, b, &r) ||
+		r == PG_INT32_MIN)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("integer out of range")));
+
+	ra = Abs(r);
 
 	PG_RETURN_INT32(ra);
 }
@@ -171,7 +171,7 @@ gbt_int4_distance(PG_FUNCTION_ARGS)
 	key.upper = (GBT_NUMKEY *) &kkk->upper;
 
 	PG_RETURN_FLOAT8(
-			gbt_num_distance(&key, (void *) &query, GIST_LEAF(entry), &tinfo, fcinfo->flinfo)
+					 gbt_num_distance(&key, (void *) &query, GIST_LEAF(entry), &tinfo, fcinfo->flinfo)
 		);
 }
 
@@ -203,8 +203,8 @@ Datum
 gbt_int4_picksplit(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(gbt_num_picksplit(
-									(GistEntryVector *) PG_GETARG_POINTER(0),
-									  (GIST_SPLITVEC *) PG_GETARG_POINTER(1),
+										(GistEntryVector *) PG_GETARG_POINTER(0),
+										(GIST_SPLITVEC *) PG_GETARG_POINTER(1),
 										&tinfo, fcinfo->flinfo
 										));
 }

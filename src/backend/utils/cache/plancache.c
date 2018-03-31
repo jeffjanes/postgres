@@ -38,7 +38,7 @@
  * be infrequent enough that more-detailed tracking is not worth the effort.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -88,10 +88,11 @@
 static CachedPlanSource *first_saved_plan = NULL;
 
 static void ReleaseGenericPlan(CachedPlanSource *plansource);
-static List *RevalidateCachedQuery(CachedPlanSource *plansource);
+static List *RevalidateCachedQuery(CachedPlanSource *plansource,
+					  QueryEnvironment *queryEnv);
 static bool CheckCachedPlan(CachedPlanSource *plansource);
 static CachedPlan *BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
-				ParamListInfo boundParams);
+				ParamListInfo boundParams, QueryEnvironment *queryEnv);
 static bool choose_custom_plan(CachedPlanSource *plansource,
 				   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
@@ -156,7 +157,7 @@ CreateCachedPlan(RawStmt *raw_parse_tree,
 	MemoryContext source_context;
 	MemoryContext oldcxt;
 
-	Assert(query_string != NULL);		/* required as of 8.4 */
+	Assert(query_string != NULL);	/* required as of 8.4 */
 
 	/*
 	 * Make a dedicated memory context for the CachedPlanSource and its
@@ -179,6 +180,7 @@ CreateCachedPlan(RawStmt *raw_parse_tree,
 	plansource->magic = CACHEDPLANSOURCE_MAGIC;
 	plansource->raw_parse_tree = copyObject(raw_parse_tree);
 	plansource->query_string = pstrdup(query_string);
+	MemoryContextSetIdentifier(source_context, plansource->query_string);
 	plansource->commandTag = commandTag;
 	plansource->param_types = NULL;
 	plansource->num_params = 0;
@@ -237,7 +239,7 @@ CreateOneShotCachedPlan(RawStmt *raw_parse_tree,
 {
 	CachedPlanSource *plansource;
 
-	Assert(query_string != NULL);		/* required as of 8.4 */
+	Assert(query_string != NULL);	/* required as of 8.4 */
 
 	/*
 	 * Create and fill the CachedPlanSource struct within the caller's memory
@@ -318,7 +320,7 @@ CreateOneShotCachedPlan(RawStmt *raw_parse_tree,
  * parserSetup: alternate method for handling query parameters
  * parserSetupArg: data to pass to parserSetup
  * cursor_options: options bitmask to pass to planner
- * fixed_result: TRUE to disallow future changes in query's result tupdesc
+ * fixed_result: true to disallow future changes in query's result tupdesc
  */
 void
 CompleteCachedPlan(CachedPlanSource *plansource,
@@ -361,7 +363,7 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 												  "CachedPlanQuery",
 												  ALLOCSET_START_SMALL_SIZES);
 		MemoryContextSwitchTo(querytree_context);
-		querytree_list = (List *) copyObject(querytree_list);
+		querytree_list = copyObject(querytree_list);
 	}
 
 	plansource->query_context = querytree_context;
@@ -553,7 +555,8 @@ ReleaseGenericPlan(CachedPlanSource *plansource)
  * a tree copying step in a subsequent BuildCachedPlan call.)
  */
 static List *
-RevalidateCachedQuery(CachedPlanSource *plansource)
+RevalidateCachedQuery(CachedPlanSource *plansource,
+					  QueryEnvironment *queryEnv)
 {
 	bool		snapshot_set;
 	RawStmt    *rawtree;
@@ -685,12 +688,14 @@ RevalidateCachedQuery(CachedPlanSource *plansource)
 		tlist = pg_analyze_and_rewrite_params(rawtree,
 											  plansource->query_string,
 											  plansource->parserSetup,
-											  plansource->parserSetupArg);
+											  plansource->parserSetupArg,
+											  queryEnv);
 	else
 		tlist = pg_analyze_and_rewrite(rawtree,
 									   plansource->query_string,
 									   plansource->param_types,
-									   plansource->num_params);
+									   plansource->num_params,
+									   queryEnv);
 
 	/* Release snapshot if we got one */
 	if (snapshot_set)
@@ -734,7 +739,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource)
 											  ALLOCSET_START_SMALL_SIZES);
 	oldcxt = MemoryContextSwitchTo(querytree_context);
 
-	qlist = (List *) copyObject(tlist);
+	qlist = copyObject(tlist);
 
 	/*
 	 * Use the planner machinery to extract dependencies.  Data is saved in
@@ -875,7 +880,7 @@ CheckCachedPlan(CachedPlanSource *plansource)
  */
 static CachedPlan *
 BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
-				ParamListInfo boundParams)
+				ParamListInfo boundParams, QueryEnvironment *queryEnv)
 {
 	CachedPlan *plan;
 	List	   *plist;
@@ -899,7 +904,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	 * safety, let's treat it as real and redo the RevalidateCachedQuery call.
 	 */
 	if (!plansource->is_valid)
-		qlist = RevalidateCachedQuery(plansource);
+		qlist = RevalidateCachedQuery(plansource, queryEnv);
 
 	/*
 	 * If we don't already have a copy of the querytree list that can be
@@ -909,7 +914,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	if (qlist == NIL)
 	{
 		if (!plansource->is_oneshot)
-			qlist = (List *) copyObject(plansource->query_list);
+			qlist = copyObject(plansource->query_list);
 		else
 			qlist = plansource->query_list;
 	}
@@ -947,13 +952,14 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 		plan_context = AllocSetContextCreate(CurrentMemoryContext,
 											 "CachedPlan",
 											 ALLOCSET_START_SMALL_SIZES);
+		MemoryContextCopySetIdentifier(plan_context, plansource->query_string);
 
 		/*
 		 * Copy plan into the new context.
 		 */
 		MemoryContextSwitchTo(plan_context);
 
-		plist = (List *) copyObject(plist);
+		plist = copyObject(plist);
 	}
 	else
 		plan_context = CurrentMemoryContext;
@@ -975,7 +981,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	is_transient = false;
 	foreach(lc, plist)
 	{
-		PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
+		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc);
 
 		if (plannedstmt->commandType == CMD_UTILITY)
 			continue;			/* Ignore utility statements */
@@ -1070,7 +1076,7 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
 
 	foreach(lc, plan->stmt_list)
 	{
-		PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
+		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc);
 
 		if (plannedstmt->commandType == CMD_UTILITY)
 			continue;			/* Ignore utility statements */
@@ -1129,7 +1135,7 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
  */
 CachedPlan *
 GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
-			  bool useResOwner)
+			  bool useResOwner, QueryEnvironment *queryEnv)
 {
 	CachedPlan *plan = NULL;
 	List	   *qlist;
@@ -1143,7 +1149,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 		elog(ERROR, "cannot apply ResourceOwner to non-saved cached plan");
 
 	/* Make sure the querytree list is valid and we have parse-time locks */
-	qlist = RevalidateCachedQuery(plansource);
+	qlist = RevalidateCachedQuery(plansource, queryEnv);
 
 	/* Decide whether to use a custom plan */
 	customplan = choose_custom_plan(plansource, boundParams);
@@ -1159,7 +1165,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 		else
 		{
 			/* Build a new generic plan */
-			plan = BuildCachedPlan(plansource, qlist, NULL);
+			plan = BuildCachedPlan(plansource, qlist, NULL, queryEnv);
 			/* Just make real sure plansource->gplan is clear */
 			ReleaseGenericPlan(plansource);
 			/* Link the new generic plan into the plansource */
@@ -1176,7 +1182,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 			{
 				/* otherwise, it should be a sibling of the plansource */
 				MemoryContextSetParent(plan->context,
-								MemoryContextGetParent(plansource->context));
+									   MemoryContextGetParent(plansource->context));
 			}
 			/* Update generic_cost whenever we make a new generic plan */
 			plansource->generic_cost = cached_plan_cost(plan, false);
@@ -1204,7 +1210,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 	if (customplan)
 	{
 		/* Build a custom plan */
-		plan = BuildCachedPlan(plansource, qlist, boundParams);
+		plan = BuildCachedPlan(plansource, qlist, boundParams, queryEnv);
 		/* Accumulate total costs of custom plans, but 'ware overflow */
 		if (plansource->num_custom_plans < INT_MAX)
 		{
@@ -1342,6 +1348,7 @@ CopyCachedPlan(CachedPlanSource *plansource)
 	newsource->magic = CACHEDPLANSOURCE_MAGIC;
 	newsource->raw_parse_tree = copyObject(plansource->raw_parse_tree);
 	newsource->query_string = pstrdup(plansource->query_string);
+	MemoryContextSetIdentifier(source_context, newsource->query_string);
 	newsource->commandTag = plansource->commandTag;
 	if (plansource->num_params > 0)
 	{
@@ -1367,9 +1374,9 @@ CopyCachedPlan(CachedPlanSource *plansource)
 											  "CachedPlanQuery",
 											  ALLOCSET_START_SMALL_SIZES);
 	MemoryContextSwitchTo(querytree_context);
-	newsource->query_list = (List *) copyObject(plansource->query_list);
-	newsource->relationOids = (List *) copyObject(plansource->relationOids);
-	newsource->invalItems = (List *) copyObject(plansource->invalItems);
+	newsource->query_list = copyObject(plansource->query_list);
+	newsource->relationOids = copyObject(plansource->relationOids);
+	newsource->invalItems = copyObject(plansource->invalItems);
 	if (plansource->search_path)
 		newsource->search_path = CopyOverrideSearchPath(plansource->search_path);
 	newsource->query_context = querytree_context;
@@ -1418,7 +1425,8 @@ CachedPlanIsValid(CachedPlanSource *plansource)
  * within the cached plan, and may disappear next time the plan is updated.
  */
 List *
-CachedPlanGetTargetList(CachedPlanSource *plansource)
+CachedPlanGetTargetList(CachedPlanSource *plansource,
+						QueryEnvironment *queryEnv)
 {
 	Query	   *pstmt;
 
@@ -1434,7 +1442,7 @@ CachedPlanGetTargetList(CachedPlanSource *plansource)
 		return NIL;
 
 	/* Make sure the querytree list is valid and we have parse-time locks */
-	RevalidateCachedQuery(plansource);
+	RevalidateCachedQuery(plansource, queryEnv);
 
 	/* Get the primary statement and find out what it returns */
 	pstmt = QueryListGetPrimaryStmt(plansource->query_list);
@@ -1457,7 +1465,7 @@ QueryListGetPrimaryStmt(List *stmts)
 
 	foreach(lc, stmts)
 	{
-		Query	   *stmt = castNode(Query, lfirst(lc));
+		Query	   *stmt = lfirst_node(Query, lc);
 
 		if (stmt->canSetTag)
 			return stmt;
@@ -1476,7 +1484,7 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 
 	foreach(lc1, stmt_list)
 	{
-		PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc1));
+		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc1);
 		int			rt_index;
 		ListCell   *lc2;
 
@@ -1546,7 +1554,7 @@ AcquirePlannerLocks(List *stmt_list, bool acquire)
 
 	foreach(lc, stmt_list)
 	{
-		Query	   *query = castNode(Query, lfirst(lc));
+		Query	   *query = lfirst_node(Query, lc);
 
 		if (query->commandType == CMD_UTILITY)
 		{
@@ -1613,7 +1621,7 @@ ScanQueryForLocks(Query *parsetree, bool acquire)
 	/* Recurse into subquery-in-WITH */
 	foreach(lc, parsetree->cteList)
 	{
-		CommonTableExpr *cte = castNode(CommonTableExpr, lfirst(lc));
+		CommonTableExpr *cte = lfirst_node(CommonTableExpr, lc);
 
 		ScanQueryForLocks(castNode(Query, cte->ctequery), acquire);
 	}
@@ -1671,7 +1679,7 @@ PlanCacheComputeResultDesc(List *stmt_list)
 	{
 		case PORTAL_ONE_SELECT:
 		case PORTAL_ONE_MOD_WITH:
-			query = castNode(Query, linitial(stmt_list));
+			query = linitial_node(Query, stmt_list);
 			return ExecCleanTypeFromTL(query->targetList, false);
 
 		case PORTAL_ONE_RETURNING:
@@ -1680,7 +1688,7 @@ PlanCacheComputeResultDesc(List *stmt_list)
 			return ExecCleanTypeFromTL(query->returningList, false);
 
 		case PORTAL_UTIL_SELECT:
-			query = castNode(Query, linitial(stmt_list));
+			query = linitial_node(Query, stmt_list);
 			Assert(query->utilityStmt);
 			return UtilityTupleDescriptor(query->utilityStmt);
 
@@ -1737,7 +1745,7 @@ PlanCacheRelCallback(Datum arg, Oid relid)
 
 			foreach(lc, plansource->gplan->stmt_list)
 			{
-				PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
+				PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc);
 
 				if (plannedstmt->commandType == CMD_UTILITY)
 					continue;	/* Ignore utility statements */
@@ -1810,7 +1818,7 @@ PlanCacheFuncCallback(Datum arg, int cacheid, uint32 hashvalue)
 		{
 			foreach(lc, plansource->gplan->stmt_list)
 			{
-				PlannedStmt *plannedstmt = castNode(PlannedStmt, lfirst(lc));
+				PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc);
 				ListCell   *lc3;
 
 				if (plannedstmt->commandType == CMD_UTILITY)
@@ -1883,7 +1891,7 @@ ResetPlanCache(void)
 		 */
 		foreach(lc, plansource->query_list)
 		{
-			Query	   *query = castNode(Query, lfirst(lc));
+			Query	   *query = lfirst_node(Query, lc);
 
 			if (query->commandType != CMD_UTILITY ||
 				UtilityContainsQuery(query->utilityStmt))

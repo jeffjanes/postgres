@@ -96,9 +96,11 @@ undefine([Ac_cachevar])dnl
 # PGAC_TYPE_128BIT_INT
 # ---------------------
 # Check if __int128 is a working 128 bit integer type, and if so
-# define PG_INT128_TYPE to that typename.  This currently only detects
-# a GCC/clang extension, but support for different environments may be
-# added in the future.
+# define PG_INT128_TYPE to that typename, and define ALIGNOF_PG_INT128_TYPE
+# as its alignment requirement.
+#
+# This currently only detects a GCC/clang extension, but support for other
+# environments may be added in the future.
 #
 # For the moment we only test for support for 128bit math; support for
 # 128bit literals and snprintf is not required.
@@ -106,28 +108,61 @@ AC_DEFUN([PGAC_TYPE_128BIT_INT],
 [AC_CACHE_CHECK([for __int128], [pgac_cv__128bit_int],
 [AC_LINK_IFELSE([AC_LANG_PROGRAM([
 /*
+ * We don't actually run this test, just link it to verify that any support
+ * functions needed for __int128 are present.
+ *
  * These are globals to discourage the compiler from folding all the
  * arithmetic tests down to compile-time constants.  We do not have
- * convenient support for 64bit literals at this point...
+ * convenient support for 128bit literals at this point...
  */
 __int128 a = 48828125;
-__int128 b = 97656255;
+__int128 b = 97656250;
 ],[
 __int128 c,d;
 a = (a << 12) + 1; /* 200000000001 */
 b = (b << 12) + 5; /* 400000000005 */
-/* use the most relevant arithmetic ops */
+/* try the most relevant arithmetic ops */
 c = a * b;
 d = (c + b) / b;
-/* return different values, to prevent optimizations */
+/* must use the results, else compiler may optimize arithmetic away */
 if (d != a+1)
-  return 0;
-return 1;
+  return 1;
 ])],
 [pgac_cv__128bit_int=yes],
 [pgac_cv__128bit_int=no])])
 if test x"$pgac_cv__128bit_int" = xyes ; then
-  AC_DEFINE(PG_INT128_TYPE, __int128, [Define to the name of a signed 128-bit integer type.])
+  # Use of non-default alignment with __int128 tickles bugs in some compilers.
+  # If not cross-compiling, we can test for bugs and disable use of __int128
+  # with buggy compilers.  If cross-compiling, hope for the best.
+  # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=83925
+  AC_CACHE_CHECK([for __int128 alignment bug], [pgac_cv__128bit_int_bug],
+  [AC_RUN_IFELSE([AC_LANG_PROGRAM([
+/* This must match the corresponding code in c.h: */
+#if defined(__GNUC__) || defined(__SUNPRO_C) || defined(__IBMC__)
+#define pg_attribute_aligned(a) __attribute__((aligned(a)))
+#endif
+typedef __int128 int128a
+#if defined(pg_attribute_aligned)
+pg_attribute_aligned(8)
+#endif
+;
+int128a holder;
+void pass_by_val(void *buffer, int128a par) { holder = par; }
+],[
+long int i64 = 97656225L << 12;
+int128a q;
+pass_by_val(main, (int128a) i64);
+q = (int128a) i64;
+if (q != holder)
+  return 1;
+])],
+  [pgac_cv__128bit_int_bug=ok],
+  [pgac_cv__128bit_int_bug=broken],
+  [pgac_cv__128bit_int_bug="assuming ok"])])
+  if test x"$pgac_cv__128bit_int_bug" != xbroken ; then
+    AC_DEFINE(PG_INT128_TYPE, __int128, [Define to the name of a signed 128-bit integer type.])
+    AC_CHECK_ALIGNOF(PG_INT128_TYPE)
+  fi
 fi])# PGAC_TYPE_128BIT_INT
 
 
@@ -178,6 +213,33 @@ fi])# PGAC_C_STATIC_ASSERT
 
 
 
+# PGAC_C_TYPEOF
+# -------------
+# Check if the C compiler understands typeof or a variant.  Define
+# HAVE_TYPEOF if so, and define 'typeof' to the actual key word.
+#
+AC_DEFUN([PGAC_C_TYPEOF],
+[AC_CACHE_CHECK(for typeof, pgac_cv_c_typeof,
+[pgac_cv_c_typeof=no
+for pgac_kw in typeof __typeof__ decltype; do
+  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([],
+[int x = 0;
+$pgac_kw(x) y;
+y = x;
+return y;])],
+[pgac_cv_c_typeof=$pgac_kw])
+  test "$pgac_cv_c_typeof" != no && break
+done])
+if test "$pgac_cv_c_typeof" != no; then
+  AC_DEFINE(HAVE_TYPEOF, 1,
+            [Define to 1 if your compiler understands `typeof' or something similar.])
+  if test "$pgac_cv_c_typeof" != typeof; then
+    AC_DEFINE_UNQUOTED(typeof, $pgac_cv_c_typeof, [Define to how the compiler spells `typeof'.])
+  fi
+fi])# PGAC_C_TYPEOF
+
+
+
 # PGAC_C_TYPES_COMPATIBLE
 # -----------------------
 # Check if the C compiler understands __builtin_types_compatible_p,
@@ -195,6 +257,23 @@ if test x"$pgac_cv__types_compatible" = xyes ; then
 AC_DEFINE(HAVE__BUILTIN_TYPES_COMPATIBLE_P, 1,
           [Define to 1 if your compiler understands __builtin_types_compatible_p.])
 fi])# PGAC_C_TYPES_COMPATIBLE
+
+
+# PGAC_C_BUILTIN_BSWAP16
+# -------------------------
+# Check if the C compiler understands __builtin_bswap16(),
+# and define HAVE__BUILTIN_BSWAP16 if so.
+AC_DEFUN([PGAC_C_BUILTIN_BSWAP16],
+[AC_CACHE_CHECK(for __builtin_bswap16, pgac_cv__builtin_bswap16,
+[AC_COMPILE_IFELSE([AC_LANG_SOURCE(
+[static unsigned long int x = __builtin_bswap16(0xaabb);]
+)],
+[pgac_cv__builtin_bswap16=yes],
+[pgac_cv__builtin_bswap16=no])])
+if test x"$pgac_cv__builtin_bswap16" = xyes ; then
+AC_DEFINE(HAVE__BUILTIN_BSWAP16, 1,
+          [Define to 1 if your compiler understands __builtin_bswap16.])
+fi])# PGAC_C_BUILTIN_BSWAP16
 
 
 
@@ -238,10 +317,15 @@ fi])# PGAC_C_BUILTIN_BSWAP64
 # -------------------------
 # Check if the C compiler understands __builtin_constant_p(),
 # and define HAVE__BUILTIN_CONSTANT_P if so.
+# We need __builtin_constant_p("string literal") to be true, but some older
+# compilers don't think that, so test for that case explicitly.
 AC_DEFUN([PGAC_C_BUILTIN_CONSTANT_P],
 [AC_CACHE_CHECK(for __builtin_constant_p, pgac_cv__builtin_constant_p,
 [AC_COMPILE_IFELSE([AC_LANG_SOURCE(
-[[static int x; static int y[__builtin_constant_p(x) ? x : 1];]]
+[[static int x;
+  static int y[__builtin_constant_p(x) ? x : 1];
+  static int z[__builtin_constant_p("string literal") ? 1 : x];
+]]
 )],
 [pgac_cv__builtin_constant_p=yes],
 [pgac_cv__builtin_constant_p=no])])
@@ -249,6 +333,34 @@ if test x"$pgac_cv__builtin_constant_p" = xyes ; then
 AC_DEFINE(HAVE__BUILTIN_CONSTANT_P, 1,
           [Define to 1 if your compiler understands __builtin_constant_p.])
 fi])# PGAC_C_BUILTIN_CONSTANT_P
+
+
+
+# PGAC_C_BUILTIN_OP_OVERFLOW
+# -------------------------
+# Check if the C compiler understands __builtin_$op_overflow(),
+# and define HAVE__BUILTIN_OP_OVERFLOW if so.
+#
+# Check for the most complicated case, 64 bit multiplication, as a
+# proxy for all of the operations.  To detect the case where the compiler
+# knows the function but library support is missing, we must link not just
+# compile, and store the results in global variables so the compiler doesn't
+# optimize away the call.
+AC_DEFUN([PGAC_C_BUILTIN_OP_OVERFLOW],
+[AC_CACHE_CHECK(for __builtin_mul_overflow, pgac_cv__builtin_op_overflow,
+[AC_LINK_IFELSE([AC_LANG_PROGRAM([
+PG_INT64_TYPE a = 1;
+PG_INT64_TYPE b = 1;
+PG_INT64_TYPE result;
+int oflo;
+],
+[oflo = __builtin_mul_overflow(a, b, &result);])],
+[pgac_cv__builtin_op_overflow=yes],
+[pgac_cv__builtin_op_overflow=no])])
+if test x"$pgac_cv__builtin_op_overflow" = xyes ; then
+AC_DEFINE(HAVE__BUILTIN_OP_OVERFLOW, 1,
+          [Define to 1 if your compiler understands __builtin_$op_overflow.])
+fi])# PGAC_C_BUILTIN_OP_OVERFLOW
 
 
 
@@ -316,26 +428,40 @@ fi])# PGAC_C_VA_ARGS
 
 
 
-# PGAC_PROG_CC_CFLAGS_OPT
+# PGAC_PROG_VARCC_VARFLAGS_OPT
 # -----------------------
-# Given a string, check if the compiler supports the string as a
-# command-line option. If it does, add the string to CFLAGS.
-AC_DEFUN([PGAC_PROG_CC_CFLAGS_OPT],
-[define([Ac_cachevar], [AS_TR_SH([pgac_cv_prog_cc_cflags_$1])])dnl
-AC_CACHE_CHECK([whether $CC supports $1], [Ac_cachevar],
+# Given a compiler, variable name and a string, check if the compiler
+# supports the string as a command-line option. If it does, add the
+# string to the given variable.
+AC_DEFUN([PGAC_PROG_VARCC_VARFLAGS_OPT],
+[define([Ac_cachevar], [AS_TR_SH([pgac_cv_prog_$1_cflags_$3])])dnl
+AC_CACHE_CHECK([whether ${$1} supports $3, for $2], [Ac_cachevar],
 [pgac_save_CFLAGS=$CFLAGS
-CFLAGS="$pgac_save_CFLAGS $1"
+pgac_save_CC=$CC
+CC=${$1}
+CFLAGS="${$2} $3"
 ac_save_c_werror_flag=$ac_c_werror_flag
 ac_c_werror_flag=yes
 _AC_COMPILE_IFELSE([AC_LANG_PROGRAM()],
                    [Ac_cachevar=yes],
                    [Ac_cachevar=no])
 ac_c_werror_flag=$ac_save_c_werror_flag
-CFLAGS="$pgac_save_CFLAGS"])
+CFLAGS="$pgac_save_CFLAGS"
+CC="$pgac_save_CC"])
 if test x"$Ac_cachevar" = x"yes"; then
-  CFLAGS="$CFLAGS $1"
+  $2="${$2} $3"
 fi
 undefine([Ac_cachevar])dnl
+])# PGAC_PROG_VARCC_VARFLAGS_OPT
+
+
+
+# PGAC_PROG_CC_CFLAGS_OPT
+# -----------------------
+# Given a string, check if the compiler supports the string as a
+# command-line option. If it does, add the string to CFLAGS.
+AC_DEFUN([PGAC_PROG_CC_CFLAGS_OPT], [
+PGAC_PROG_VARCC_VARFLAGS_OPT(CC, CFLAGS, $1)
 ])# PGAC_PROG_CC_CFLAGS_OPT
 
 
@@ -346,22 +472,48 @@ undefine([Ac_cachevar])dnl
 # the string as a command-line option. If it does, add the string to
 # the given variable.
 AC_DEFUN([PGAC_PROG_CC_VAR_OPT],
-[define([Ac_cachevar], [AS_TR_SH([pgac_cv_prog_cc_cflags_$2])])dnl
-AC_CACHE_CHECK([whether $CC supports $2], [Ac_cachevar],
-[pgac_save_CFLAGS=$CFLAGS
-CFLAGS="$pgac_save_CFLAGS $2"
-ac_save_c_werror_flag=$ac_c_werror_flag
-ac_c_werror_flag=yes
+[PGAC_PROG_VARCC_VARFLAGS_OPT(CC, $1, $2)
+])# PGAC_PROG_CC_VAR_OPT
+
+
+
+# PGAC_PROG_VARCXX_VARFLAGS_OPT
+# -----------------------
+# Given a compiler, variable name and a string, check if the compiler
+# supports the string as a command-line option. If it does, add the
+# string to the given variable.
+AC_DEFUN([PGAC_PROG_VARCXX_VARFLAGS_OPT],
+[define([Ac_cachevar], [AS_TR_SH([pgac_cv_prog_$1_cxxflags_$3])])dnl
+AC_CACHE_CHECK([whether ${$1} supports $3, for $2], [Ac_cachevar],
+[pgac_save_CXXFLAGS=$CXXFLAGS
+pgac_save_CXX=$CXX
+CXX=${$1}
+CXXFLAGS="${$2} $3"
+ac_save_cxx_werror_flag=$ac_cxx_werror_flag
+ac_cxx_werror_flag=yes
+AC_LANG_PUSH(C++)
 _AC_COMPILE_IFELSE([AC_LANG_PROGRAM()],
                    [Ac_cachevar=yes],
                    [Ac_cachevar=no])
-ac_c_werror_flag=$ac_save_c_werror_flag
-CFLAGS="$pgac_save_CFLAGS"])
+AC_LANG_POP([])
+ac_cxx_werror_flag=$ac_save_cxx_werror_flag
+CXXFLAGS="$pgac_save_CXXFLAGS"
+CXX="$pgac_save_CXX"])
 if test x"$Ac_cachevar" = x"yes"; then
-  $1="${$1} $2"
+  $2="${$2} $3"
 fi
 undefine([Ac_cachevar])dnl
-])# PGAC_PROG_CC_VAR_OPT
+])# PGAC_PROG_VARCXX_VARFLAGS_OPT
+
+
+
+# PGAC_PROG_CXX_CFLAGS_OPT
+# -----------------------
+# Given a string, check if the compiler supports the string as a
+# command-line option. If it does, add the string to CXXFLAGS.
+AC_DEFUN([PGAC_PROG_CXX_CFLAGS_OPT],
+[PGAC_PROG_VARCXX_VARFLAGS_OPT(CXX, CXXFLAGS, $1)
+])# PGAC_PROG_CXX_VAR_OPT
 
 
 

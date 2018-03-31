@@ -3,7 +3,7 @@
  * walreceiver.h
  *	  Exports from replication/walreceiverfuncs.c.
  *
- * Portions Copyright (c) 2010-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2018, PostgreSQL Global Development Group
  *
  * src/include/replication/walreceiver.h
  *
@@ -15,6 +15,7 @@
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
 #include "fmgr.h"
+#include "getaddrinfo.h"		/* for NI_MAXHOST */
 #include "replication/logicalproto.h"
 #include "replication/walsender.h"
 #include "storage/latch.h"
@@ -109,18 +110,17 @@ typedef struct
 	char		conninfo[MAXCONNINFO];
 
 	/*
+	 * Host name (this can be a host name, an IP address, or a directory
+	 * path) and port number of the active replication connection.
+	 */
+	char		sender_host[NI_MAXHOST];
+	int			sender_port;
+
+	/*
 	 * replication slot name; is also used for walreceiver to connect with the
 	 * primary
 	 */
 	char		slotname[NAMEDATALEN];
-
-	slock_t		mutex;			/* locks shared variables shown above */
-
-	/*
-	 * force walreceiver reply?  This doesn't need to be locked; memory
-	 * barriers for ordering are sufficient.
-	 */
-	bool		force_reply;
 
 	/* set true once conninfo is ready to display (obfuscated pwds etc) */
 	bool		ready_to_display;
@@ -129,35 +129,42 @@ typedef struct
 	 * Latch used by startup process to wake up walreceiver after telling it
 	 * where to start streaming (after setting receiveStart and
 	 * receiveStartTLI), and also to tell it to send apply feedback to the
-	 * primary whenever specially marked commit records are applied.
-	 * This is normally mapped to procLatch when walreceiver is running.
+	 * primary whenever specially marked commit records are applied. This is
+	 * normally mapped to procLatch when walreceiver is running.
 	 */
 	Latch	   *latch;
+
+	slock_t		mutex;			/* locks shared variables shown above */
+
+	/*
+	 * force walreceiver reply?  This doesn't need to be locked; memory
+	 * barriers for ordering are sufficient.  But we do need atomic fetch and
+	 * store semantics, so use sig_atomic_t.
+	 */
+	sig_atomic_t force_reply;	/* used as a bool */
 } WalRcvData;
 
 extern WalRcvData *WalRcv;
 
 typedef struct
 {
-	bool		logical;					/* True if this is logical
-											   replication stream, false if
-											   physical stream.  */
-	char	   *slotname;					/* Name of the replication slot
-											   or NULL. */
-	XLogRecPtr	startpoint;					/* LSN of starting point. */
+	bool		logical;		/* True if this is logical replication stream,
+								 * false if physical stream.  */
+	char	   *slotname;		/* Name of the replication slot or NULL. */
+	XLogRecPtr	startpoint;		/* LSN of starting point. */
 
 	union
 	{
 		struct
 		{
-			TimeLineID	startpointTLI;		/* Starting timeline */
-		} physical;
+			TimeLineID	startpointTLI;	/* Starting timeline */
+		}			physical;
 		struct
 		{
-			uint32	proto_version;			/* Logical protocol version */
-			List   *publication_names;		/* String list of publications */
-		} logical;
-	} proto;
+			uint32		proto_version;	/* Logical protocol version */
+			List	   *publication_names;	/* String list of publications */
+		}			logical;
+	}			proto;
 } WalRcvStreamOptions;
 
 struct WalReceiverConn;
@@ -171,11 +178,13 @@ typedef struct WalReceiverConn WalReceiverConn;
 typedef enum
 {
 	WALRCV_ERROR,				/* There was error when executing the query. */
-	WALRCV_OK_COMMAND,			/* Query executed utility or replication command. */
+	WALRCV_OK_COMMAND,			/* Query executed utility or replication
+								 * command. */
 	WALRCV_OK_TUPLES,			/* Query returned tuples. */
 	WALRCV_OK_COPY_IN,			/* Query started COPY FROM. */
 	WALRCV_OK_COPY_OUT,			/* Query started COPY TO. */
-	WALRCV_OK_COPY_BOTH			/* Query started COPY BOTH replication protocol. */
+	WALRCV_OK_COPY_BOTH			/* Query started COPY BOTH replication
+								 * protocol. */
 } WalRcvExecStatus;
 
 /*
@@ -184,10 +193,10 @@ typedef enum
  */
 typedef struct WalRcvExecResult
 {
-	WalRcvExecStatus	status;
-	char			   *err;
-	Tuplestorestate	   *tuplestore;
-	TupleDesc			tupledesc;
+	WalRcvExecStatus status;
+	char	   *err;
+	Tuplestorestate *tuplestore;
+	TupleDesc	tupledesc;
 } WalRcvExecResult;
 
 /* libpqwalreceiver hooks */
@@ -196,6 +205,9 @@ typedef WalReceiverConn *(*walrcv_connect_fn) (const char *conninfo, bool logica
 											   char **err);
 typedef void (*walrcv_check_conninfo_fn) (const char *conninfo);
 typedef char *(*walrcv_get_conninfo_fn) (WalReceiverConn *conn);
+typedef void (*walrcv_get_senderinfo_fn) (WalReceiverConn *conn,
+										 char **sender_host,
+										 int *sender_port);
 typedef char *(*walrcv_identify_system_fn) (WalReceiverConn *conn,
 											TimeLineID *primary_tli,
 											int *server_version);
@@ -223,18 +235,19 @@ typedef void (*walrcv_disconnect_fn) (WalReceiverConn *conn);
 
 typedef struct WalReceiverFunctionsType
 {
-	walrcv_connect_fn					walrcv_connect;
-	walrcv_check_conninfo_fn            walrcv_check_conninfo;
-	walrcv_get_conninfo_fn				walrcv_get_conninfo;
-	walrcv_identify_system_fn			walrcv_identify_system;
-	walrcv_readtimelinehistoryfile_fn	walrcv_readtimelinehistoryfile;
-	walrcv_startstreaming_fn			walrcv_startstreaming;
-	walrcv_endstreaming_fn				walrcv_endstreaming;
-	walrcv_receive_fn					walrcv_receive;
-	walrcv_send_fn						walrcv_send;
-	walrcv_create_slot_fn				walrcv_create_slot;
-	walrcv_exec_fn						walrcv_exec;
-	walrcv_disconnect_fn				walrcv_disconnect;
+	walrcv_connect_fn walrcv_connect;
+	walrcv_check_conninfo_fn walrcv_check_conninfo;
+	walrcv_get_conninfo_fn walrcv_get_conninfo;
+	walrcv_get_senderinfo_fn walrcv_get_senderinfo;
+	walrcv_identify_system_fn walrcv_identify_system;
+	walrcv_readtimelinehistoryfile_fn walrcv_readtimelinehistoryfile;
+	walrcv_startstreaming_fn walrcv_startstreaming;
+	walrcv_endstreaming_fn walrcv_endstreaming;
+	walrcv_receive_fn walrcv_receive;
+	walrcv_send_fn walrcv_send;
+	walrcv_create_slot_fn walrcv_create_slot;
+	walrcv_exec_fn walrcv_exec;
+	walrcv_disconnect_fn walrcv_disconnect;
 } WalReceiverFunctionsType;
 
 extern PGDLLIMPORT WalReceiverFunctionsType *WalReceiverFunctions;
@@ -245,6 +258,8 @@ extern PGDLLIMPORT WalReceiverFunctionsType *WalReceiverFunctions;
 	WalReceiverFunctions->walrcv_check_conninfo(conninfo)
 #define walrcv_get_conninfo(conn) \
 	WalReceiverFunctions->walrcv_get_conninfo(conn)
+#define walrcv_get_senderinfo(conn, sender_host, sender_port) \
+	WalReceiverFunctions->walrcv_get_senderinfo(conn, sender_host, sender_port)
 #define walrcv_identify_system(conn, primary_tli, server_version) \
 	WalReceiverFunctions->walrcv_identify_system(conn, primary_tli, server_version)
 #define walrcv_readtimelinehistoryfile(conn, tli, filename, content, size) \
@@ -298,4 +313,4 @@ extern int	GetReplicationApplyDelay(void);
 extern int	GetReplicationTransferLatency(void);
 extern void WalRcvForceReply(void);
 
-#endif   /* _WALRECEIVER_H */
+#endif							/* _WALRECEIVER_H */

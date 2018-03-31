@@ -3,7 +3,7 @@
  * adminpack.c
  *
  *
- * Copyright (c) 2002-2017, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2018, PostgreSQL Global Development Group
  *
  * Author: Andreas Pflug <pgadmin@pse-consulting.de>
  *
@@ -74,7 +74,7 @@ convert_and_check_filename(text *arg, bool logAllowed)
 		if (path_contains_parent_reference(filename))
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			(errmsg("reference to parent directory (\"..\") not allowed"))));
+					 (errmsg("reference to parent directory (\"..\") not allowed"))));
 
 		/*
 		 * Allow absolute paths if within DataDir or Log_directory, even
@@ -105,7 +105,7 @@ requireSuperuser(void)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			  (errmsg("only superuser may access generic file functions"))));
+				 (errmsg("only superuser may access generic file functions"))));
 }
 
 
@@ -319,7 +319,7 @@ pg_logdir_ls(PG_FUNCTION_ARGS)
 		if (!fctx->dirdesc)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read directory \"%s\": %m",
+					 errmsg("could not open directory \"%s\": %m",
 							fctx->location)));
 
 		funcctx->user_fctx = fctx;

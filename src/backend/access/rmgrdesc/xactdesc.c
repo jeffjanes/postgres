@@ -3,7 +3,7 @@
  * xactdesc.c
  *	  rmgr descriptor routines for access/transam/xact.c
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -102,6 +102,14 @@ ParseCommitRecord(uint8 info, xl_xact_commit *xlrec, xl_xact_parsed_commit *pars
 		parsed->twophase_xid = xl_twophase->xid;
 
 		data += sizeof(xl_xact_twophase);
+
+		if (parsed->xinfo & XACT_XINFO_HAS_GID)
+		{
+			int gidlen;
+			strcpy(parsed->twophase_gid, data);
+			gidlen = strlen(parsed->twophase_gid) + 1;
+			data += MAXALIGN(gidlen);
+		}
 	}
 
 	if (parsed->xinfo & XACT_XINFO_HAS_ORIGIN)
@@ -139,6 +147,16 @@ ParseAbortRecord(uint8 info, xl_xact_abort *xlrec, xl_xact_parsed_abort *parsed)
 		data += sizeof(xl_xact_xinfo);
 	}
 
+	if (parsed->xinfo & XACT_XINFO_HAS_DBINFO)
+	{
+		xl_xact_dbinfo *xl_dbinfo = (xl_xact_dbinfo *) data;
+
+		parsed->dbId = xl_dbinfo->dbId;
+		parsed->tsId = xl_dbinfo->tsId;
+
+		data += sizeof(xl_xact_dbinfo);
+	}
+
 	if (parsed->xinfo & XACT_XINFO_HAS_SUBXACTS)
 	{
 		xl_xact_subxacts *xl_subxacts = (xl_xact_subxacts *) data;
@@ -168,6 +186,27 @@ ParseAbortRecord(uint8 info, xl_xact_abort *xlrec, xl_xact_parsed_abort *parsed)
 		parsed->twophase_xid = xl_twophase->xid;
 
 		data += sizeof(xl_xact_twophase);
+
+		if (parsed->xinfo & XACT_XINFO_HAS_GID)
+		{
+			int gidlen;
+			strcpy(parsed->twophase_gid, data);
+			gidlen = strlen(parsed->twophase_gid) + 1;
+			data += MAXALIGN(gidlen);
+		}
+	}
+
+	if (parsed->xinfo & XACT_XINFO_HAS_ORIGIN)
+	{
+		xl_xact_origin xl_origin;
+
+		/* we're only guaranteed 4 byte alignment, so copy onto stack */
+		memcpy(&xl_origin, data, sizeof(xl_origin));
+
+		parsed->origin_lsn = xl_origin.origin_lsn;
+		parsed->origin_timestamp = xl_origin.origin_timestamp;
+
+		data += sizeof(xl_xact_origin);
 	}
 }
 
@@ -205,8 +244,8 @@ xact_desc_commit(StringInfo buf, uint8 info, xl_xact_commit *xlrec, RepOriginId 
 	if (parsed.nmsgs > 0)
 	{
 		standby_desc_invalidations(
-					buf, parsed.nmsgs, parsed.msgs, parsed.dbId, parsed.tsId,
-						  XactCompletionRelcacheInitFileInval(parsed.xinfo));
+								   buf, parsed.nmsgs, parsed.msgs, parsed.dbId, parsed.tsId,
+								   XactCompletionRelcacheInitFileInval(parsed.xinfo));
 	}
 
 	if (XactCompletionForceSyncCommit(parsed.xinfo))

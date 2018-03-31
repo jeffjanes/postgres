@@ -36,7 +36,7 @@
  * to look like NO SCROLL cursors.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/portal.h
@@ -116,9 +116,9 @@ typedef struct PortalData
 	/* Bookkeeping data */
 	const char *name;			/* portal's name */
 	const char *prepStmtName;	/* source prepared statement (NULL if none) */
-	MemoryContext heap;			/* subsidiary memory for portal */
+	MemoryContext portalContext;/* subsidiary memory for portal */
 	ResourceOwner resowner;		/* resources owned by portal */
-	void		(*cleanup) (Portal portal);		/* cleanup hook */
+	void		(*cleanup) (Portal portal); /* cleanup hook */
 
 	/*
 	 * State data for remembering which subtransaction(s) the portal was
@@ -127,8 +127,8 @@ typedef struct PortalData
 	 * createSubid is the creating subxact and activeSubid is the last subxact
 	 * in which we ran the portal.
 	 */
-	SubTransactionId createSubid;		/* the creating subxact */
-	SubTransactionId activeSubid;		/* the last subxact with activity */
+	SubTransactionId createSubid;	/* the creating subxact */
+	SubTransactionId activeSubid;	/* the last subxact with activity */
 
 	/* The query or queries the portal will execute */
 	const char *sourceText;		/* text of query (as of 8.4, never NULL) */
@@ -137,6 +137,7 @@ typedef struct PortalData
 	CachedPlan *cplan;			/* CachedPlan, if stmts are from one */
 
 	ParamListInfo portalParams; /* params to pass to query */
+	QueryEnvironment *queryEnv; /* environment for query */
 
 	/* Features/options */
 	PortalStrategy strategy;	/* see above */
@@ -146,6 +147,8 @@ typedef struct PortalData
 	/* Status data */
 	PortalStatus status;		/* see above */
 	bool		portalPinned;	/* a pinned portal can't be dropped */
+	bool		autoHeld;		/* was automatically converted from pinned to
+								 * held (see HoldPinnedPortals()) */
 
 	/* If not NULL, Executor is active; call ExecutorEnd eventually: */
 	QueryDesc  *queryDesc;		/* info needed for executor invocation */
@@ -189,7 +192,7 @@ typedef struct PortalData
 	/* Presentation data, primarily used by the pg_cursors system view */
 	TimestampTz creation_time;	/* time at which this portal was defined */
 	bool		visible;		/* include this portal in pg_cursors? */
-}	PortalData;
+}			PortalData;
 
 /*
  * PortalIsValid
@@ -197,18 +200,13 @@ typedef struct PortalData
  */
 #define PortalIsValid(p) PointerIsValid(p)
 
-/*
- * Access macros for Portal ... use these in preference to field access.
- */
-#define PortalGetQueryDesc(portal)	((portal)->queryDesc)
-#define PortalGetHeapMemory(portal) ((portal)->heap)
-
 
 /* Prototypes for functions in utils/mmgr/portalmem.c */
 extern void EnablePortalManager(void);
 extern bool PreCommit_Portals(bool isPrepare);
 extern void AtAbort_Portals(void);
 extern void AtCleanup_Portals(void);
+extern void PortalErrorCleanup(void);
 extern void AtSubCommit_Portals(SubTransactionId mySubid,
 					SubTransactionId parentSubid,
 					ResourceOwner parentXactOwner);
@@ -236,5 +234,6 @@ extern PlannedStmt *PortalGetPrimaryStmt(Portal portal);
 extern void PortalCreateHoldStore(Portal portal);
 extern void PortalHashTableDeleteAll(void);
 extern bool ThereAreNoReadyPortals(void);
+extern void HoldPinnedPortals(void);
 
-#endif   /* PORTAL_H */
+#endif							/* PORTAL_H */

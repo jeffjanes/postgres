@@ -2,7 +2,7 @@
  *
  *	  EUC_JIS_2004 <--> UTF8
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -43,7 +43,7 @@ euc_jis_2004_to_utf8(PG_FUNCTION_ARGS)
 
 	LocalToUtf(src, len, dest,
 			   &euc_jis_2004_to_unicode_tree,
-			LUmapEUC_JIS_2004_combined, lengthof(LUmapEUC_JIS_2004_combined),
+			   LUmapEUC_JIS_2004_combined, lengthof(LUmapEUC_JIS_2004_combined),
 			   NULL,
 			   PG_EUC_JIS_2004);
 
@@ -61,7 +61,7 @@ utf8_to_euc_jis_2004(PG_FUNCTION_ARGS)
 
 	UtfToLocal(src, len, dest,
 			   &euc_jis_2004_from_unicode_tree,
-			ULmapEUC_JIS_2004_combined, lengthof(ULmapEUC_JIS_2004_combined),
+			   ULmapEUC_JIS_2004_combined, lengthof(ULmapEUC_JIS_2004_combined),
 			   NULL,
 			   PG_EUC_JIS_2004);
 

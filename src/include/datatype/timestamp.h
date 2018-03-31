@@ -5,7 +5,7 @@
  *
  * Note: this file must be includable in both frontend and backend contexts.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/datatype/timestamp.h
@@ -178,7 +178,7 @@ typedef struct
 /* First allowed date, and first disallowed date, in Julian-date form */
 #define DATETIME_MIN_JULIAN (0)
 #define DATE_END_JULIAN (2147483494)	/* == date2j(JULIAN_MAXYEAR, 1, 1) */
-#define TIMESTAMP_END_JULIAN (109203528)		/* == date2j(294277, 1, 1) */
+#define TIMESTAMP_END_JULIAN (109203528)	/* == date2j(294277, 1, 1) */
 
 /* Timestamp limits */
 #define MIN_TIMESTAMP	INT64CONST(-211813488000000000)
@@ -194,4 +194,4 @@ typedef struct
 /* Range-check a timestamp */
 #define IS_VALID_TIMESTAMP(t)  (MIN_TIMESTAMP <= (t) && (t) < END_TIMESTAMP)
 
-#endif   /* DATATYPE_TIMESTAMP_H */
+#endif							/* DATATYPE_TIMESTAMP_H */

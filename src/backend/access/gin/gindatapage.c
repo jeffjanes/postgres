@@ -4,7 +4,7 @@
  *	  routines for handling GIN posting tree pages.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -19,6 +19,7 @@
 #include "access/xloginsert.h"
 #include "lib/ilist.h"
 #include "miscadmin.h"
+#include "storage/predicate.h"
 #include "utils/rel.h"
 
 /*
@@ -235,9 +236,9 @@ dataIsMoveRight(GinBtree btree, Page page)
 	ItemPointer iptr = GinDataPageGetRightBound(page);
 
 	if (GinPageRightMost(page))
-		return FALSE;
+		return false;
 
-	return (ginCompareItemPointers(&btree->itemptr, iptr) > 0) ? TRUE : FALSE;
+	return (ginCompareItemPointers(&btree->itemptr, iptr) > 0) ? true : false;
 }
 
 /*
@@ -391,7 +392,7 @@ GinDataPageAddPostingItem(Page page, PostingItem *data, OffsetNumber offset)
 		if (offset != maxoff + 1)
 			memmove(ptr + sizeof(PostingItem),
 					ptr,
-					(maxoff - offset + 1) *sizeof(PostingItem));
+					(maxoff - offset + 1) * sizeof(PostingItem));
 	}
 	memcpy(ptr, data, sizeof(PostingItem));
 
@@ -685,7 +686,7 @@ dataBeginPlaceToPageLeaf(GinBtree btree, Buffer buf, GinBtreeStack *stack,
 
 		Assert(GinPageRightMost(page) ||
 			   ginCompareItemPointers(GinDataPageGetRightBound(*newlpage),
-								   GinDataPageGetRightBound(*newrpage)) < 0);
+									  GinDataPageGetRightBound(*newrpage)) < 0);
 
 		if (append)
 			elog(DEBUG2, "appended %d items to block %u; split %d/%d (%d to go)",
@@ -1468,7 +1469,7 @@ addItemsToLeaf(disassembledLeaf *leaf, ItemPointer newItems, int nNewItems)
 			ItemPointerData next_first;
 
 			next = (leafSegmentInfo *) dlist_container(leafSegmentInfo, node,
-								 dlist_next_node(&leaf->segments, iter.cur));
+													   dlist_next_node(&leaf->segments, iter.cur));
 			if (next->items)
 				next_first = next->items[0];
 			else
@@ -1595,7 +1596,7 @@ leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining)
 				{
 					seginfo->seg = ginCompressPostingList(seginfo->items,
 														  seginfo->nitems,
-												GinPostingListSegmentMaxSize,
+														  GinPostingListSegmentMaxSize,
 														  &npacked);
 				}
 				if (npacked != seginfo->nitems)
@@ -1610,7 +1611,7 @@ leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining)
 						pfree(seginfo->seg);
 					seginfo->seg = ginCompressPostingList(seginfo->items,
 														  seginfo->nitems,
-											 GinPostingListSegmentTargetSize,
+														  GinPostingListSegmentTargetSize,
 														  &npacked);
 					if (seginfo->action != GIN_SEGMENT_INSERT)
 						seginfo->action = GIN_SEGMENT_REPLACE;
@@ -1759,7 +1760,7 @@ leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining)
  */
 BlockNumber
 createPostingTree(Relation index, ItemPointerData *items, uint32 nitems,
-				  GinStatsData *buildStats)
+				  GinStatsData *buildStats, Buffer entrybuffer)
 {
 	BlockNumber blkno;
 	Buffer		buffer;
@@ -1809,6 +1810,12 @@ createPostingTree(Relation index, ItemPointerData *items, uint32 nitems,
 	buffer = GinNewBuffer(index);
 	page = BufferGetPage(buffer);
 	blkno = BufferGetBlockNumber(buffer);
+
+	/*
+	 * Copy a predicate lock from entry tree leaf (containing posting list)
+	 * to  posting tree.
+	 */
+	PredicateLockPageSplit(index, BufferGetBlockNumber(entrybuffer), blkno);
 
 	START_CRIT_SECTION();
 
@@ -1875,9 +1882,9 @@ ginPrepareDataScan(GinBtree btree, Relation index, BlockNumber rootBlkno)
 	btree->fillRoot = ginDataFillRoot;
 	btree->prepareDownlink = dataPrepareDownlink;
 
-	btree->isData = TRUE;
-	btree->fullScan = FALSE;
-	btree->isBuild = FALSE;
+	btree->isData = true;
+	btree->fullScan = false;
+	btree->isBuild = false;
 }
 
 /*
@@ -1904,6 +1911,7 @@ ginInsertItemPointers(Relation index, BlockNumber rootBlkno,
 		btree.itemptr = insertdata.items[insertdata.curitem];
 		stack = ginFindLeafPage(&btree, false, NULL);
 
+		GinCheckForSerializableConflictIn(btree.index, NULL, stack->buffer);
 		ginInsertValue(&btree, stack, &insertdata, buildStats);
 	}
 }
@@ -1919,9 +1927,9 @@ ginScanBeginPostingTree(GinBtree btree, Relation index, BlockNumber rootBlkno,
 
 	ginPrepareDataScan(btree, index, rootBlkno);
 
-	btree->fullScan = TRUE;
+	btree->fullScan = true;
 
-	stack = ginFindLeafPage(btree, TRUE, snapshot);
+	stack = ginFindLeafPage(btree, true, snapshot);
 
 	return stack;
 }

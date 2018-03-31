@@ -5,7 +5,7 @@
  *	  on system catalogs
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/indexing.h
@@ -128,6 +128,8 @@ DECLARE_INDEX(pg_constraint_contypid_index, 2666, on pg_constraint using btree(c
 #define ConstraintTypidIndexId	2666
 DECLARE_UNIQUE_INDEX(pg_constraint_oid_index, 2667, on pg_constraint using btree(oid oid_ops));
 #define ConstraintOidIndexId  2667
+DECLARE_INDEX(pg_constraint_conparentid_index, 2579, on pg_constraint using btree(conparentid oid_ops));
+#define ConstraintParentIndexId	2579
 
 DECLARE_UNIQUE_INDEX(pg_conversion_default_index, 2668, on pg_conversion using btree(connamespace oid_ops, conforencoding int4_ops, contoencoding int4_ops, oid oid_ops));
 #define ConversionDefaultIndexId  2668
@@ -181,6 +183,13 @@ DECLARE_UNIQUE_INDEX(pg_largeobject_loid_pn_index, 2683, on pg_largeobject using
 
 DECLARE_UNIQUE_INDEX(pg_largeobject_metadata_oid_index, 2996, on pg_largeobject_metadata using btree(oid oid_ops));
 #define LargeObjectMetadataOidIndexId	2996
+
+DECLARE_UNIQUE_INDEX(pg_statistic_ext_oid_index, 3380, on pg_statistic_ext using btree(oid oid_ops));
+#define StatisticExtOidIndexId	3380
+DECLARE_UNIQUE_INDEX(pg_statistic_ext_name_index, 3997, on pg_statistic_ext using btree(stxname name_ops, stxnamespace oid_ops));
+#define StatisticExtNameIndexId 3997
+DECLARE_INDEX(pg_statistic_ext_relid_index, 3379, on pg_statistic_ext using btree(stxrelid oid_ops));
+#define StatisticExtRelidIndexId 3379
 
 DECLARE_UNIQUE_INDEX(pg_namespace_nspname_index, 2684, on pg_namespace using btree(nspname name_ops));
 #define NamespaceNameIndexId  2684
@@ -355,4 +364,4 @@ DECLARE_UNIQUE_INDEX(pg_subscription_rel_srrelid_srsubid_index, 6117, on pg_subs
 /* last step of initialization script: build the indexes declared above */
 BUILD_INDICES
 
-#endif   /* INDEXING_H */
+#endif							/* INDEXING_H */

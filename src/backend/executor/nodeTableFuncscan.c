@@ -3,7 +3,7 @@
  * nodeTableFuncscan.c
  *	  Support routines for scanning RangeTableFunc (XMLTABLE like functions).
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -93,9 +93,11 @@ TableFuncRecheck(TableFuncScanState *node, TupleTableSlot *slot)
  *		access method functions.
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecTableFuncScan(TableFuncScanState *node)
+static TupleTableSlot *
+ExecTableFuncScan(PlanState *pstate)
 {
+	TableFuncScanState *node = castNode(TableFuncScanState, pstate);
+
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) TableFuncNext,
 					(ExecScanRecheckMtd) TableFuncRecheck);
@@ -128,6 +130,7 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 	scanstate = makeNode(TableFuncScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
+	scanstate->ss.ps.ExecProcNode = ExecTableFuncScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -137,36 +140,26 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 	ExecAssignExprContext(estate, &scanstate->ss.ps);
 
 	/*
-	 * initialize child expressions
-	 */
-	scanstate->ss.ps.targetlist = (List *)
-		ExecInitExpr((Expr *) node->scan.plan.targetlist,
-					 (PlanState *) scanstate);
-	scanstate->ss.ps.qual = (List *)
-		ExecInitExpr((Expr *) node->scan.plan.qual,
-					 (PlanState *) scanstate);
-
-	/*
-	 * tuple table initialization
-	 */
-	ExecInitResultTupleSlot(estate, &scanstate->ss.ps);
-	ExecInitScanTupleSlot(estate, &scanstate->ss);
-
-	/*
 	 * initialize source tuple type
 	 */
 	tupdesc = BuildDescFromLists(tf->colnames,
 								 tf->coltypes,
 								 tf->coltypmods,
 								 tf->colcollations);
-
-	ExecAssignScanType(&scanstate->ss, tupdesc);
+	/* and the corresponding scan slot */
+	ExecInitScanTupleSlot(estate, &scanstate->ss, tupdesc);
 
 	/*
-	 * Initialize result tuple type and projection info.
+	 * Initialize result slot, type and projection.
 	 */
-	ExecAssignResultTypeFromTL(&scanstate->ss.ps);
+	ExecInitResultTupleSlotTL(estate, &scanstate->ss.ps);
 	ExecAssignScanProjectionInfo(&scanstate->ss);
+
+	/*
+	 * initialize child expressions
+	 */
+	scanstate->ss.ps.qual =
+		ExecInitQual(node->scan.plan.qual, &scanstate->ss.ps);
 
 	/* Only XMLTABLE is supported currently */
 	scanstate->routine = &XmlTableRoutine;
@@ -179,16 +172,16 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 
 	scanstate->ns_names = tf->ns_names;
 
-	scanstate->ns_uris = (List *)
-		ExecInitExpr((Expr *) tf->ns_uris, (PlanState *) scanstate);
+	scanstate->ns_uris =
+		ExecInitExprList(tf->ns_uris, (PlanState *) scanstate);
 	scanstate->docexpr =
 		ExecInitExpr((Expr *) tf->docexpr, (PlanState *) scanstate);
 	scanstate->rowexpr =
 		ExecInitExpr((Expr *) tf->rowexpr, (PlanState *) scanstate);
-	scanstate->colexprs = (List *)
-		ExecInitExpr((Expr *) tf->colexprs, (PlanState *) scanstate);
-	scanstate->coldefexprs = (List *)
-		ExecInitExpr((Expr *) tf->coldefexprs, (PlanState *) scanstate);
+	scanstate->colexprs =
+		ExecInitExprList(tf->colexprs, (PlanState *) scanstate);
+	scanstate->coldefexprs =
+		ExecInitExprList(tf->coldefexprs, (PlanState *) scanstate);
 
 	scanstate->notnulls = tf->notnulls;
 
@@ -203,7 +196,7 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 	{
 		Oid			in_funcid;
 
-		getTypeInputInfo(tupdesc->attrs[i]->atttypid,
+		getTypeInputInfo(TupleDescAttr(tupdesc, i)->atttypid,
 						 &in_funcid, &scanstate->typioparams[i]);
 		fmgr_info(in_funcid, &scanstate->in_functions[i]);
 	}
@@ -347,7 +340,7 @@ tfuncInitialize(TableFuncScanState *tstate, ExprContext *econtext, Datum doc)
 	int			colno;
 	Datum		value;
 	int			ordinalitycol =
-		((TableFuncScan *) (tstate->ss.ps.plan))->tablefunc->ordinalitycol;
+	((TableFuncScan *) (tstate->ss.ps.plan))->tablefunc->ordinalitycol;
 
 	/*
 	 * Install the document as a possibly-toasted Datum into the tablefunc
@@ -391,6 +384,7 @@ tfuncInitialize(TableFuncScanState *tstate, ExprContext *econtext, Datum doc)
 	foreach(lc1, tstate->colexprs)
 	{
 		char	   *colfilter;
+		Form_pg_attribute att = TupleDescAttr(tupdesc, colno);
 
 		if (colno != ordinalitycol)
 		{
@@ -402,13 +396,13 @@ tfuncInitialize(TableFuncScanState *tstate, ExprContext *econtext, Datum doc)
 				if (isnull)
 					ereport(ERROR,
 							(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-						 errmsg("column filter expression must not be null"),
+							 errmsg("column filter expression must not be null"),
 							 errdetail("Filter for column \"%s\" is null.",
-								  NameStr(tupdesc->attrs[colno]->attname))));
+									   NameStr(att->attname))));
 				colfilter = TextDatumGetCString(value);
 			}
 			else
-				colfilter = NameStr(tupdesc->attrs[colno]->attname);
+				colfilter = NameStr(att->attname);
 
 			routine->SetColumnFilter(tstate, colfilter, colno);
 		}
@@ -444,14 +438,18 @@ tfuncLoadRows(TableFuncScanState *tstate, ExprContext *econtext)
 		ListCell   *cell = list_head(tstate->coldefexprs);
 		int			colno;
 
+		CHECK_FOR_INTERRUPTS();
+
 		ExecClearTuple(tstate->ss.ss_ScanTupleSlot);
 
 		/*
-		 * Obtain the value of each column for this row, installing them into the
-		 * slot; then add the tuple to the tuplestore.
+		 * Obtain the value of each column for this row, installing them into
+		 * the slot; then add the tuple to the tuplestore.
 		 */
 		for (colno = 0; colno < natts; colno++)
 		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, colno);
+
 			if (colno == ordinalitycol)
 			{
 				/* Fast path for ordinality column */
@@ -460,12 +458,12 @@ tfuncLoadRows(TableFuncScanState *tstate, ExprContext *econtext)
 			}
 			else
 			{
-				bool	isnull;
+				bool		isnull;
 
 				values[colno] = routine->GetValue(tstate,
 												  colno,
-												  tupdesc->attrs[colno]->atttypid,
-												  tupdesc->attrs[colno]->atttypmod,
+												  att->atttypid,
+												  att->atttypmod,
 												  &isnull);
 
 				/* No value?  Evaluate and apply the default, if any */
@@ -483,7 +481,7 @@ tfuncLoadRows(TableFuncScanState *tstate, ExprContext *econtext)
 					ereport(ERROR,
 							(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 							 errmsg("null is not allowed in column \"%s\"",
-									NameStr(tupdesc->attrs[colno]->attname))));
+									NameStr(att->attname))));
 
 				nulls[colno] = isnull;
 			}

@@ -3,7 +3,7 @@
  * misc.c
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
+#include "commands/tablespace.h"
 #include "common/keywords.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -47,7 +48,7 @@
 
 /*
  * Common subroutine for num_nulls() and num_nonnulls().
- * Returns TRUE if successful, FALSE if function should return NULL.
+ * Returns true if successful, false if function should return NULL.
  * If successful, total argument count and number of nulls are
  * returned into *nargs and *nulls.
  */
@@ -310,7 +311,7 @@ pg_terminate_backend(PG_FUNCTION_ARGS)
 	if (r == SIGNAL_BACKEND_NOSUPERUSER)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			(errmsg("must be a superuser to terminate superuser process"))));
+				 (errmsg("must be a superuser to terminate superuser process"))));
 
 	if (r == SIGNAL_BACKEND_NOPERMISSION)
 		ereport(ERROR,
@@ -352,7 +353,7 @@ pg_rotate_logfile(PG_FUNCTION_ARGS)
 	if (!Logging_collector)
 	{
 		ereport(WARNING,
-		(errmsg("rotation not possible because log collection not active")));
+				(errmsg("rotation not possible because log collection not active")));
 		PG_RETURN_BOOL(false);
 	}
 
@@ -410,7 +411,7 @@ pg_tablespace_databases(PG_FUNCTION_ARGS)
 							 errmsg("could not open directory \"%s\": %m",
 									fctx->location)));
 				ereport(WARNING,
-					  (errmsg("%u is not a tablespace OID", tablespaceOid)));
+						(errmsg("%u is not a tablespace OID", tablespaceOid)));
 			}
 		}
 		funcctx->user_fctx = fctx;
@@ -425,9 +426,9 @@ pg_tablespace_databases(PG_FUNCTION_ARGS)
 
 	while ((de = ReadDir(fctx->dirdesc, fctx->location)) != NULL)
 	{
-		char	   *subdir;
-		DIR		   *dirdesc;
 		Oid			datOid = atooid(de->d_name);
+		char	   *subdir;
+		bool		isempty;
 
 		/* this test skips . and .., but is awfully weak */
 		if (!datOid)
@@ -436,16 +437,10 @@ pg_tablespace_databases(PG_FUNCTION_ARGS)
 		/* if database subdir is empty, don't report tablespace as used */
 
 		subdir = psprintf("%s/%s", fctx->location, de->d_name);
-		dirdesc = AllocateDir(subdir);
-		while ((de = ReadDir(dirdesc, subdir)) != NULL)
-		{
-			if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
-				break;
-		}
-		FreeDir(dirdesc);
+		isempty = directory_is_empty(subdir);
 		pfree(subdir);
 
-		if (!de)
+		if (isempty)
 			continue;			/* indeed, nothing in it */
 
 		SRF_RETURN_NEXT(funcctx, ObjectIdGetDatum(datOid));
@@ -770,7 +765,7 @@ parse_ident(PG_FUNCTION_ARGS)
 	nextp = qualname_str;
 
 	/* skip leading whitespace */
-	while (isspace((unsigned char) *nextp))
+	while (scanner_isspace(*nextp))
 		nextp++;
 
 	for (;;)
@@ -789,9 +784,9 @@ parse_ident(PG_FUNCTION_ARGS)
 				if (endp == NULL)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						   errmsg("string is not a valid identifier: \"%s\"",
-								  text_to_cstring(qualname)),
-						   errdetail("String has unclosed double quotes.")));
+							 errmsg("string is not a valid identifier: \"%s\"",
+									text_to_cstring(qualname)),
+							 errdetail("String has unclosed double quotes.")));
 				if (endp[1] != '"')
 					break;
 				memmove(endp, endp + 1, strlen(endp));
@@ -858,14 +853,14 @@ parse_ident(PG_FUNCTION_ARGS)
 								text_to_cstring(qualname))));
 		}
 
-		while (isspace((unsigned char) *nextp))
+		while (scanner_isspace(*nextp))
 			nextp++;
 
 		if (*nextp == '.')
 		{
 			after_dot = true;
 			nextp++;
-			while (isspace((unsigned char) *nextp))
+			while (scanner_isspace(*nextp))
 				nextp++;
 		}
 		else if (*nextp == '\0')
@@ -952,7 +947,7 @@ pg_current_logfile(PG_FUNCTION_ARGS)
 		{
 			/* Uh oh.  No newline found, so file content is corrupted. */
 			elog(ERROR,
-			   "missing newline character in \"%s\"", LOG_METAINFO_DATAFILE);
+				 "missing newline character in \"%s\"", LOG_METAINFO_DATAFILE);
 			break;
 		}
 		*nlpos = '\0';

@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_class.h
@@ -61,7 +61,6 @@ CATALOG(pg_class,1259) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83) BKI_SCHEMA_MACRO
 	 */
 	int16		relchecks;		/* # of CHECK constraints for class */
 	bool		relhasoids;		/* T if we generate OIDs for rows of rel */
-	bool		relhaspkey;		/* has (or has had) PRIMARY KEY index */
 	bool		relhasrules;	/* has (or has had) any rules */
 	bool		relhastriggers; /* has (or has had) any TRIGGERs */
 	bool		relhassubclass; /* has (or has had) derived classes */
@@ -71,6 +70,7 @@ CATALOG(pg_class,1259) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83) BKI_SCHEMA_MACRO
 	bool		relispopulated; /* matview currently holds query results */
 	char		relreplident;	/* see REPLICA_IDENTITY_xxx constants  */
 	bool		relispartition; /* is relation a partition? */
+	Oid			relrewrite;		/* heap for rewrite during DDL, link to original rel */
 	TransactionId relfrozenxid; /* all Xids < this are frozen in this rel */
 	TransactionId relminmxid;	/* all multixacts in this rel are >= this.
 								 * this is really a MultiXactId */
@@ -119,15 +119,15 @@ typedef FormData_pg_class *Form_pg_class;
 #define Anum_pg_class_relnatts				17
 #define Anum_pg_class_relchecks				18
 #define Anum_pg_class_relhasoids			19
-#define Anum_pg_class_relhaspkey			20
-#define Anum_pg_class_relhasrules			21
-#define Anum_pg_class_relhastriggers		22
-#define Anum_pg_class_relhassubclass		23
-#define Anum_pg_class_relrowsecurity		24
-#define Anum_pg_class_relforcerowsecurity	25
-#define Anum_pg_class_relispopulated		26
-#define Anum_pg_class_relreplident			27
-#define Anum_pg_class_relispartition		28
+#define Anum_pg_class_relhasrules			20
+#define Anum_pg_class_relhastriggers		21
+#define Anum_pg_class_relhassubclass		22
+#define Anum_pg_class_relrowsecurity		23
+#define Anum_pg_class_relforcerowsecurity	24
+#define Anum_pg_class_relispopulated		25
+#define Anum_pg_class_relreplident			26
+#define Anum_pg_class_relispartition		27
+#define Anum_pg_class_relrewrite			28
 #define Anum_pg_class_relfrozenxid			29
 #define Anum_pg_class_relminmxid			30
 #define Anum_pg_class_relacl				31
@@ -147,29 +147,30 @@ typedef FormData_pg_class *Form_pg_class;
  * Note: "3" in the relfrozenxid column stands for FirstNormalTransactionId;
  * similarly, "1" in relminmxid stands for FirstMultiXactId
  */
-DATA(insert OID = 1247 (  pg_type		PGNSP 71 0 PGUID 0 0 0 0 0 0 0 f f p r 30 0 t f f f f f f t n f 3 1 _null_ _null_ _null_));
+DATA(insert OID = 1247 (  pg_type		PGNSP 71 0 PGUID 0 0 0 0 0 0 0 f f p r 30 0 t f f f f f t n f 0 3 1 _null_ _null_ _null_));
 DESCR("");
-DATA(insert OID = 1249 (  pg_attribute	PGNSP 75 0 PGUID 0 0 0 0 0 0 0 f f p r 21 0 f f f f f f f t n f 3 1 _null_ _null_ _null_));
+DATA(insert OID = 1249 (  pg_attribute	PGNSP 75 0 PGUID 0 0 0 0 0 0 0 f f p r 24 0 f f f f f f t n f 0 3 1 _null_ _null_ _null_));
 DESCR("");
-DATA(insert OID = 1255 (  pg_proc		PGNSP 81 0 PGUID 0 0 0 0 0 0 0 f f p r 29 0 t f f f f f f t n f 3 1 _null_ _null_ _null_));
+DATA(insert OID = 1255 (  pg_proc		PGNSP 81 0 PGUID 0 0 0 0 0 0 0 f f p r 28 0 t f f f f f t n f 0 3 1 _null_ _null_ _null_));
 DESCR("");
-DATA(insert OID = 1259 (  pg_class		PGNSP 83 0 PGUID 0 0 0 0 0 0 0 f f p r 33 0 t f f f f f f t n f 3 1 _null_ _null_ _null_));
+DATA(insert OID = 1259 (  pg_class		PGNSP 83 0 PGUID 0 0 0 0 0 0 0 f f p r 33 0 t f f f f f t n f 0 3 1 _null_ _null_ _null_));
 DESCR("");
 
 
-#define		  RELKIND_RELATION		  'r'		/* ordinary table */
-#define		  RELKIND_INDEX			  'i'		/* secondary index */
-#define		  RELKIND_SEQUENCE		  'S'		/* sequence object */
-#define		  RELKIND_TOASTVALUE	  't'		/* for out-of-line values */
-#define		  RELKIND_VIEW			  'v'		/* view */
-#define		  RELKIND_MATVIEW		  'm'		/* materialized view */
-#define		  RELKIND_COMPOSITE_TYPE  'c'		/* composite type */
-#define		  RELKIND_FOREIGN_TABLE   'f'		/* foreign table */
-#define		  RELKIND_PARTITIONED_TABLE 'p'		/* partitioned table */
+#define		  RELKIND_RELATION		  'r'	/* ordinary table */
+#define		  RELKIND_INDEX			  'i'	/* secondary index */
+#define		  RELKIND_SEQUENCE		  'S'	/* sequence object */
+#define		  RELKIND_TOASTVALUE	  't'	/* for out-of-line values */
+#define		  RELKIND_VIEW			  'v'	/* view */
+#define		  RELKIND_MATVIEW		  'm'	/* materialized view */
+#define		  RELKIND_COMPOSITE_TYPE  'c'	/* composite type */
+#define		  RELKIND_FOREIGN_TABLE   'f'	/* foreign table */
+#define		  RELKIND_PARTITIONED_TABLE 'p' /* partitioned table */
+#define		  RELKIND_PARTITIONED_INDEX 'I' /* partitioned index */
 
-#define		  RELPERSISTENCE_PERMANENT	'p'		/* regular table */
-#define		  RELPERSISTENCE_UNLOGGED	'u'		/* unlogged permanent table */
-#define		  RELPERSISTENCE_TEMP		't'		/* temporary table */
+#define		  RELPERSISTENCE_PERMANENT	'p' /* regular table */
+#define		  RELPERSISTENCE_UNLOGGED	'u' /* unlogged permanent table */
+#define		  RELPERSISTENCE_TEMP		't' /* temporary table */
 
 /* default selection for replica identity (primary key or nothing) */
 #define		  REPLICA_IDENTITY_DEFAULT	'd'
@@ -184,4 +185,4 @@ DESCR("");
  */
 #define		  REPLICA_IDENTITY_INDEX	'i'
 
-#endif   /* PG_CLASS_H */
+#endif							/* PG_CLASS_H */

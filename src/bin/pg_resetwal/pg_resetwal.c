@@ -20,7 +20,7 @@
  * step 2 ...
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_resetwal/pg_resetwal.c
@@ -55,9 +55,10 @@
 #include "common/restricted_token.h"
 #include "storage/large_object.h"
 #include "pg_getopt.h"
+#include "getopt_long.h"
 
 
-static ControlFileData ControlFile;		/* pg_control values */
+static ControlFileData ControlFile; /* pg_control values */
 static XLogSegNo newXlogSegNo;	/* new XLOG segment # */
 static bool guessed = false;	/* T if we had to guess at any values */
 static const char *progname;
@@ -70,7 +71,10 @@ static MultiXactId set_mxid = 0;
 static MultiXactOffset set_mxoff = (MultiXactOffset) -1;
 static uint32 minXlogTli = 0;
 static XLogSegNo minXlogSegNo = 0;
+static int	WalSegSz;
+static int	set_wal_segsize;
 
+static void CheckDataVersion(void);
 static bool ReadControlFile(void);
 static void GuessControlValues(void);
 static void PrintControlValues(bool guessed);
@@ -86,6 +90,21 @@ static void usage(void);
 int
 main(int argc, char *argv[])
 {
+	static struct option long_options[] = {
+		{"commit-timestamp-ids", required_argument, NULL, 'c'},
+		{"pgdata", required_argument, NULL, 'D'},
+		{"epoch", required_argument, NULL, 'e'},
+		{"force", no_argument, NULL, 'f'},
+		{"next-wal-file", required_argument, NULL, 'l'},
+		{"multixact-ids", required_argument, NULL, 'm'},
+		{"dry-run", no_argument, NULL, 'n'},
+		{"next-oid", required_argument, NULL, 'o'},
+		{"multixact-offset", required_argument, NULL, 'O'},
+		{"next-transaction-id", required_argument, NULL, 'x'},
+		{"wal-segsize", required_argument, NULL, 1},
+		{NULL, 0, NULL, 0}
+	};
+
 	int			c;
 	bool		force = false;
 	bool		noupdate = false;
@@ -93,6 +112,7 @@ main(int argc, char *argv[])
 	char	   *endptr;
 	char	   *endptr2;
 	char	   *DataDir = NULL;
+	char	   *log_fname = NULL;
 	int			fd;
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_resetwal"));
@@ -114,7 +134,7 @@ main(int argc, char *argv[])
 	}
 
 
-	while ((c = getopt(argc, argv, "c:D:e:fl:m:no:O:x:")) != -1)
+	while ((c = getopt_long(argc, argv, "c:D:e:fl:m:no:O:x:", long_options, NULL)) != -1)
 	{
 		switch (c)
 		{
@@ -264,7 +284,30 @@ main(int argc, char *argv[])
 					fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 					exit(1);
 				}
-				XLogFromFileName(optarg, &minXlogTli, &minXlogSegNo);
+
+				/*
+				 * XLogFromFileName requires wal segment size which is not yet
+				 * set. Hence wal details are set later on.
+				 */
+				log_fname = pg_strdup(optarg);
+				break;
+
+			case 1:
+				set_wal_segsize = strtol(optarg, &endptr, 10) * 1024 * 1024;
+				if (endptr == optarg || *endptr != '\0')
+				{
+					fprintf(stderr,
+							_("%s: argument of --wal-segsize must be a number\n"),
+							progname);
+					exit(1);
+				}
+				if (!IsValidWalSegSize(set_wal_segsize))
+				{
+					fprintf(stderr,
+							_("%s: argument of --wal-segsize must be a power of 2 between 1 and 1024\n"),
+							progname);
+					exit(1);
+				}
 				break;
 
 			default:
@@ -319,6 +362,9 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
+	/* Check that data directory matches our server version */
+	CheckDataVersion();
+
 	/*
 	 * Check for a postmaster lock file --- if there is one, refuse to
 	 * proceed, on grounds we might be interfering with a live installation.
@@ -345,6 +391,17 @@ main(int argc, char *argv[])
 	 */
 	if (!ReadControlFile())
 		GuessControlValues();
+
+	/*
+	 * If no new WAL segment size was specified, use the control file value.
+	 */
+	if (set_wal_segsize != 0)
+		WalSegSz = set_wal_segsize;
+	else
+		WalSegSz = ControlFile.xlog_seg_size;
+
+	if (log_fname != NULL)
+		XLogFromFileName(log_fname, &minXlogTli, &minXlogSegNo, WalSegSz);
 
 	/*
 	 * Also look at existing segment files to set up newXlogSegNo
@@ -409,6 +466,9 @@ main(int argc, char *argv[])
 		ControlFile.checkPointCopy.PrevTimeLineID = minXlogTli;
 	}
 
+	if (set_wal_segsize != 0)
+		ControlFile.xlog_seg_size = WalSegSz;
+
 	if (minXlogSegNo > newXlogSegNo)
 		newXlogSegNo = minXlogSegNo;
 
@@ -434,7 +494,7 @@ main(int argc, char *argv[])
 	if (ControlFile.state != DB_SHUTDOWNED && !force)
 	{
 		printf(_("The database server was not shut down cleanly.\n"
-			   "Resetting the transaction log might cause data to be lost.\n"
+				 "Resetting the write-ahead log might cause data to be lost.\n"
 				 "If you want to proceed anyway, use -f to force reset.\n"));
 		exit(1);
 	}
@@ -447,8 +507,72 @@ main(int argc, char *argv[])
 	KillExistingArchiveStatus();
 	WriteEmptyXLOG();
 
-	printf(_("Transaction log reset\n"));
+	printf(_("Write-ahead log reset\n"));
 	return 0;
+}
+
+
+/*
+ * Look at the version string stored in PG_VERSION and decide if this utility
+ * can be run safely or not.
+ *
+ * We don't want to inject pg_control and WAL files that are for a different
+ * major version; that can't do anything good.  Note that we don't treat
+ * mismatching version info in pg_control as a reason to bail out, because
+ * recovering from a corrupted pg_control is one of the main reasons for this
+ * program to exist at all.  However, PG_VERSION is unlikely to get corrupted,
+ * and if it were it would be easy to fix by hand.  So let's make this check
+ * to prevent simple user errors.
+ */
+static void
+CheckDataVersion(void)
+{
+	const char *ver_file = "PG_VERSION";
+	FILE	   *ver_fd;
+	char		rawline[64];
+	int			len;
+
+	if ((ver_fd = fopen(ver_file, "r")) == NULL)
+	{
+		fprintf(stderr, _("%s: could not open file \"%s\" for reading: %s\n"),
+				progname, ver_file, strerror(errno));
+		exit(1);
+	}
+
+	/* version number has to be the first line read */
+	if (!fgets(rawline, sizeof(rawline), ver_fd))
+	{
+		if (!ferror(ver_fd))
+		{
+			fprintf(stderr, _("%s: unexpected empty file \"%s\"\n"),
+					progname, ver_file);
+		}
+		else
+		{
+			fprintf(stderr, _("%s: could not read file \"%s\": %s\n"),
+					progname, ver_file, strerror(errno));
+		}
+		exit(1);
+	}
+
+	/* remove trailing newline, handling Windows newlines as well */
+	len = strlen(rawline);
+	if (len > 0 && rawline[len - 1] == '\n')
+	{
+		rawline[--len] = '\0';
+		if (len > 0 && rawline[len - 1] == '\r')
+			rawline[--len] = '\0';
+	}
+
+	if (strcmp(rawline, PG_MAJORVERSION) != 0)
+	{
+		fprintf(stderr, _("%s: data directory is of wrong version\n"
+						  "File \"%s\" contains \"%s\", which is not compatible with this program's version \"%s\".\n"),
+				progname, ver_file, rawline, PG_MAJORVERSION);
+		exit(1);
+	}
+
+	fclose(ver_fd);
 }
 
 
@@ -484,9 +608,9 @@ ReadControlFile(void)
 	}
 
 	/* Use malloc to ensure we have a maxaligned buffer */
-	buffer = (char *) pg_malloc(PG_CONTROL_SIZE);
+	buffer = (char *) pg_malloc(PG_CONTROL_FILE_SIZE);
 
-	len = read(fd, buffer, PG_CONTROL_SIZE);
+	len = read(fd, buffer, PG_CONTROL_FILE_SIZE);
 	if (len < 0)
 	{
 		fprintf(stderr, _("%s: could not read file \"%s\": %s\n"),
@@ -496,7 +620,7 @@ ReadControlFile(void)
 	close(fd);
 
 	if (len >= sizeof(ControlFileData) &&
-	  ((ControlFileData *) buffer)->pg_control_version == PG_CONTROL_VERSION)
+		((ControlFileData *) buffer)->pg_control_version == PG_CONTROL_VERSION)
 	{
 		/* Check the CRC. */
 		INIT_CRC32C(crc);
@@ -505,23 +629,31 @@ ReadControlFile(void)
 					offsetof(ControlFileData, crc));
 		FIN_CRC32C(crc);
 
-		if (EQ_CRC32C(crc, ((ControlFileData *) buffer)->crc))
+		if (!EQ_CRC32C(crc, ((ControlFileData *) buffer)->crc))
 		{
-			/* Valid data... */
-			memcpy(&ControlFile, buffer, sizeof(ControlFile));
-			return true;
+			/* We will use the data but treat it as guessed. */
+			fprintf(stderr,
+					_("%s: pg_control exists but has invalid CRC; proceed with caution\n"),
+					progname);
+			guessed = true;
 		}
 
-		fprintf(stderr, _("%s: pg_control exists but has invalid CRC; proceed with caution\n"),
-				progname);
-		/* We will use the data anyway, but treat it as guessed. */
 		memcpy(&ControlFile, buffer, sizeof(ControlFile));
-		guessed = true;
+
+		/* return false if WAL segment size is not valid */
+		if (!IsValidWalSegSize(ControlFile.xlog_seg_size))
+		{
+			fprintf(stderr,
+					_("%s: pg_control specifies invalid WAL segment size (%d bytes); proceed with caution \n"),
+					progname, ControlFile.xlog_seg_size);
+			return false;
+		}
+
 		return true;
 	}
 
 	/* Looks like it's a mess. */
-	fprintf(stderr, _("%s: pg_control exists but is broken or unknown version; ignoring it\n"),
+	fprintf(stderr, _("%s: pg_control exists but is broken or wrong version; ignoring it\n"),
 			progname);
 	return false;
 }
@@ -592,7 +724,7 @@ GuessControlValues(void)
 	ControlFile.blcksz = BLCKSZ;
 	ControlFile.relseg_size = RELSEG_SIZE;
 	ControlFile.xlog_blcksz = XLOG_BLCKSZ;
-	ControlFile.xlog_seg_size = XLOG_SEG_SIZE;
+	ControlFile.xlog_seg_size = DEFAULT_XLOG_SEG_SIZE;
 	ControlFile.nameDataLen = NAMEDATALEN;
 	ControlFile.indexMaxKeys = INDEX_MAX_KEYS;
 	ControlFile.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
@@ -705,7 +837,8 @@ PrintNewControlValues(void)
 	/* This will be always printed in order to keep format same. */
 	printf(_("\n\nValues to be changed:\n\n"));
 
-	XLogFileName(fname, ControlFile.checkPointCopy.ThisTimeLineID, newXlogSegNo);
+	XLogFileName(fname, ControlFile.checkPointCopy.ThisTimeLineID,
+				 newXlogSegNo, WalSegSz);
 	printf(_("First log segment after reset:        %s\n"), fname);
 
 	if (set_mxid != 0)
@@ -756,6 +889,12 @@ PrintNewControlValues(void)
 		printf(_("newestCommitTsXid:                    %u\n"),
 			   ControlFile.checkPointCopy.newestCommitTsXid);
 	}
+
+	if (set_wal_segsize != 0)
+	{
+		printf(_("Bytes per WAL segment:                %u\n"),
+			   ControlFile.xlog_seg_size);
+	}
 }
 
 
@@ -766,20 +905,28 @@ static void
 RewriteControlFile(void)
 {
 	int			fd;
-	char		buffer[PG_CONTROL_SIZE];		/* need not be aligned */
+	char		buffer[PG_CONTROL_FILE_SIZE];	/* need not be aligned */
+
+	/*
+	 * For good luck, apply the same static assertions as in backend's
+	 * WriteControlFile().
+	 */
+	StaticAssertStmt(sizeof(ControlFileData) <= PG_CONTROL_MAX_SAFE_SIZE,
+					 "pg_control is too large for atomic disk writes");
+	StaticAssertStmt(sizeof(ControlFileData) <= PG_CONTROL_FILE_SIZE,
+					 "sizeof(ControlFileData) exceeds PG_CONTROL_FILE_SIZE");
 
 	/*
 	 * Adjust fields as needed to force an empty XLOG starting at
 	 * newXlogSegNo.
 	 */
 	XLogSegNoOffsetToRecPtr(newXlogSegNo, SizeOfXLogLongPHD,
-							ControlFile.checkPointCopy.redo);
+							ControlFile.checkPointCopy.redo, WalSegSz);
 	ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);
 
 	ControlFile.state = DB_SHUTDOWNED;
 	ControlFile.time = (pg_time_t) time(NULL);
 	ControlFile.checkPoint = ControlFile.checkPointCopy.redo;
-	ControlFile.prevCheckPoint = 0;
 	ControlFile.minRecoveryPoint = 0;
 	ControlFile.minRecoveryPointTLI = 0;
 	ControlFile.backupStartPoint = 0;
@@ -799,9 +946,6 @@ RewriteControlFile(void)
 	ControlFile.max_prepared_xacts = 0;
 	ControlFile.max_locks_per_xact = 64;
 
-	/* Now we can force the recorded xlog seg size to the right thing. */
-	ControlFile.xlog_seg_size = XLogSegSize;
-
 	/* Contents are protected with a CRC */
 	INIT_CRC32C(ControlFile.crc);
 	COMP_CRC32C(ControlFile.crc,
@@ -810,21 +954,13 @@ RewriteControlFile(void)
 	FIN_CRC32C(ControlFile.crc);
 
 	/*
-	 * We write out PG_CONTROL_SIZE bytes into pg_control, zero-padding the
-	 * excess over sizeof(ControlFileData).  This reduces the odds of
+	 * We write out PG_CONTROL_FILE_SIZE bytes into pg_control, zero-padding
+	 * the excess over sizeof(ControlFileData).  This reduces the odds of
 	 * premature-EOF errors when reading pg_control.  We'll still fail when we
 	 * check the contents of the file, but hopefully with a more specific
 	 * error than "couldn't read pg_control".
 	 */
-	if (sizeof(ControlFileData) > PG_CONTROL_SIZE)
-	{
-		fprintf(stderr,
-				_("%s: internal error -- sizeof(ControlFileData) is too large ... fix PG_CONTROL_SIZE\n"),
-				progname);
-		exit(1);
-	}
-
-	memset(buffer, 0, PG_CONTROL_SIZE);
+	memset(buffer, 0, PG_CONTROL_FILE_SIZE);
 	memcpy(buffer, &ControlFile, sizeof(ControlFileData));
 
 	unlink(XLOG_CONTROL_FILE);
@@ -840,7 +976,7 @@ RewriteControlFile(void)
 	}
 
 	errno = 0;
-	if (write(fd, buffer, PG_CONTROL_SIZE) != PG_CONTROL_SIZE)
+	if (write(fd, buffer, PG_CONTROL_FILE_SIZE) != PG_CONTROL_FILE_SIZE)
 	{
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
@@ -885,8 +1021,8 @@ FindEndOfXLOG(void)
 	newXlogSegNo = ControlFile.checkPointCopy.redo / ControlFile.xlog_seg_size;
 
 	/*
-	 * Scan the pg_wal directory to find existing WAL segment files. We
-	 * assume any present have been used; in most scenarios this should be
+	 * Scan the pg_wal directory to find existing WAL segment files. We assume
+	 * any present have been used; in most scenarios this should be
 	 * conservative, because of xlog.c's attempts to pre-create files.
 	 */
 	xldir = opendir(XLOGDIR);
@@ -945,7 +1081,7 @@ FindEndOfXLOG(void)
 	 * are in virgin territory.
 	 */
 	xlogbytepos = newXlogSegNo * ControlFile.xlog_seg_size;
-	newXlogSegNo = (xlogbytepos + XLogSegSize - 1) / XLogSegSize;
+	newXlogSegNo = (xlogbytepos + ControlFile.xlog_seg_size - 1) / WalSegSz;
 	newXlogSegNo++;
 }
 
@@ -958,7 +1094,7 @@ KillExistingXLOG(void)
 {
 	DIR		   *xldir;
 	struct dirent *xlde;
-	char		path[MAXPGPATH];
+	char		path[MAXPGPATH + sizeof(XLOGDIR)];
 
 	xldir = opendir(XLOGDIR);
 	if (xldir == NULL)
@@ -973,7 +1109,7 @@ KillExistingXLOG(void)
 		if (IsXLogFileName(xlde->d_name) ||
 			IsPartialXLogFileName(xlde->d_name))
 		{
-			snprintf(path, MAXPGPATH, "%s/%s", XLOGDIR, xlde->d_name);
+			snprintf(path, sizeof(path), "%s/%s", XLOGDIR, xlde->d_name);
 			if (unlink(path) < 0)
 			{
 				fprintf(stderr, _("%s: could not delete file \"%s\": %s\n"),
@@ -1005,11 +1141,11 @@ KillExistingXLOG(void)
 static void
 KillExistingArchiveStatus(void)
 {
+#define ARCHSTATDIR XLOGDIR "/archive_status"
+
 	DIR		   *xldir;
 	struct dirent *xlde;
-	char		path[MAXPGPATH];
-
-#define ARCHSTATDIR XLOGDIR "/archive_status"
+	char		path[MAXPGPATH + sizeof(ARCHSTATDIR)];
 
 	xldir = opendir(ARCHSTATDIR);
 	if (xldir == NULL)
@@ -1027,7 +1163,7 @@ KillExistingArchiveStatus(void)
 			 strcmp(xlde->d_name + XLOG_FNAME_LEN, ".partial.ready") == 0 ||
 			 strcmp(xlde->d_name + XLOG_FNAME_LEN, ".partial.done") == 0))
 		{
-			snprintf(path, MAXPGPATH, "%s/%s", ARCHSTATDIR, xlde->d_name);
+			snprintf(path, sizeof(path), "%s/%s", ARCHSTATDIR, xlde->d_name);
 			if (unlink(path) < 0)
 			{
 				fprintf(stderr, _("%s: could not delete file \"%s\": %s\n"),
@@ -1082,7 +1218,7 @@ WriteEmptyXLOG(void)
 	page->xlp_pageaddr = ControlFile.checkPointCopy.redo - SizeOfXLogLongPHD;
 	longpage = (XLogLongPageHeader) page;
 	longpage->xlp_sysid = ControlFile.system_identifier;
-	longpage->xlp_seg_size = XLogSegSize;
+	longpage->xlp_seg_size = WalSegSz;
 	longpage->xlp_xlog_blcksz = XLOG_BLCKSZ;
 
 	/* Insert the initial checkpoint record */
@@ -1095,7 +1231,7 @@ WriteEmptyXLOG(void)
 	record->xl_rmid = RM_XLOG_ID;
 
 	recptr += SizeOfXLogRecord;
-	*(recptr++) = XLR_BLOCK_ID_DATA_SHORT;
+	*(recptr++) = (char) XLR_BLOCK_ID_DATA_SHORT;
 	*(recptr++) = sizeof(CheckPoint);
 	memcpy(recptr, &ControlFile.checkPointCopy,
 		   sizeof(CheckPoint));
@@ -1107,7 +1243,8 @@ WriteEmptyXLOG(void)
 	record->xl_crc = crc;
 
 	/* Write the first page */
-	XLogFilePath(path, ControlFile.checkPointCopy.ThisTimeLineID, newXlogSegNo);
+	XLogFilePath(path, ControlFile.checkPointCopy.ThisTimeLineID,
+				 newXlogSegNo, WalSegSz);
 
 	unlink(path);
 
@@ -1133,7 +1270,7 @@ WriteEmptyXLOG(void)
 
 	/* Fill the rest of the file with zeroes */
 	memset(buffer, 0, XLOG_BLCKSZ);
-	for (nbytes = XLOG_BLCKSZ; nbytes < XLogSegSize; nbytes += XLOG_BLCKSZ)
+	for (nbytes = XLOG_BLCKSZ; nbytes < WalSegSz; nbytes += XLOG_BLCKSZ)
 	{
 		errno = 0;
 		if (write(fd, buffer, XLOG_BLCKSZ) != XLOG_BLCKSZ)
@@ -1159,21 +1296,23 @@ WriteEmptyXLOG(void)
 static void
 usage(void)
 {
-	printf(_("%s resets the PostgreSQL transaction log.\n\n"), progname);
+	printf(_("%s resets the PostgreSQL write-ahead log.\n\n"), progname);
 	printf(_("Usage:\n  %s [OPTION]... DATADIR\n\n"), progname);
 	printf(_("Options:\n"));
-	printf(_("  -c XID,XID       set oldest and newest transactions bearing commit timestamp\n"));
-	printf(_("                   (zero in either value means no change)\n"));
-	printf(_(" [-D] DATADIR      data directory\n"));
-	printf(_("  -e XIDEPOCH      set next transaction ID epoch\n"));
-	printf(_("  -f               force update to be done\n"));
-	printf(_("  -l XLOGFILE      force minimum WAL starting location for new transaction log\n"));
-	printf(_("  -m MXID,MXID     set next and oldest multitransaction ID\n"));
-	printf(_("  -n               no update, just show what would be done (for testing)\n"));
-	printf(_("  -o OID           set next OID\n"));
-	printf(_("  -O OFFSET        set next multitransaction offset\n"));
-	printf(_("  -V, --version    output version information, then exit\n"));
-	printf(_("  -x XID           set next transaction ID\n"));
-	printf(_("  -?, --help       show this help, then exit\n"));
+	printf(_("  -c, --commit-timestamp-ids=XID,XID\n"
+			 "                                 set oldest and newest transactions bearing\n"
+			 "                                 commit timestamp (zero means no change)\n"));
+	printf(_(" [-D, --pgdata=]DATADIR          data directory\n"));
+	printf(_("  -e, --epoch=XIDEPOCH           set next transaction ID epoch\n"));
+	printf(_("  -f, --force                    force update to be done\n"));
+	printf(_("  -l, --next-wal-file=WALFILE    set minimum starting location for new WAL\n"));
+	printf(_("  -m, --multixact-ids=MXID,MXID  set next and oldest multitransaction ID\n"));
+	printf(_("  -n, --dry-run                  no update, just show what would be done\n"));
+	printf(_("  -o, --next-oid=OID             set next OID\n"));
+	printf(_("  -O, --multixact-offset=OFFSET  set next multitransaction offset\n"));
+	printf(_("  -V, --version                  output version information, then exit\n"));
+	printf(_("  -x, --next-transaction-id=XID  set next transaction ID\n"));
+	printf(_("      --wal-segsize=SIZE         size of WAL segments, in megabytes\n"));
+	printf(_("  -?, --help                     show this help, then exit\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));
 }

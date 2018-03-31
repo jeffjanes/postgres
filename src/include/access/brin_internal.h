@@ -2,7 +2,7 @@
  * brin_internal.h
  *		internal declarations for BRIN indexes
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -107,4 +107,4 @@ extern bytea *brinoptions(Datum reloptions, bool validate);
 /* brin_validate.c */
 extern bool brinvalidate(Oid opclassoid);
 
-#endif   /* BRIN_INTERNAL_H */
+#endif							/* BRIN_INTERNAL_H */

@@ -3,7 +3,7 @@
  * test_decoding.c
  *		  example logical decoding output plugin
  *
- * Copyright (c) 2012-2017, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/test_decoding/test_decoding.c
@@ -12,25 +12,15 @@
  */
 #include "postgres.h"
 
-#include "access/sysattr.h"
-
-#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 
-#include "nodes/parsenodes.h"
-
-#include "replication/output_plugin.h"
 #include "replication/logical.h"
-#include "replication/message.h"
 #include "replication/origin.h"
 
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
-#include "utils/relcache.h"
-#include "utils/syscache.h"
-#include "utils/typcache.h"
 
 PG_MODULE_MAGIC;
 
@@ -111,6 +101,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 	ctx->output_plugin_private = data;
 
 	opt->output_type = OUTPUT_PLUGIN_TEXTUAL_OUTPUT;
+	opt->receive_rewrites = false;
 
 	foreach(option, ctx->output_plugin_options)
 	{
@@ -126,8 +117,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			else if (!parse_bool(strVal(elem->arg), &data->include_xids))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				  errmsg("could not parse value \"%s\" for parameter \"%s\"",
-						 strVal(elem->arg), elem->defname)));
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
 		}
 		else if (strcmp(elem->defname, "include-timestamp") == 0)
 		{
@@ -136,8 +127,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			else if (!parse_bool(strVal(elem->arg), &data->include_timestamp))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				  errmsg("could not parse value \"%s\" for parameter \"%s\"",
-						 strVal(elem->arg), elem->defname)));
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
 		}
 		else if (strcmp(elem->defname, "force-binary") == 0)
 		{
@@ -148,8 +139,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			else if (!parse_bool(strVal(elem->arg), &force_binary))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				  errmsg("could not parse value \"%s\" for parameter \"%s\"",
-						 strVal(elem->arg), elem->defname)));
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
 
 			if (force_binary)
 				opt->output_type = OUTPUT_PLUGIN_BINARY_OUTPUT;
@@ -162,8 +153,8 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			else if (!parse_bool(strVal(elem->arg), &data->skip_empty_xacts))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				  errmsg("could not parse value \"%s\" for parameter \"%s\"",
-						 strVal(elem->arg), elem->defname)));
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
 		}
 		else if (strcmp(elem->defname, "only-local") == 0)
 		{
@@ -173,8 +164,19 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			else if (!parse_bool(strVal(elem->arg), &data->only_local))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				  errmsg("could not parse value \"%s\" for parameter \"%s\"",
-						 strVal(elem->arg), elem->defname)));
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
+		}
+		else if (strcmp(elem->defname, "include-rewrites") == 0)
+		{
+
+			if (elem->arg == NULL)
+				continue;
+			else if (!parse_bool(strVal(elem->arg), &opt->receive_rewrites))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
 		}
 		else
 		{
@@ -330,7 +332,7 @@ tuple_to_stringinfo(StringInfo s, TupleDesc tupdesc, HeapTuple tuple, bool skip_
 		Datum		origval;	/* possibly toasted Datum */
 		bool		isnull;		/* column is null? */
 
-		attr = tupdesc->attrs[natt];
+		attr = TupleDescAttr(tupdesc, natt);
 
 		/*
 		 * don't print dropped columns, we can't be sure everything is
@@ -421,8 +423,10 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	appendStringInfoString(ctx->out,
 						   quote_qualified_identifier(
 													  get_namespace_name(
-							  get_rel_namespace(RelationGetRelid(relation))),
-											  NameStr(class_form->relname)));
+																		 get_rel_namespace(RelationGetRelid(relation))),
+													  class_form->relrewrite ?
+													  get_rel_name(class_form->relrewrite) :
+													  NameStr(class_form->relname)));
 	appendStringInfoChar(ctx->out, ':');
 
 	switch (change->action)

@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_type.h
@@ -51,7 +51,7 @@ CATALOG(pg_type,1247) BKI_BOOTSTRAP BKI_ROWTYPE_OID(71) BKI_SCHEMA_MACRO
 
 	/*
 	 * typbyval determines whether internal Postgres routines pass a value of
-	 * this type by value or by reference.  typbyval had better be FALSE if
+	 * this type by value or by reference.  typbyval had better be false if
 	 * the length is not 1, 2, or 4 (or 8 on 8-byte-Datum machines).
 	 * Variable-length types are always passed by reference. Note that
 	 * typbyval can be false even if the length would allow pass-by-value;
@@ -363,6 +363,14 @@ DATA(insert OID = 199 ( _json	   PGNSP PGUID -1 f b A f t \054 0 114 0 array_in 
 DATA(insert OID = 194 ( pg_node_tree	PGNSP PGUID -1 f b S f t \054 0 0 0 pg_node_tree_in pg_node_tree_out pg_node_tree_recv pg_node_tree_send - - - i x f 0 -1 0 100 _null_ _null_ _null_ ));
 DESCR("string representing an internal node tree");
 #define PGNODETREEOID	194
+
+DATA(insert OID = 3361 ( pg_ndistinct		PGNSP PGUID -1 f b S f t \054 0 0 0 pg_ndistinct_in pg_ndistinct_out pg_ndistinct_recv pg_ndistinct_send - - - i x f 0 -1 0 100 _null_ _null_ _null_ ));
+DESCR("multivariate ndistinct coefficients");
+#define PGNDISTINCTOID	3361
+
+DATA(insert OID = 3402 ( pg_dependencies		PGNSP PGUID -1 f b S f t \054 0 0 0 pg_dependencies_in pg_dependencies_out pg_dependencies_recv pg_dependencies_send - - - i x f 0 -1 0 100 _null_ _null_ _null_ ));
+DESCR("multivariate dependencies");
+#define PGDEPENDENCIESOID	3402
 
 DATA(insert OID = 32 ( pg_ddl_command	PGNSP PGUID SIZEOF_POINTER t p P f t \054 0 0 0 pg_ddl_command_in pg_ddl_command_out pg_ddl_command_recv pg_ddl_command_send - - - ALIGNOF_POINTER p f 0 -1 0 0 _null_ _null_ _null_ ));
 DESCR("internal type for passing CollectedCommand");
@@ -723,14 +731,14 @@ DATA(insert OID = 3831 ( anyrange		PGNSP PGUID  -1 f p P f t \054 0 0 0 anyrange
 #define  TYPCATEGORY_DATETIME	'D'
 #define  TYPCATEGORY_ENUM		'E'
 #define  TYPCATEGORY_GEOMETRIC	'G'
-#define  TYPCATEGORY_NETWORK	'I'		/* think INET */
+#define  TYPCATEGORY_NETWORK	'I' /* think INET */
 #define  TYPCATEGORY_NUMERIC	'N'
 #define  TYPCATEGORY_PSEUDOTYPE 'P'
 #define  TYPCATEGORY_RANGE		'R'
 #define  TYPCATEGORY_STRING		'S'
 #define  TYPCATEGORY_TIMESPAN	'T'
 #define  TYPCATEGORY_USER		'U'
-#define  TYPCATEGORY_BITSTRING	'V'		/* er ... "varbit"? */
+#define  TYPCATEGORY_BITSTRING	'V' /* er ... "varbit"? */
 #define  TYPCATEGORY_UNKNOWN	'X'
 
 /* Is a type OID a polymorphic pseudotype?	(Beware of multiple evaluation) */
@@ -741,4 +749,4 @@ DATA(insert OID = 3831 ( anyrange		PGNSP PGUID  -1 f p P f t \054 0 0 0 anyrange
 	 (typid) == ANYENUMOID || \
 	 (typid) == ANYRANGEOID)
 
-#endif   /* PG_TYPE_H */
+#endif							/* PG_TYPE_H */

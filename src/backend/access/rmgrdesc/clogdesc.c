@@ -3,7 +3,7 @@
  * clogdesc.c
  *	  rmgr descriptor routines for access/transam/clog.c
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -36,7 +36,7 @@ clog_desc(StringInfo buf, XLogReaderState *record)
 
 		memcpy(&xlrec, rec, sizeof(xl_clog_truncate));
 		appendStringInfo(buf, "page %d; oldestXact %u",
-			xlrec.pageno, xlrec.oldestXact);
+						 xlrec.pageno, xlrec.oldestXact);
 	}
 }
 

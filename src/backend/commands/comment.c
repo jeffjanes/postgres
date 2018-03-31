@@ -4,7 +4,7 @@
  *
  * PostgreSQL object comments utility code.
  *
- * Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/commands/comment.c
@@ -94,7 +94,8 @@ CommentObject(CommentStmt *stmt)
 				relation->rd_rel->relkind != RELKIND_VIEW &&
 				relation->rd_rel->relkind != RELKIND_MATVIEW &&
 				relation->rd_rel->relkind != RELKIND_COMPOSITE_TYPE &&
-				relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+				relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
+				relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 						 errmsg("\"%s\" is not a table, view, materialized view, composite type, or foreign table",
@@ -138,7 +139,7 @@ CommentObject(CommentStmt *stmt)
  * existing comment for the specified key.
  */
 void
-CreateComments(Oid oid, Oid classoid, int32 subid, char *comment)
+CreateComments(Oid oid, Oid classoid, int32 subid, const char *comment)
 {
 	Relation	description;
 	ScanKeyData skey[3];
@@ -233,7 +234,7 @@ CreateComments(Oid oid, Oid classoid, int32 subid, char *comment)
  * existing comment for the specified key.
  */
 void
-CreateSharedComments(Oid oid, Oid classoid, char *comment)
+CreateSharedComments(Oid oid, Oid classoid, const char *comment)
 {
 	Relation	shdescription;
 	ScanKeyData skey[2];

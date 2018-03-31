@@ -4,7 +4,7 @@
  *		Functions for direct access to files
  *
  *
- * Copyright (c) 2004-2017, PostgreSQL Global Development Group
+ * Copyright (c) 2004-2018, PostgreSQL Global Development Group
  *
  * Author: Andreas Pflug <pgadmin@pse-consulting.de>
  *
@@ -60,7 +60,7 @@ convert_and_check_filename(text *arg)
 		if (path_contains_parent_reference(filename))
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			(errmsg("reference to parent directory (\"..\") not allowed"))));
+					 (errmsg("reference to parent directory (\"..\") not allowed"))));
 
 		/*
 		 * Allow absolute paths if within DataDir or Log_directory, even
@@ -112,7 +112,7 @@ read_binary_file(const char *filename, int64 seek_offset, int64 bytes_to_read,
 				else
 					ereport(ERROR,
 							(errcode_for_file_access(),
-						errmsg("could not stat file \"%s\": %m", filename)));
+							 errmsg("could not stat file \"%s\": %m", filename)));
 			}
 
 			bytes_to_read = fst.st_size - seek_offset;
@@ -477,7 +477,7 @@ pg_ls_dir_1arg(PG_FUNCTION_ARGS)
 
 /* Generic function to return a directory listing of files */
 static Datum
-pg_ls_dir_files(FunctionCallInfo fcinfo, char *dir)
+pg_ls_dir_files(FunctionCallInfo fcinfo, const char *dir)
 {
 	FuncCallContext *funcctx;
 	struct dirent *de;
@@ -486,7 +486,7 @@ pg_ls_dir_files(FunctionCallInfo fcinfo, char *dir)
 	if (SRF_IS_FIRSTCALL())
 	{
 		MemoryContext oldcontext;
-		TupleDesc       tupdesc;
+		TupleDesc	tupdesc;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -508,7 +508,7 @@ pg_ls_dir_files(FunctionCallInfo fcinfo, char *dir)
 		if (!fctx->dirdesc)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read directory \"%s\": %m",
+					 errmsg("could not open directory \"%s\": %m",
 							fctx->location)));
 
 		funcctx->user_fctx = fctx;
@@ -522,8 +522,8 @@ pg_ls_dir_files(FunctionCallInfo fcinfo, char *dir)
 	{
 		Datum		values[3];
 		bool		nulls[3];
-		char		path[MAXPGPATH];
-		struct		stat attrib;
+		char		path[MAXPGPATH * 2];
+		struct stat attrib;
 		HeapTuple	tuple;
 
 		/* Skip hidden files */
@@ -531,7 +531,7 @@ pg_ls_dir_files(FunctionCallInfo fcinfo, char *dir)
 			continue;
 
 		/* Get the file info */
-		snprintf(path, MAXPGPATH, "%s/%s", fctx->location, de->d_name);
+		snprintf(path, sizeof(path), "%s/%s", fctx->location, de->d_name);
 		if (stat(path, &attrib) < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),

@@ -4,7 +4,7 @@
  *
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/rewrite/rewriteSupport.h
@@ -23,4 +23,4 @@ extern void SetRelationRuleStatus(Oid relationId, bool relHasRules);
 
 extern Oid	get_rewrite_oid(Oid relid, const char *rulename, bool missing_ok);
 
-#endif   /* REWRITESUPPORT_H */
+#endif							/* REWRITESUPPORT_H */

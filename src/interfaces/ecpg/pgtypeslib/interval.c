@@ -9,30 +9,18 @@
 #error -ffast-math is known to break this code
 #endif
 
+#include "common/string.h"
+
 #include "extern.h"
 #include "dt.h"
 #include "pgtypes_error.h"
 #include "pgtypes_interval.h"
 
-/* copy&pasted from .../src/backend/utils/adt/datetime.c */
-static int
-strtoint(const char *nptr, char **endptr, int base)
-{
-	long		val;
-
-	val = strtol(nptr, endptr, base);
-#ifdef HAVE_LONG_INT_64
-	if (val != (long) ((int32) val))
-		errno = ERANGE;
-#endif
-	return (int) val;
-}
-
 /* copy&pasted from .../src/backend/utils/adt/datetime.c
  * and changesd struct pg_tm to struct tm
  */
 static void
-AdjustFractSeconds(double frac, struct /* pg_ */ tm * tm, fsec_t *fsec, int scale)
+AdjustFractSeconds(double frac, struct /* pg_ */ tm *tm, fsec_t *fsec, int scale)
 {
 	int			sec;
 
@@ -50,7 +38,7 @@ AdjustFractSeconds(double frac, struct /* pg_ */ tm * tm, fsec_t *fsec, int scal
  * and changesd struct pg_tm to struct tm
  */
 static void
-AdjustFractDays(double frac, struct /* pg_ */ tm * tm, fsec_t *fsec, int scale)
+AdjustFractDays(double frac, struct /* pg_ */ tm *tm, fsec_t *fsec, int scale)
 {
 	int			extra_days;
 
@@ -65,7 +53,7 @@ AdjustFractDays(double frac, struct /* pg_ */ tm * tm, fsec_t *fsec, int scale)
 
 /* copy&pasted from .../src/backend/utils/adt/datetime.c */
 static int
-ParseISO8601Number(char *str, char **endptr, int *ipart, double *fpart)
+ParseISO8601Number(const char *str, char **endptr, int *ipart, double *fpart)
 {
 	double		val;
 
@@ -90,7 +78,7 @@ ParseISO8601Number(char *str, char **endptr, int *ipart, double *fpart)
 
 /* copy&pasted from .../src/backend/utils/adt/datetime.c */
 static int
-ISO8601IntegerWidth(char *fieldstart)
+ISO8601IntegerWidth(const char *fieldstart)
 {
 	/* We might have had a leading '-' */
 	if (*fieldstart == '-')
@@ -103,7 +91,7 @@ ISO8601IntegerWidth(char *fieldstart)
  * and changesd struct pg_tm to struct tm
  */
 static inline void
-ClearPgTm(struct /* pg_ */ tm * tm, fsec_t *fsec)
+ClearPgTm(struct /* pg_ */ tm *tm, fsec_t *fsec)
 {
 	tm->tm_year = 0;
 	tm->tm_mon = 0;
@@ -122,7 +110,7 @@ ClearPgTm(struct /* pg_ */ tm * tm, fsec_t *fsec)
  */
 static int
 DecodeISO8601Interval(char *str,
-					  int *dtype, struct /* pg_ */ tm * tm, fsec_t *fsec)
+					  int *dtype, struct /* pg_ */ tm *tm, fsec_t *fsec)
 {
 	bool		datepart = true;
 	bool		havefield = false;
@@ -331,16 +319,14 @@ DecodeISO8601Interval(char *str,
  *	* ECPG semes not to have a global IntervalStyle
  *	  so added
  *		int IntervalStyle = INTSTYLE_POSTGRES;
- *
- *	* Assert wasn't available so removed it.
  */
 int
-DecodeInterval(char **field, int *ftype, int nf,		/* int range, */
-			   int *dtype, struct /* pg_ */ tm * tm, fsec_t *fsec)
+DecodeInterval(char **field, int *ftype, int nf,	/* int range, */
+			   int *dtype, struct /* pg_ */ tm *tm, fsec_t *fsec)
 {
 	int			IntervalStyle = INTSTYLE_POSTGRES_VERBOSE;
 	int			range = INTERVAL_FULL_RANGE;
-	bool		is_before = FALSE;
+	bool		is_before = false;
 	char	   *cp;
 	int			fmask = 0,
 				tmask,
@@ -374,7 +360,7 @@ DecodeInterval(char **field, int *ftype, int nf,		/* int range, */
 				 * least one digit; there could be ':', '.', '-' embedded in
 				 * it as well.
 				 */
-				/* Assert(*field[i] == '-' || *field[i] == '+'); */
+				Assert(*field[i] == '-' || *field[i] == '+');
 
 				/*
 				 * Try for hh:mm or hh:mm:ss.  If not, fall through to
@@ -585,7 +571,7 @@ DecodeInterval(char **field, int *ftype, int nf,		/* int range, */
 						break;
 
 					case AGO:
-						is_before = TRUE;
+						is_before = true;
 						type = val;
 						break;
 
@@ -707,7 +693,7 @@ AddVerboseIntPart(char *cp, int value, const char *units,
 	else if (*is_before)
 		value = -value;
 	sprintf(cp, " %d %s%s", value, units, (value == 1) ? "" : "s");
-	*is_zero = FALSE;
+	*is_zero = false;
 	return cp + strlen(cp);
 }
 
@@ -730,7 +716,7 @@ AddPostgresIntPart(char *cp, int value, const char *units,
 	 * tad bizarre but it's how it worked before...
 	 */
 	*is_before = (value < 0);
-	*is_zero = FALSE;
+	*is_zero = false;
 	return cp + strlen(cp);
 }
 
@@ -771,8 +757,8 @@ AppendSeconds(char *cp, int sec, fsec_t fsec, int precision, bool fillzeros)
  * Change pg_tm to tm
  */
 
-int
-EncodeInterval(struct /* pg_ */ tm * tm, fsec_t fsec, int style, char *str)
+void
+EncodeInterval(struct /* pg_ */ tm *tm, fsec_t fsec, int style, char *str)
 {
 	char	   *cp = str;
 	int			year = tm->tm_year;
@@ -781,8 +767,8 @@ EncodeInterval(struct /* pg_ */ tm * tm, fsec_t fsec, int style, char *str)
 	int			hour = tm->tm_hour;
 	int			min = tm->tm_min;
 	int			sec = tm->tm_sec;
-	bool		is_before = FALSE;
-	bool		is_zero = TRUE;
+	bool		is_before = false;
+	bool		is_zero = true;
 
 	/*
 	 * The sign of year and month are guaranteed to match, since they are
@@ -928,7 +914,7 @@ EncodeInterval(struct /* pg_ */ tm * tm, fsec_t fsec, int style, char *str)
 				if (sec < 0 || (sec == 0 && fsec < 0))
 				{
 					if (is_zero)
-						is_before = TRUE;
+						is_before = true;
 					else if (!is_before)
 						*cp++ = '-';
 				}
@@ -938,7 +924,7 @@ EncodeInterval(struct /* pg_ */ tm * tm, fsec_t fsec, int style, char *str)
 				cp += strlen(cp);
 				sprintf(cp, " sec%s",
 						(abs(sec) != 1 || fsec != 0) ? "s" : "");
-				is_zero = FALSE;
+				is_zero = false;
 			}
 			/* identically zero? then put in a unitless zero... */
 			if (is_zero)
@@ -947,16 +933,14 @@ EncodeInterval(struct /* pg_ */ tm * tm, fsec_t fsec, int style, char *str)
 				strcat(cp, " ago");
 			break;
 	}
-
-	return 0;
-}	/* EncodeInterval() */
+}
 
 
 /* interval2tm()
  * Convert an interval data type to a tm structure.
  */
 static int
-interval2tm(interval span, struct tm * tm, fsec_t *fsec)
+interval2tm(interval span, struct tm *tm, fsec_t *fsec)
 {
 	int64		time;
 
@@ -984,10 +968,10 @@ interval2tm(interval span, struct tm * tm, fsec_t *fsec)
 	*fsec = time - (tm->tm_sec * USECS_PER_SEC);
 
 	return 0;
-}	/* interval2tm() */
+}								/* interval2tm() */
 
 static int
-tm2interval(struct tm * tm, fsec_t fsec, interval * span)
+tm2interval(struct tm *tm, fsec_t fsec, interval * span)
 {
 	if ((double) tm->tm_year * MONTHS_PER_YEAR + tm->tm_mon > INT_MAX ||
 		(double) tm->tm_year * MONTHS_PER_YEAR + tm->tm_mon < INT_MIN)
@@ -999,7 +983,7 @@ tm2interval(struct tm * tm, fsec_t fsec, interval * span)
 				   tm->tm_sec) * USECS_PER_SEC) + fsec;
 
 	return 0;
-}	/* tm2interval() */
+}								/* tm2interval() */
 
 interval *
 PGTYPESinterval_new(void)
@@ -1091,11 +1075,7 @@ PGTYPESinterval_to_asc(interval * span)
 		return NULL;
 	}
 
-	if (EncodeInterval(tm, fsec, IntervalStyle, buf) != 0)
-	{
-		errno = PGTYPES_INTVL_BAD_INTERVAL;
-		return NULL;
-	}
+	EncodeInterval(tm, fsec, IntervalStyle, buf);
 
 	return pgtypes_strdup(buf);
 }

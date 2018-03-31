@@ -3,7 +3,7 @@
  *
  * PostgreSQL multi-transaction-log manager
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/multixact.h
@@ -157,4 +157,4 @@ extern const char *multixact_identify(uint8 info);
 extern char *mxid_to_string(MultiXactId multi, int nmembers,
 			   MultiXactMember *members);
 
-#endif   /* MULTIXACT_H */
+#endif							/* MULTIXACT_H */

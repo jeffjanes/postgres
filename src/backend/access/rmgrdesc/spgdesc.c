@@ -3,7 +3,7 @@
  * spgdesc.c
  *	  rmgr descriptor routines for access/spgist/spgxlog.c
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -76,7 +76,7 @@ spg_desc(StringInfo buf, XLogReaderState *record)
 			break;
 		case XLOG_SPGIST_VACUUM_REDIRECT:
 			appendStringInfo(buf, "newest XID %u",
-						 ((spgxlogVacuumRedirect *) rec)->newestRedirectXid);
+							 ((spgxlogVacuumRedirect *) rec)->newestRedirectXid);
 			break;
 	}
 }

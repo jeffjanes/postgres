@@ -2,7 +2,7 @@
  *
  * auth_delay.c
  *
- * Copyright (c) 2010-2017, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		contrib/auth_delay/auth_delay.c
@@ -57,7 +57,7 @@ _PG_init(void)
 {
 	/* Define custom GUC variables */
 	DefineCustomIntVariable("auth_delay.milliseconds",
-			 "Milliseconds to delay before reporting authentication failure",
+							"Milliseconds to delay before reporting authentication failure",
 							NULL,
 							&auth_delay_milliseconds,
 							0,

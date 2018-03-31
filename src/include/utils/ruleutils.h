@@ -3,7 +3,7 @@
  * ruleutils.h
  *		Declarations for ruleutils.c
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/ruleutils.h
@@ -33,5 +33,6 @@ extern List *set_deparse_context_planstate(List *dpcontext,
 extern List *select_rtable_names_for_explain(List *rtable,
 								Bitmapset *rels_used);
 extern char *generate_collation_name(Oid collid);
+extern char *get_range_partbound_string(List *bound_datums);
 
-#endif   /* RULEUTILS_H */
+#endif							/* RULEUTILS_H */

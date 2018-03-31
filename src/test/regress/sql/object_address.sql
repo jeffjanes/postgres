@@ -32,6 +32,7 @@ CREATE DOMAIN addr_nsp.gendomain AS int4 CONSTRAINT domconstr CHECK (value > 0);
 CREATE FUNCTION addr_nsp.trig() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN END; $$;
 CREATE TRIGGER t BEFORE INSERT ON addr_nsp.gentable FOR EACH ROW EXECUTE PROCEDURE addr_nsp.trig();
 CREATE POLICY genpol ON addr_nsp.gentable;
+CREATE PROCEDURE addr_nsp.proc(int4) LANGUAGE SQL AS $$ $$;
 CREATE SERVER "integer" FOREIGN DATA WRAPPER addr_fdw;
 CREATE USER MAPPING FOR regress_addr_user SERVER "integer";
 ALTER DEFAULT PRIVILEGES FOR ROLE regress_addr_user IN SCHEMA public GRANT ALL ON TABLES TO regress_addr_user;
@@ -40,7 +41,8 @@ CREATE TRANSFORM FOR int LANGUAGE SQL (
 	FROM SQL WITH FUNCTION varchar_transform(internal),
 	TO SQL WITH FUNCTION int4recv(internal));
 CREATE PUBLICATION addr_pub FOR TABLE addr_nsp.gentable;
-CREATE SUBSCRIPTION addr_sub CONNECTION '' PUBLICATION bar WITH (DISABLED, NOCONNECT);
+CREATE SUBSCRIPTION addr_sub CONNECTION '' PUBLICATION bar WITH (connect = false, slot_name = NONE);
+CREATE STATISTICS addr_nsp.gentable_stat ON a, b FROM addr_nsp.gentable;
 
 -- test some error cases
 SELECT pg_get_object_address('stone', '{}', '{}');
@@ -80,7 +82,7 @@ BEGIN
 		('table'), ('index'), ('sequence'), ('view'),
 		('materialized view'), ('foreign table'),
 		('table column'), ('foreign table column'),
-		('aggregate'), ('function'), ('type'), ('cast'),
+		('aggregate'), ('function'), ('procedure'), ('type'), ('cast'),
 		('table constraint'), ('domain constraint'), ('conversion'), ('default value'),
 		('operator'), ('operator class'), ('operator family'), ('rule'), ('trigger'),
 		('text search parser'), ('text search dictionary'),
@@ -146,6 +148,7 @@ WITH objects (type, name, args) AS (VALUES
 				('foreign table column', '{addr_nsp, genftable, a}', '{}'),
 				('aggregate', '{addr_nsp, genaggr}', '{int4}'),
 				('function', '{pg_catalog, pg_identify_object}', '{pg_catalog.oid, pg_catalog.oid, int4}'),
+				('procedure', '{addr_nsp, proc}', '{int4}'),
 				('type', '{pg_catalog._int4}', '{}'),
 				('type', '{addr_nsp.gendomain}', '{}'),
 				('type', '{addr_nsp.gencomptype}', '{}'),
@@ -185,7 +188,8 @@ WITH objects (type, name, args) AS (VALUES
 				('access method', '{btree}', '{}'),
 				('publication', '{addr_pub}', '{}'),
 				('publication relation', '{addr_nsp, gentable}', '{addr_pub}'),
-				('subscription', '{addr_sub}', '{}')
+				('subscription', '{addr_sub}', '{}'),
+				('statistics object', '{addr_nsp, gentable_stat}', '{}')
         )
 SELECT (pg_identify_object(addr1.classid, addr1.objid, addr1.objsubid)).*,
 	-- test roundtrip through pg_identify_object_as_address
@@ -199,11 +203,11 @@ SELECT (pg_identify_object(addr1.classid, addr1.objid, addr1.objsubid)).*,
 ---
 --- Cleanup resources
 ---
-SET client_min_messages TO 'warning';
+\set VERBOSITY terse \\ -- suppress cascade details
 
 DROP FOREIGN DATA WRAPPER addr_fdw CASCADE;
 DROP PUBLICATION addr_pub;
-DROP SUBSCRIPTION addr_sub NODROP SLOT;
+DROP SUBSCRIPTION addr_sub;
 
 DROP SCHEMA addr_nsp CASCADE;
 

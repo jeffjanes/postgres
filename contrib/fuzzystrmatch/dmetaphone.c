@@ -111,7 +111,7 @@ The remaining code is authored by Andrew Dunstan <amdunstan@ncshp.org> and
 #include <string.h>
 #include <stdarg.h>
 
-#endif   /* DMETAPHONE_MAIN */
+#endif							/* DMETAPHONE_MAIN */
 
 #include <assert.h>
 #include <ctype.h>
@@ -197,7 +197,7 @@ dmetaphone_alt(PG_FUNCTION_ARGS)
  * in a case like this.
  */
 
-#define META_FREE(x) ((void)true)		/* pfree((x)) */
+#define META_FREE(x) ((void)true)	/* pfree((x)) */
 #else							/* not defined DMETAPHONE_MAIN */
 
 /* use the standard malloc library when not running in PostgreSQL */
@@ -209,7 +209,7 @@ dmetaphone_alt(PG_FUNCTION_ARGS)
 					  (v = (t*)realloc((v),((n)*sizeof(t))))
 
 #define META_FREE(x) free((x))
-#endif   /* defined DMETAPHONE_MAIN */
+#endif							/* defined DMETAPHONE_MAIN */
 
 
 
@@ -232,7 +232,7 @@ metastring;
  */
 
 static metastring *
-NewMetaString(char *init_str)
+NewMetaString(const char *init_str)
 {
 	metastring *s;
 	char		empty_string[] = "";
@@ -375,7 +375,7 @@ StringAt(metastring *s, int start, int length,...)
 
 
 static void
-MetaphAdd(metastring *s, char *new_str)
+MetaphAdd(metastring *s, const char *new_str)
 {
 	int			add_length;
 
@@ -977,7 +977,7 @@ DoubleMetaphone(char *str, char **codes)
 					}
 				}
 
-				if (GetAt(original, current + 1) == 'J')		/* it could happen! */
+				if (GetAt(original, current + 1) == 'J')	/* it could happen! */
 					current += 2;
 				else
 					current += 1;

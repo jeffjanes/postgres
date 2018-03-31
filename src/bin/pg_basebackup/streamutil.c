@@ -1,10 +1,11 @@
 /*-------------------------------------------------------------------------
  *
- * streamutil.c - utility functions for pg_basebackup and pg_receivelog
+ * streamutil.c - utility functions for pg_basebackup, pg_receivewal and
+ * 					pg_recvlogical
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/streamutil.c
@@ -16,19 +17,23 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-/* for ntohl/htonl */
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
 /* local includes */
 #include "receivelog.h"
 #include "streamutil.h"
 
-#include "pqexpbuffer.h"
+#include "access/xlog_internal.h"
 #include "common/fe_memutils.h"
 #include "datatype/timestamp.h"
+#include "fe_utils/connect.h"
+#include "port/pg_bswap.h"
+#include "pqexpbuffer.h"
 
 #define ERRCODE_DUPLICATE_OBJECT  "42710"
+
+uint32		WalSegSz;
+
+/* SHOW command for replication connection was introduced in version 10 */
+#define MINIMUM_VERSION_FOR_SHOW_CMD 100000
 
 const char *progname;
 char	   *connection_string = NULL;
@@ -205,6 +210,28 @@ GetConnection(void)
 		PQconninfoFree(conn_opts);
 
 	/*
+	 * Set always-secure search path, so malicious users can't get control.
+	 * The capacity to run normal SQL queries was added in PostgreSQL
+	 * 10, so the search path cannot be changed (by us or attackers) on
+	 * earlier versions.
+	 */
+	if (dbname != NULL && PQserverVersion(conn) >= 100000)
+	{
+		PGresult   *res;
+
+		res = PQexec(tmpconn, ALWAYS_SECURE_SEARCH_PATH_SQL);
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		{
+			fprintf(stderr, _("%s: could not clear search_path: %s\n"),
+					progname, PQerrorMessage(tmpconn));
+			PQclear(res);
+			PQfinish(tmpconn);
+			exit(1);
+		}
+		PQclear(res);
+	}
+
+	/*
 	 * Ensure we have the same value of integer_datetimes (now always "on") as
 	 * the server we are connecting to.
 	 */
@@ -212,7 +239,7 @@ GetConnection(void)
 	if (!tmpparam)
 	{
 		fprintf(stderr,
-		 _("%s: could not determine server setting for integer_datetimes\n"),
+				_("%s: could not determine server setting for integer_datetimes\n"),
 				progname);
 		PQfinish(tmpconn);
 		exit(1);
@@ -221,13 +248,83 @@ GetConnection(void)
 	if (strcmp(tmpparam, "on") != 0)
 	{
 		fprintf(stderr,
-			 _("%s: integer_datetimes compile flag does not match server\n"),
+				_("%s: integer_datetimes compile flag does not match server\n"),
 				progname);
 		PQfinish(tmpconn);
 		exit(1);
 	}
 
 	return tmpconn;
+}
+
+/*
+ * From version 10, explicitly set wal segment size using SHOW wal_segment_size
+ * since ControlFile is not accessible here.
+ */
+bool
+RetrieveWalSegSize(PGconn *conn)
+{
+	PGresult   *res;
+	char		xlog_unit[3];
+	int			xlog_val,
+				multiplier = 1;
+
+	/* check connection existence */
+	Assert(conn != NULL);
+
+	/* for previous versions set the default xlog seg size */
+	if (PQserverVersion(conn) < MINIMUM_VERSION_FOR_SHOW_CMD)
+	{
+		WalSegSz = DEFAULT_XLOG_SEG_SIZE;
+		return true;
+	}
+
+	res = PQexec(conn, "SHOW wal_segment_size");
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		fprintf(stderr, _("%s: could not send replication command \"%s\": %s\n"),
+				progname, "SHOW wal_segment_size", PQerrorMessage(conn));
+
+		PQclear(res);
+		return false;
+	}
+	if (PQntuples(res) != 1 || PQnfields(res) < 1)
+	{
+		fprintf(stderr,
+				_("%s: could not fetch WAL segment size: got %d rows and %d fields, expected %d rows and %d or more fields\n"),
+				progname, PQntuples(res), PQnfields(res), 1, 1);
+
+		PQclear(res);
+		return false;
+	}
+
+	/* fetch xlog value and unit from the result */
+	if (sscanf(PQgetvalue(res, 0, 0), "%d%s", &xlog_val, xlog_unit) != 2)
+	{
+		fprintf(stderr, _("%s: WAL segment size could not be parsed\n"),
+				progname);
+		return false;
+	}
+
+	/* set the multiplier based on unit to convert xlog_val to bytes */
+	if (strcmp(xlog_unit, "MB") == 0)
+		multiplier = 1024 * 1024;
+	else if (strcmp(xlog_unit, "GB") == 0)
+		multiplier = 1024 * 1024 * 1024;
+
+	/* convert and set WalSegSz */
+	WalSegSz = xlog_val * multiplier;
+
+	if (!IsValidWalSegSize(WalSegSz))
+	{
+		fprintf(stderr,
+				_("%s: WAL segment size must be a power of two between 1MB and 1GB, but the remote server reported a value of %d bytes\n"),
+				progname, WalSegSz);
+		return false;
+	}
+
+	PQclear(res);
+	return true;
 }
 
 /*
@@ -282,7 +379,7 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 		if (sscanf(PQgetvalue(res, 0, 2), "%X/%X", &hi, &lo) != 2)
 		{
 			fprintf(stderr,
-				  _("%s: could not parse transaction log location \"%s\"\n"),
+					_("%s: could not parse write-ahead log location \"%s\"\n"),
 					progname, PQgetvalue(res, 0, 2));
 
 			PQclear(res);
@@ -321,7 +418,8 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
  */
 bool
 CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
-					  bool is_physical, bool slot_exists_ok)
+					  bool is_temporary, bool is_physical, bool reserve_wal,
+					  bool slot_exists_ok)
 {
 	PQExpBuffer query;
 	PGresult   *res;
@@ -333,13 +431,18 @@ CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
 	Assert(slot_name != NULL);
 
 	/* Build query */
+	appendPQExpBuffer(query, "CREATE_REPLICATION_SLOT \"%s\"", slot_name);
+	if (is_temporary)
+		appendPQExpBuffer(query, " TEMPORARY");
 	if (is_physical)
-		appendPQExpBuffer(query, "CREATE_REPLICATION_SLOT \"%s\" PHYSICAL",
-						  slot_name);
+	{
+		appendPQExpBuffer(query, " PHYSICAL");
+		if (reserve_wal)
+			appendPQExpBuffer(query, " RESERVE_WAL");
+	}
 	else
 	{
-		appendPQExpBuffer(query, "CREATE_REPLICATION_SLOT \"%s\" LOGICAL \"%s\"",
-						  slot_name, plugin);
+		appendPQExpBuffer(query, " LOGICAL \"%s\"", plugin);
 		if (PQserverVersion(conn) >= 100000)
 			/* pg_recvlogical doesn't use an exported snapshot, so suppress */
 			appendPQExpBuffer(query, " NOEXPORT_SNAPSHOT");
@@ -493,17 +596,9 @@ feTimestampDifferenceExceeds(TimestampTz start_time,
 void
 fe_sendint64(int64 i, char *buf)
 {
-	uint32		n32;
+	uint64		n64 = pg_hton64(i);
 
-	/* High order half first, since we're doing MSB-first */
-	n32 = (uint32) (i >> 32);
-	n32 = htonl(n32);
-	memcpy(&buf[0], &n32, 4);
-
-	/* Now the low order half */
-	n32 = (uint32) i;
-	n32 = htonl(n32);
-	memcpy(&buf[4], &n32, 4);
+	memcpy(buf, &n64, sizeof(n64));
 }
 
 /*
@@ -512,18 +607,9 @@ fe_sendint64(int64 i, char *buf)
 int64
 fe_recvint64(char *buf)
 {
-	int64		result;
-	uint32		h32;
-	uint32		l32;
+	uint64		n64;
 
-	memcpy(&h32, buf, 4);
-	memcpy(&l32, buf + 4, 4);
-	h32 = ntohl(h32);
-	l32 = ntohl(l32);
+	memcpy(&n64, buf, sizeof(n64));
 
-	result = h32;
-	result <<= 32;
-	result |= l32;
-
-	return result;
+	return pg_ntoh64(n64);
 }

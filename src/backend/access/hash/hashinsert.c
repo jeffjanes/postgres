@@ -3,7 +3,7 @@
  * hashinsert.c
  *	  Item insertion in hash tables for Postgres.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -24,7 +24,7 @@
 #include "storage/buf_internals.h"
 
 static void _hash_vacuum_one_page(Relation rel, Buffer metabuf, Buffer buf,
-								  RelFileNode hnode);
+					  RelFileNode hnode);
 
 /*
  *	_hash_doinsert() -- Handle insertion of a single index tuple.
@@ -55,7 +55,7 @@ _hash_doinsert(Relation rel, IndexTuple itup, Relation heapRel)
 	hashkey = _hash_get_indextuple_hashkey(itup);
 
 	/* compute item size too */
-	itemsz = IndexTupleDSize(*itup);
+	itemsz = IndexTupleSize(itup);
 	itemsz = MAXALIGN(itemsz);	/* be safe, PageAddItem will do this but we
 								 * need to be consistent */
 
@@ -63,8 +63,8 @@ restart_insert:
 
 	/*
 	 * Read the metapage.  We don't lock it yet; HashMaxItemSize() will
-	 * examine pd_pagesize_version, but that can't change so we can examine
-	 * it without a lock.
+	 * examine pd_pagesize_version, but that can't change so we can examine it
+	 * without a lock.
 	 */
 	metabuf = _hash_getbuf(rel, HASH_METAPAGE, HASH_NOLOCK, LH_META_PAGE);
 	metapage = BufferGetPage(metabuf);
@@ -81,7 +81,7 @@ restart_insert:
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("index row size %zu exceeds hash maximum %zu",
 						itemsz, HashMaxItemSize(metapage)),
-			errhint("Values larger than a buffer page cannot be indexed.")));
+				 errhint("Values larger than a buffer page cannot be indexed.")));
 
 	/* Lock the primary bucket page for the target bucket. */
 	buf = _hash_getbucketbuf_from_hashkey(rel, hashkey, HASH_WRITE,
@@ -126,10 +126,9 @@ restart_insert:
 		BlockNumber nextblkno;
 
 		/*
-		 * Check if current page has any DEAD tuples. If yes,
-		 * delete these tuples and see if we can get a space for
-		 * the new item to be inserted before moving to the next
-		 * page in the bucket chain.
+		 * Check if current page has any DEAD tuples. If yes, delete these
+		 * tuples and see if we can get a space for the new item to be
+		 * inserted before moving to the next page in the bucket chain.
 		 */
 		if (H_HAS_DEAD_TUPLES(pageopaque))
 		{
@@ -139,7 +138,7 @@ restart_insert:
 				_hash_vacuum_one_page(rel, metabuf, buf, heapRel->rd_node);
 
 				if (PageGetFreeSpace(page) >= itemsz)
-					break;				/* OK, now we have enough space */
+					break;		/* OK, now we have enough space */
 			}
 		}
 
@@ -223,7 +222,7 @@ restart_insert:
 		XLogRegisterBuffer(1, metabuf, REGBUF_STANDARD);
 
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) itup, IndexTupleDSize(*itup));
+		XLogRegisterBufData(0, (char *) itup, IndexTupleSize(itup));
 
 		recptr = XLogInsert(RM_HASH_ID, XLOG_HASH_INSERT);
 
@@ -310,7 +309,7 @@ _hash_pgaddmultitup(Relation rel, Buffer buf, IndexTuple *itups,
 	{
 		Size		itemsize;
 
-		itemsize = IndexTupleDSize(*itups[i]);
+		itemsize = IndexTupleSize(itups[i]);
 		itemsize = MAXALIGN(itemsize);
 
 		/* Find where to insert the tuple (preserving page's hashkey ordering) */
@@ -337,14 +336,13 @@ static void
 _hash_vacuum_one_page(Relation rel, Buffer metabuf, Buffer buf,
 					  RelFileNode hnode)
 {
-	OffsetNumber	deletable[MaxOffsetNumber];
-	int ndeletable = 0;
+	OffsetNumber deletable[MaxOffsetNumber];
+	int			ndeletable = 0;
 	OffsetNumber offnum,
-				 maxoff;
-	Page	page = BufferGetPage(buf);
-	HashPageOpaque	pageopaque;
-	HashMetaPage	metap;
-	double tuples_removed = 0;
+				maxoff;
+	Page		page = BufferGetPage(buf);
+	HashPageOpaque pageopaque;
+	HashMetaPage metap;
 
 	/* Scan each tuple in page to see if it is marked as LP_DEAD */
 	maxoff = PageGetMaxOffsetNumber(page);
@@ -352,20 +350,16 @@ _hash_vacuum_one_page(Relation rel, Buffer metabuf, Buffer buf,
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
-		ItemId	itemId = PageGetItemId(page, offnum);
+		ItemId		itemId = PageGetItemId(page, offnum);
 
 		if (ItemIdIsDead(itemId))
-		{
 			deletable[ndeletable++] = offnum;
-			tuples_removed += 1;
-		}
 	}
 
 	if (ndeletable > 0)
 	{
 		/*
-		 * Write-lock the meta page so that we can decrement
-		 * tuple count.
+		 * Write-lock the meta page so that we can decrement tuple count.
 		 */
 		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
@@ -378,15 +372,15 @@ _hash_vacuum_one_page(Relation rel, Buffer metabuf, Buffer buf,
 		 * Mark the page as not containing any LP_DEAD items. This is not
 		 * certainly true (there might be some that have recently been marked,
 		 * but weren't included in our target-item list), but it will almost
-		 * always be true and it doesn't seem worth an additional page scan
-		 * to check it. Remember that LH_PAGE_HAS_DEAD_TUPLES is only a hint
+		 * always be true and it doesn't seem worth an additional page scan to
+		 * check it. Remember that LH_PAGE_HAS_DEAD_TUPLES is only a hint
 		 * anyway.
 		 */
 		pageopaque = (HashPageOpaque) PageGetSpecialPointer(page);
 		pageopaque->hasho_flag &= ~LH_PAGE_HAS_DEAD_TUPLES;
 
 		metap = HashPageGetMeta(BufferGetPage(metabuf));
-		metap->hashm_ntuples -= tuples_removed;
+		metap->hashm_ntuples -= ndeletable;
 
 		MarkBufferDirty(buf);
 		MarkBufferDirty(metabuf);
@@ -394,18 +388,23 @@ _hash_vacuum_one_page(Relation rel, Buffer metabuf, Buffer buf,
 		/* XLOG stuff */
 		if (RelationNeedsWAL(rel))
 		{
-			xl_hash_vacuum_one_page	xlrec;
+			xl_hash_vacuum_one_page xlrec;
 			XLogRecPtr	recptr;
 
 			xlrec.hnode = hnode;
-			xlrec.ntuples = tuples_removed;
+			xlrec.ntuples = ndeletable;
 
 			XLogBeginInsert();
+			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 			XLogRegisterData((char *) &xlrec, SizeOfHashVacuumOnePage);
 
-			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-			XLogRegisterBufData(0, (char *) deletable,
-						ndeletable * sizeof(OffsetNumber));
+			/*
+			 * We need the target-offsets array whether or not we store the
+			 * whole buffer, to allow us to find the latestRemovedXid on a
+			 * standby server.
+			 */
+			XLogRegisterData((char *) deletable,
+							 ndeletable * sizeof(OffsetNumber));
 
 			XLogRegisterBuffer(1, metabuf, REGBUF_STANDARD);
 
@@ -416,9 +415,10 @@ _hash_vacuum_one_page(Relation rel, Buffer metabuf, Buffer buf,
 		}
 
 		END_CRIT_SECTION();
+
 		/*
-		 * Releasing write lock on meta page as we have updated
-		 * the tuple count.
+		 * Releasing write lock on meta page as we have updated the tuple
+		 * count.
 		 */
 		LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
 	}

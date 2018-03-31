@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2017, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2018, PostgreSQL Global Development Group
  *
  * src/bin/psql/crosstabview.c
  */
@@ -78,7 +78,7 @@ typedef struct _avl_tree
 
 
 static bool printCrosstab(const PGresult *results,
-			int num_columns, pivot_field *piv_columns, int field_for_columns,
+			  int num_columns, pivot_field *piv_columns, int field_for_columns,
 			  int num_rows, pivot_field *piv_rows, int field_for_rows,
 			  int field_for_data);
 static void avlInit(avl_tree *tree);
@@ -283,7 +283,7 @@ error_return:
  */
 static bool
 printCrosstab(const PGresult *results,
-			int num_columns, pivot_field *piv_columns, int field_for_columns,
+			  int num_columns, pivot_field *piv_columns, int field_for_columns,
 			  int num_rows, pivot_field *piv_rows, int field_for_rows,
 			  int field_for_data)
 {
@@ -547,7 +547,7 @@ avlInsertNode(avl_tree *tree, avl_node **node, pivot_field field)
 		if (cmp != 0)
 		{
 			avlInsertNode(tree,
-					 cmp > 0 ? &current->children[1] : &current->children[0],
+						  cmp > 0 ? &current->children[1] : &current->children[0],
 						  field);
 			avlAdjustBalance(tree, node);
 		}

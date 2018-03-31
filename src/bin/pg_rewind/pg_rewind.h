@@ -3,7 +3,7 @@
  * pg_rewind.h
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *-------------------------------------------------------------------------
@@ -24,6 +24,7 @@ extern char *connstr_source;
 extern bool debug;
 extern bool showprogress;
 extern bool dry_run;
+extern int	WalSegSz;
 
 /* Target history */
 extern TimeLineHistoryEntry *targetHistory;
@@ -43,4 +44,4 @@ extern XLogRecPtr readOneRecord(const char *datadir, XLogRecPtr ptr,
 extern TimeLineHistoryEntry *rewind_parseTimeLineHistory(char *buffer,
 							TimeLineID targetTLI, int *nentries);
 
-#endif   /* PG_REWIND_H */
+#endif							/* PG_REWIND_H */

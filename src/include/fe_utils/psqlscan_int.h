@@ -34,7 +34,7 @@
  * same flex version, or if they don't use the same flex options.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/fe_utils/psqlscan_int.h
@@ -141,6 +141,8 @@ extern char *psqlscan_extract_substring(PsqlScanState state,
 						   const char *txt, int len);
 extern void psqlscan_escape_variable(PsqlScanState state,
 						 const char *txt, int len,
-						 bool as_ident);
+						 PsqlScanQuoteType quote);
+extern void psqlscan_test_variable(PsqlScanState state,
+					   const char *txt, int len);
 
-#endif   /* PSQLSCAN_INT_H */
+#endif							/* PSQLSCAN_INT_H */

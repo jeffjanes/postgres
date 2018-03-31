@@ -3,7 +3,7 @@
  * vacuumlo.c
  *	  This removes orphaned large objects from a database.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -23,6 +23,7 @@
 
 #include "catalog/pg_class.h"
 
+#include "fe_utils/connect.h"
 #include "libpq-fe.h"
 #include "pg_getopt.h"
 
@@ -47,7 +48,7 @@ struct _param
 	long		transaction_limit;
 };
 
-static int	vacuumlo(const char *database, const struct _param * param);
+static int	vacuumlo(const char *database, const struct _param *param);
 static void usage(const char *progname);
 
 
@@ -56,7 +57,7 @@ static void usage(const char *progname);
  * This vacuums LOs of one database. It returns 0 on success, -1 on failure.
  */
 static int
-vacuumlo(const char *database, const struct _param * param)
+vacuumlo(const char *database, const struct _param *param)
 {
 	PGconn	   *conn;
 	PGresult   *res,
@@ -140,11 +141,8 @@ vacuumlo(const char *database, const struct _param * param)
 			fprintf(stdout, "Test run: no large objects will be removed!\n");
 	}
 
-	/*
-	 * Don't get fooled by any non-system catalogs
-	 */
-	res = PQexec(conn, "SET search_path = pg_catalog");
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+	res = PQexec(conn, ALWAYS_SECURE_SEARCH_PATH_SQL);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
 		fprintf(stderr, "Failed to set search_path:\n");
 		fprintf(stderr, "%s", PQerrorMessage(conn));

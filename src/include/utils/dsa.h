@@ -3,7 +3,7 @@
  * dsa.h
  *	  Dynamic shared memory areas.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -122,4 +122,4 @@ extern void *dsa_get_address(dsa_area *area, dsa_pointer dp);
 extern void dsa_trim(dsa_area *area);
 extern void dsa_dump(dsa_area *area);
 
-#endif   /* DSA_H */
+#endif							/* DSA_H */

@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_attribute.h
@@ -54,7 +54,7 @@ CATALOG(pg_attribute,1249) BKI_BOOTSTRAP BKI_WITHOUT_OIDS BKI_ROWTYPE_OID(75) BK
 	 * that no value has been explicitly set for this column, so ANALYZE
 	 * should use the default setting.
 	 */
-	int32		attstattarget;
+	int32		attstattarget BKI_DEFAULT(-1);
 
 	/*
 	 * attlen is a copy of the typlen field from pg_type for this attribute.
@@ -90,7 +90,7 @@ CATALOG(pg_attribute,1249) BKI_BOOTSTRAP BKI_WITHOUT_OIDS BKI_ROWTYPE_OID(75) BK
 	 * descriptor, we may then update attcacheoff in the copies. This speeds
 	 * up the attribute walking process.
 	 */
-	int32		attcacheoff;
+	int32		attcacheoff BKI_DEFAULT(-1);
 
 	/*
 	 * atttypmod records type-specific data supplied at table creation time
@@ -98,7 +98,7 @@ CATALOG(pg_attribute,1249) BKI_BOOTSTRAP BKI_WITHOUT_OIDS BKI_ROWTYPE_OID(75) BK
 	 * type-specific input and output functions as the third argument. The
 	 * value will generally be -1 for types that do not need typmod.
 	 */
-	int32		atttypmod;
+	int32		atttypmod BKI_DEFAULT(-1);
 
 	/*
 	 * attbyval is a copy of the typbyval field from pg_type for this
@@ -131,10 +131,16 @@ CATALOG(pg_attribute,1249) BKI_BOOTSTRAP BKI_WITHOUT_OIDS BKI_ROWTYPE_OID(75) BK
 	bool		attnotnull;
 
 	/* Has DEFAULT value or not */
-	bool		atthasdef;
+	bool		atthasdef BKI_DEFAULT(f);
+
+	/* Has a missing value or not */
+	bool		atthasmissing BKI_DEFAULT(f);
+
+	/* One of the ATTRIBUTE_IDENTITY_* constants below, or '\0' */
+	char		attidentity BKI_DEFAULT("");
 
 	/* Is dropped (ie, logically invisible) or not */
-	bool		attisdropped;
+	bool		attisdropped BKI_DEFAULT(f);
 
 	/*
 	 * This flag specifies whether this column has ever had a local
@@ -145,10 +151,10 @@ CATALOG(pg_attribute,1249) BKI_BOOTSTRAP BKI_WITHOUT_OIDS BKI_ROWTYPE_OID(75) BK
 	 * not dropped by a parent's DROP COLUMN even if this causes the column's
 	 * attinhcount to become zero.
 	 */
-	bool		attislocal;
+	bool		attislocal BKI_DEFAULT(t);
 
 	/* Number of times inherited from direct parent relation(s) */
-	int32		attinhcount;
+	int32		attinhcount BKI_DEFAULT(0);
 
 	/* attribute's collation */
 	Oid			attcollation;
@@ -157,13 +163,19 @@ CATALOG(pg_attribute,1249) BKI_BOOTSTRAP BKI_WITHOUT_OIDS BKI_ROWTYPE_OID(75) BK
 	/* NOTE: The following fields are not present in tuple descriptors. */
 
 	/* Column-level access permissions */
-	aclitem		attacl[1];
+	aclitem		attacl[1] BKI_DEFAULT(_null_);
 
 	/* Column-level options */
-	text		attoptions[1];
+	text		attoptions[1] BKI_DEFAULT(_null_);
 
 	/* Column-level FDW options */
-	text		attfdwoptions[1];
+	text		attfdwoptions[1] BKI_DEFAULT(_null_);
+
+	/*
+	 * Missing value for added columns. This is a one element array which lets
+	 * us store a value of the attribute type here.
+	 */
+	anyarray	attmissingval BKI_DEFAULT(_null_);
 #endif
 } FormData_pg_attribute;
 
@@ -188,7 +200,7 @@ typedef FormData_pg_attribute *Form_pg_attribute;
  * ----------------
  */
 
-#define Natts_pg_attribute				21
+#define Natts_pg_attribute				24
 #define Anum_pg_attribute_attrelid		1
 #define Anum_pg_attribute_attname		2
 #define Anum_pg_attribute_atttypid		3
@@ -203,14 +215,16 @@ typedef FormData_pg_attribute *Form_pg_attribute;
 #define Anum_pg_attribute_attalign		12
 #define Anum_pg_attribute_attnotnull	13
 #define Anum_pg_attribute_atthasdef		14
-#define Anum_pg_attribute_attisdropped	15
-#define Anum_pg_attribute_attislocal	16
-#define Anum_pg_attribute_attinhcount	17
-#define Anum_pg_attribute_attcollation	18
-#define Anum_pg_attribute_attacl		19
-#define Anum_pg_attribute_attoptions	20
-#define Anum_pg_attribute_attfdwoptions 21
-
+#define Anum_pg_attribute_atthasmissing	15
+#define Anum_pg_attribute_attidentity	16
+#define Anum_pg_attribute_attisdropped	17
+#define Anum_pg_attribute_attislocal	18
+#define Anum_pg_attribute_attinhcount	19
+#define Anum_pg_attribute_attcollation	20
+#define Anum_pg_attribute_attacl		21
+#define Anum_pg_attribute_attoptions	22
+#define Anum_pg_attribute_attfdwoptions	23
+#define Anum_pg_attribute_attmissingval	24
 
 /* ----------------
  *		initial contents of pg_attribute
@@ -220,4 +234,8 @@ typedef FormData_pg_attribute *Form_pg_attribute;
  * ----------------
  */
 
-#endif   /* PG_ATTRIBUTE_H */
+
+#define		  ATTRIBUTE_IDENTITY_ALWAYS		'a'
+#define		  ATTRIBUTE_IDENTITY_BY_DEFAULT 'd'
+
+#endif							/* PG_ATTRIBUTE_H */

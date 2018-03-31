@@ -2,7 +2,7 @@
  * ginxlog.h
  *	  header file for postgres inverted index xlog implementation.
  *
- *	Copyright (c) 2006-2017, PostgreSQL Global Development Group
+ *	Copyright (c) 2006-2018, PostgreSQL Global Development Group
  *
  *	src/include/access/ginxlog.h
  *--------------------------------------------------------------------------
@@ -87,14 +87,14 @@ typedef struct
 	 * added, followed by the items themselves as ItemPointers. DELETE actions
 	 * have no further data.
 	 */
-}	ginxlogSegmentAction;
+}			ginxlogSegmentAction;
 
 /* Action types */
-#define GIN_SEGMENT_UNMODIFIED	0		/* no action (not used in WAL records) */
-#define GIN_SEGMENT_DELETE		1		/* a whole segment is removed */
-#define GIN_SEGMENT_INSERT		2		/* a whole segment is added */
-#define GIN_SEGMENT_REPLACE		3		/* a segment is replaced */
-#define GIN_SEGMENT_ADDITEMS	4		/* items are added to existing segment */
+#define GIN_SEGMENT_UNMODIFIED	0	/* no action (not used in WAL records) */
+#define GIN_SEGMENT_DELETE		1	/* a whole segment is removed */
+#define GIN_SEGMENT_INSERT		2	/* a whole segment is added */
+#define GIN_SEGMENT_REPLACE		3	/* a segment is replaced */
+#define GIN_SEGMENT_ADDITEMS	4	/* items are added to existing segment */
 
 typedef struct
 {
@@ -214,4 +214,4 @@ extern void gin_xlog_startup(void);
 extern void gin_xlog_cleanup(void);
 extern void gin_mask(char *pagedata, BlockNumber blkno);
 
-#endif   /* GINXLOG_H */
+#endif							/* GINXLOG_H */

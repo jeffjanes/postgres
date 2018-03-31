@@ -7,7 +7,7 @@
  * empty definitions for Valgrind client request macros we use.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/memdebug.h
@@ -43,7 +43,7 @@ wipe_mem(void *ptr, size_t size)
 	VALGRIND_MAKE_MEM_NOACCESS(ptr, size);
 }
 
-#endif   /* CLOBBER_FREED_MEMORY */
+#endif							/* CLOBBER_FREED_MEMORY */
 
 #ifdef MEMORY_CONTEXT_CHECKING
 
@@ -70,13 +70,13 @@ sentinel_ok(const void *base, Size offset)
 	return ret;
 }
 
-#endif   /* MEMORY_CONTEXT_CHECKING */
+#endif							/* MEMORY_CONTEXT_CHECKING */
 
 #ifdef RANDOMIZE_ALLOCATED_MEMORY
 
 void		randomize_mem(char *ptr, size_t size);
 
-#endif   /* RANDOMIZE_ALLOCATED_MEMORY */
+#endif							/* RANDOMIZE_ALLOCATED_MEMORY */
 
 
-#endif   /* MEMDEBUG_H */
+#endif							/* MEMDEBUG_H */

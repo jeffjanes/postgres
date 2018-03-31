@@ -3,7 +3,7 @@
  * print.c
  *	  various print routines (used mostly for debugging)
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -289,6 +289,10 @@ print_rt(const List *rtable)
 				break;
 			case RTE_CTE:
 				printf("%d\t%s\t[cte]",
+					   i, rte->eref->aliasname);
+				break;
+			case RTE_NAMEDTUPLESTORE:
+				printf("%d\t%s\t[tuplestore]",
 					   i, rte->eref->aliasname);
 				break;
 			default:

@@ -4,7 +4,7 @@
  *	  Declarations for operations on INET datatypes.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/inet.h
@@ -146,4 +146,4 @@ extern inet *cidr_set_masklen_internal(const inet *src, int bits);
 extern int	bitncmp(const unsigned char *l, const unsigned char *r, int n);
 extern int	bitncommon(const unsigned char *l, const unsigned char *r, int n);
 
-#endif   /* INET_H */
+#endif							/* INET_H */

@@ -4,7 +4,7 @@
  *
  *	Implements the custom output format.
  *
- *	The comments with the routined in this code are a good place to
+ *	The comments with the routines in this code are a good place to
  *	understand how to write a new format.
  *
  *	See the headers to pg_restore for more details.
@@ -476,9 +476,9 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te)
 		else if (!ctx->hasSeek)
 			exit_horribly(modulename, "could not find block ID %d in archive -- "
 						  "possibly due to out-of-order restore request, "
-				  "which cannot be handled due to non-seekable input file\n",
+						  "which cannot be handled due to non-seekable input file\n",
 						  te->dumpId);
-		else	/* huh, the dataPos led us to EOF? */
+		else					/* huh, the dataPos led us to EOF? */
 			exit_horribly(modulename, "could not find block ID %d in archive -- "
 						  "possibly corrupt archive\n",
 						  te->dumpId);
@@ -581,10 +581,10 @@ _skipData(ArchiveHandle *AH)
 		{
 			if (feof(AH->FH))
 				exit_horribly(modulename,
-							"could not read from input file: end of file\n");
+							  "could not read from input file: end of file\n");
 			else
 				exit_horribly(modulename,
-					"could not read from input file: %s\n", strerror(errno));
+							  "could not read from input file: %s\n", strerror(errno));
 		}
 
 		ctx->filePos += blkLen;

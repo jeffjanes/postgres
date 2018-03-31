@@ -2,7 +2,7 @@
  * gin_private.h
  *	  header file for postgres inverted index access method implementation.
  *
- *	Copyright (c) 2006-2017, PostgreSQL Global Development Group
+ *	Copyright (c) 2006-2018, PostgreSQL Global Development Group
  *
  *	src/include/access/gin_private.h
  *--------------------------------------------------------------------------
@@ -75,7 +75,7 @@ typedef struct GinState
 	FmgrInfo	extractQueryFn[INDEX_MAX_KEYS];
 	FmgrInfo	consistentFn[INDEX_MAX_KEYS];
 	FmgrInfo	triConsistentFn[INDEX_MAX_KEYS];
-	FmgrInfo	comparePartialFn[INDEX_MAX_KEYS];		/* optional method */
+	FmgrInfo	comparePartialFn[INDEX_MAX_KEYS];	/* optional method */
 	/* canPartialMatch[i] is true if comparePartialFn[i] is valid */
 	bool		canPartialMatch[INDEX_MAX_KEYS];
 	/* Collations to pass to the support functions */
@@ -95,7 +95,7 @@ extern int ginCompareEntries(GinState *ginstate, OffsetNumber attnum,
 				  Datum b, GinNullCategory categoryb);
 extern int ginCompareAttEntries(GinState *ginstate,
 					 OffsetNumber attnuma, Datum a, GinNullCategory categorya,
-				   OffsetNumber attnumb, Datum b, GinNullCategory categoryb);
+					 OffsetNumber attnumb, Datum b, GinNullCategory categoryb);
 extern Datum *ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 				  Datum value, bool isNull,
 				  int32 *nentries, GinNullCategory **categories);
@@ -103,6 +103,8 @@ extern Datum *ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 extern OffsetNumber gintuple_get_attrnum(GinState *ginstate, IndexTuple tuple);
 extern Datum gintuple_get_key(GinState *ginstate, IndexTuple tuple,
 				 GinNullCategory *category);
+extern void GinCheckForSerializableConflictIn(Relation relation,
+				 HeapTuple tuple, Buffer buffer);
 
 /* gininsert.c */
 extern IndexBuildResult *ginbuild(Relation heap, Relation index,
@@ -217,7 +219,7 @@ extern ItemPointer GinDataLeafPageGetItems(Page page, int *nitems, ItemPointerDa
 extern int	GinDataLeafPageGetItemsToTbm(Page page, TIDBitmap *tbm);
 extern BlockNumber createPostingTree(Relation index,
 				  ItemPointerData *items, uint32 nitems,
-				  GinStatsData *buildStats);
+				  GinStatsData *buildStats, Buffer entrybuffer);
 extern void GinDataPageAddPostingItem(Page page, PostingItem *data, OffsetNumber offset);
 extern void GinPageDeletePostingItem(Page page, OffsetNumber offset);
 extern void ginInsertItemPointers(Relation index, BlockNumber rootBlkno,
@@ -281,7 +283,7 @@ typedef struct GinScanKeyData
 	int			nadditional;
 
 	/* array of check flags, reported to consistentFn */
-	bool	   *entryRes;
+	GinTernaryValue *entryRes;
 	bool		(*boolConsistentFn) (GinScanKey key);
 	GinTernaryValue (*triConsistentFn) (GinScanKey key);
 	FmgrInfo   *consistentFmgrInfo;
@@ -300,7 +302,7 @@ typedef struct GinScanKeyData
 
 	/*
 	 * Match status data.  curItem is the TID most recently tested (could be a
-	 * lossy-page pointer).  curItemMatches is TRUE if it passes the
+	 * lossy-page pointer).  curItemMatches is true if it passes the
 	 * consistentFn test; if so, recheckCurItem is the recheck flag.
 	 * isFinished means that all the input entry streams are finished, so this
 	 * key cannot succeed for any later TIDs.
@@ -309,7 +311,7 @@ typedef struct GinScanKeyData
 	bool		curItemMatches;
 	bool		recheckCurItem;
 	bool		isFinished;
-}	GinScanKeyData;
+}			GinScanKeyData;
 
 typedef struct GinScanEntryData
 {
@@ -342,7 +344,7 @@ typedef struct GinScanEntryData
 	bool		reduceResult;
 	uint32		predictNumberResult;
 	GinBtreeData btree;
-}	GinScanEntryData;
+}			GinScanEntryData;
 
 typedef struct GinScanOpaqueData
 {
@@ -439,7 +441,7 @@ extern void ginHeapTupleFastCollect(GinState *ginstate,
 						OffsetNumber attnum, Datum value, bool isNull,
 						ItemPointer ht_ctid);
 extern void ginInsertCleanup(GinState *ginstate, bool full_clean,
-				 bool fill_fsm, IndexBulkDeleteResult *stats);
+				 bool fill_fsm, bool forceCleanup, IndexBulkDeleteResult *stats);
 
 /* ginpostinglist.c */
 
@@ -460,8 +462,8 @@ extern ItemPointer ginMergeItemPointers(ItemPointerData *a, uint32 na,
 static inline int
 ginCompareItemPointers(ItemPointer a, ItemPointer b)
 {
-	uint64		ia = (uint64) a->ip_blkid.bi_hi << 32 | (uint64) a->ip_blkid.bi_lo << 16 | a->ip_posid;
-	uint64		ib = (uint64) b->ip_blkid.bi_hi << 32 | (uint64) b->ip_blkid.bi_lo << 16 | b->ip_posid;
+	uint64		ia = (uint64) GinItemPointerGetBlockNumber(a) << 32 | GinItemPointerGetOffsetNumber(a);
+	uint64		ib = (uint64) GinItemPointerGetBlockNumber(b) << 32 | GinItemPointerGetOffsetNumber(b);
 
 	if (ia == ib)
 		return 0;
@@ -471,6 +473,6 @@ ginCompareItemPointers(ItemPointer a, ItemPointer b)
 		return -1;
 }
 
-extern int ginTraverseLock(Buffer buffer, bool searchMode);
+extern int	ginTraverseLock(Buffer buffer, bool searchMode);
 
-#endif   /* GIN_PRIVATE_H */
+#endif							/* GIN_PRIVATE_H */

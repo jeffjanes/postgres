@@ -4,7 +4,7 @@
  *	  Definitions for tagged nodes.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/nodes.h
@@ -34,6 +34,7 @@ typedef enum NodeTag
 	T_ExprContext,
 	T_ProjectionInfo,
 	T_JunkFilter,
+	T_OnConflictSetState,
 	T_ResultRelInfo,
 	T_EState,
 	T_TupleTableSlot,
@@ -63,6 +64,7 @@ typedef enum NodeTag
 	T_ValuesScan,
 	T_TableFuncScan,
 	T_CteScan,
+	T_NamedTuplestoreScan,
 	T_WorkTableScan,
 	T_ForeignScan,
 	T_CustomScan,
@@ -114,6 +116,7 @@ typedef enum NodeTag
 	T_TableFuncScanState,
 	T_ValuesScanState,
 	T_CteScanState,
+	T_NamedTuplestoreScanState,
 	T_WorkTableScanState,
 	T_ForeignScanState,
 	T_CustomScanState,
@@ -181,6 +184,7 @@ typedef enum NodeTag
 	T_CoerceToDomainValue,
 	T_SetToDefault,
 	T_CurrentOfExpr,
+	T_NextValueExpr,
 	T_InferenceElem,
 	T_TargetEntry,
 	T_RangeTblRef,
@@ -192,36 +196,18 @@ typedef enum NodeTag
 	/*
 	 * TAGS FOR EXPRESSION STATE NODES (execnodes.h)
 	 *
-	 * These correspond (not always one-for-one) to primitive nodes derived
-	 * from Expr.
+	 * ExprState represents the evaluation state for a whole expression tree.
+	 * Most Expr-based plan nodes do not have a corresponding expression state
+	 * node, they're fully handled within execExpr* - but sometimes the state
+	 * needs to be shared with other parts of the executor, as for example
+	 * with AggrefExprState, which nodeAgg.c has to modify.
 	 */
 	T_ExprState,
-	T_GenericExprState,
-	T_WholeRowVarExprState,
 	T_AggrefExprState,
-	T_GroupingFuncExprState,
 	T_WindowFuncExprState,
-	T_ArrayRefExprState,
-	T_FuncExprState,
-	T_ScalarArrayOpExprState,
-	T_BoolExprState,
+	T_SetExprState,
 	T_SubPlanState,
 	T_AlternativeSubPlanState,
-	T_FieldSelectState,
-	T_FieldStoreState,
-	T_CoerceViaIOState,
-	T_ArrayCoerceExprState,
-	T_ConvertRowtypeExprState,
-	T_CaseExprState,
-	T_CaseWhenState,
-	T_ArrayExprState,
-	T_RowExprState,
-	T_RowCompareExprState,
-	T_CoalesceExprState,
-	T_MinMaxExprState,
-	T_XmlExprState,
-	T_NullTestState,
-	T_CoerceToDomainState,
 	T_DomainConstraintState,
 
 	/*
@@ -279,6 +265,9 @@ typedef enum NodeTag
 	T_PlaceHolderInfo,
 	T_MinMaxAggInfo,
 	T_PlannerParamItem,
+	T_RollupData,
+	T_GroupingSetData,
+	T_StatisticExtInfo,
 
 	/*
 	 * TAGS FOR MEMORY NODES (memnodes.h)
@@ -286,6 +275,7 @@ typedef enum NodeTag
 	T_MemoryContext,
 	T_AllocSetContext,
 	T_SlabContext,
+	T_GenerationContext,
 
 	/*
 	 * TAGS FOR VALUE NODES (value.h)
@@ -418,13 +408,14 @@ typedef enum NodeTag
 	T_AlterPolicyStmt,
 	T_CreateTransformStmt,
 	T_CreateAmStmt,
-	T_PartitionCmd,
 	T_CreatePublicationStmt,
 	T_AlterPublicationStmt,
 	T_CreateSubscriptionStmt,
 	T_AlterSubscriptionStmt,
 	T_DropSubscriptionStmt,
+	T_CreateStatsStmt,
 	T_AlterCollationStmt,
+	T_CallStmt,
 
 	/*
 	 * TAGS FOR PARSE TREE NODES (parsenodes.h)
@@ -479,6 +470,8 @@ typedef enum NodeTag
 	T_PartitionSpec,
 	T_PartitionBoundSpec,
 	T_PartitionRangeDatum,
+	T_PartitionCmd,
+	T_VacuumRelation,
 
 	/*
 	 * TAGS FOR REPLICATION GRAMMAR PARSE NODES (replnodes.h)
@@ -508,7 +501,8 @@ typedef enum NodeTag
 	T_FdwRoutine,				/* in foreign/fdwapi.h */
 	T_IndexAmRoutine,			/* in access/amapi.h */
 	T_TsmRoutine,				/* in access/tsmapi.h */
-	T_ForeignKeyCacheInfo		/* in utils/rel.h */
+	T_ForeignKeyCacheInfo,		/* in utils/rel.h */
+	T_CallContext				/* in nodes/parsenodes.h */
 } NodeTag;
 
 /*
@@ -562,7 +556,7 @@ extern PGDLLIMPORT Node *newNodeMacroHolder;
 	newNodeMacroHolder->type = (tag), \
 	newNodeMacroHolder \
 )
-#endif   /* __GNUC__ */
+#endif							/* __GNUC__ */
 
 
 #define makeNode(_type_)		((_type_ *) newNode(sizeof(_type_),T_##_type_))
@@ -587,7 +581,7 @@ castNodeImpl(NodeTag type, void *ptr)
 #define castNode(_type_, nodeptr) ((_type_ *) castNodeImpl(T_##_type_, nodeptr))
 #else
 #define castNode(_type_, nodeptr) ((_type_ *) (nodeptr))
-#endif   /* USE_ASSERT_CHECKING */
+#endif							/* USE_ASSERT_CHECKING */
 
 
 /* ----------------------------------------------------------------
@@ -624,7 +618,14 @@ extern int16 *readAttrNumberCols(int numCols);
 /*
  * nodes/copyfuncs.c
  */
-extern void *copyObject(const void *obj);
+extern void *copyObjectImpl(const void *obj);
+
+/* cast result back to argument type, if supported by compiler */
+#ifdef HAVE_TYPEOF
+#define copyObject(obj) ((typeof(obj)) copyObjectImpl(obj))
+#else
+#define copyObject(obj) copyObjectImpl(obj)
+#endif
 
 /*
  * nodes/equalfuncs.c
@@ -740,7 +741,8 @@ typedef enum AggStrategy
 {
 	AGG_PLAIN,					/* simple agg across all input rows */
 	AGG_SORTED,					/* grouped agg, input must be sorted */
-	AGG_HASHED					/* grouped agg, use internal hashtable */
+	AGG_HASHED,					/* grouped agg, use internal hashtable */
+	AGG_MIXED					/* grouped agg, hash and sort both used */
 } AggStrategy;
 
 /*
@@ -806,4 +808,4 @@ typedef enum OnConflictAction
 	ONCONFLICT_UPDATE			/* ON CONFLICT ... DO UPDATE */
 } OnConflictAction;
 
-#endif   /* NODES_H */
+#endif							/* NODES_H */

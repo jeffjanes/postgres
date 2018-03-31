@@ -3,7 +3,7 @@
  * genam.c
  *	  general index access method routines
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -83,7 +83,7 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 
 	scan->heapRelation = NULL;	/* may be set later */
 	scan->indexRelation = indexRelation;
-	scan->xs_snapshot = InvalidSnapshot;		/* caller must initialize this */
+	scan->xs_snapshot = InvalidSnapshot;	/* caller must initialize this */
 	scan->numberOfKeys = nkeys;
 	scan->numberOfOrderBys = norderbys;
 

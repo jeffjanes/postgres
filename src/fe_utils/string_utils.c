@@ -6,7 +6,7 @@
  * and interpreting backend output.
  *
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/string_utils.c
@@ -425,13 +425,30 @@ appendByteaLiteral(PQExpBuffer buf, const unsigned char *str, size_t length,
  * arguments containing LF or CR characters.  A future major release should
  * reject those characters in CREATE ROLE and CREATE DATABASE, because use
  * there eventually leads to errors here.
+ *
+ * appendShellString() simply prints an error and dies if LF or CR appears.
+ * appendShellStringNoError() omits those characters from the result, and
+ * returns false if there were any.
  */
 void
 appendShellString(PQExpBuffer buf, const char *str)
 {
+	if (!appendShellStringNoError(buf, str))
+	{
+		fprintf(stderr,
+				_("shell command argument contains a newline or carriage return: \"%s\"\n"),
+				str);
+		exit(EXIT_FAILURE);
+	}
+}
+
+bool
+appendShellStringNoError(PQExpBuffer buf, const char *str)
+{
 #ifdef WIN32
 	int			backslash_run_length = 0;
 #endif
+	bool		ok = true;
 	const char *p;
 
 	/*
@@ -442,7 +459,7 @@ appendShellString(PQExpBuffer buf, const char *str)
 		strspn(str, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:") == strlen(str))
 	{
 		appendPQExpBufferStr(buf, str);
-		return;
+		return ok;
 	}
 
 #ifndef WIN32
@@ -451,10 +468,8 @@ appendShellString(PQExpBuffer buf, const char *str)
 	{
 		if (*p == '\n' || *p == '\r')
 		{
-			fprintf(stderr,
-					_("shell command argument contains a newline or carriage return: \"%s\"\n"),
-					str);
-			exit(EXIT_FAILURE);
+			ok = false;
+			continue;
 		}
 
 		if (*p == '\'')
@@ -481,10 +496,8 @@ appendShellString(PQExpBuffer buf, const char *str)
 	{
 		if (*p == '\n' || *p == '\r')
 		{
-			fprintf(stderr,
-					_("shell command argument contains a newline or carriage return: \"%s\"\n"),
-					str);
-			exit(EXIT_FAILURE);
+			ok = false;
+			continue;
 		}
 
 		/* Change N backslashes before a double quote to 2N+1 backslashes. */
@@ -523,7 +536,9 @@ appendShellString(PQExpBuffer buf, const char *str)
 		backslash_run_length--;
 	}
 	appendPQExpBufferStr(buf, "^\"");
-#endif   /* WIN32 */
+#endif							/* WIN32 */
+
+	return ok;
 }
 
 
@@ -581,7 +596,7 @@ void
 appendPsqlMetaConnect(PQExpBuffer buf, const char *dbname)
 {
 	const char *s;
-	bool		complex;
+	bool complex;
 
 	/*
 	 * If the name is plain ASCII characters, emit a trivial "\connect "foo"".
@@ -589,6 +604,7 @@ appendPsqlMetaConnect(PQExpBuffer buf, const char *dbname)
 	 * general case.  No database has a zero-length name.
 	 */
 	complex = false;
+
 	for (s = dbname; *s; s++)
 	{
 		if (*s == '\n' || *s == '\r')
@@ -697,9 +713,9 @@ parsePGArray(const char *atext, char ***itemarray, int *nitems)
 					{
 						atext++;
 						if (*atext == '\0')
-							return false;		/* premature end of string */
+							return false;	/* premature end of string */
 					}
-					*strings++ = *atext++;		/* copy quoted data */
+					*strings++ = *atext++;	/* copy quoted data */
 				}
 				atext++;
 			}
@@ -940,8 +956,9 @@ processSQLNamePattern(PGconn *conn, PQExpBuffer buf, const char *pattern,
 	}
 
 	/*
-	 * Now decide what we need to emit.  Note there will be a leading "^(" in
-	 * the patterns in any case.
+	 * Now decide what we need to emit.  We may run under a hostile
+	 * search_path, so qualify EVERY name.  Note there will be a leading "^("
+	 * in the patterns in any case.
 	 */
 	if (namebuf.len > 2)
 	{
@@ -954,15 +971,18 @@ processSQLNamePattern(PGconn *conn, PQExpBuffer buf, const char *pattern,
 			WHEREAND();
 			if (altnamevar)
 			{
-				appendPQExpBuffer(buf, "(%s ~ ", namevar);
+				appendPQExpBuffer(buf,
+								  "(%s OPERATOR(pg_catalog.~) ", namevar);
 				appendStringLiteralConn(buf, namebuf.data, conn);
-				appendPQExpBuffer(buf, "\n        OR %s ~ ", altnamevar);
+				appendPQExpBuffer(buf,
+								  "\n        OR %s OPERATOR(pg_catalog.~) ",
+								  altnamevar);
 				appendStringLiteralConn(buf, namebuf.data, conn);
 				appendPQExpBufferStr(buf, ")\n");
 			}
 			else
 			{
-				appendPQExpBuffer(buf, "%s ~ ", namevar);
+				appendPQExpBuffer(buf, "%s OPERATOR(pg_catalog.~) ", namevar);
 				appendStringLiteralConn(buf, namebuf.data, conn);
 				appendPQExpBufferChar(buf, '\n');
 			}
@@ -978,7 +998,7 @@ processSQLNamePattern(PGconn *conn, PQExpBuffer buf, const char *pattern,
 		if (strcmp(schemabuf.data, "^(.*)$") != 0 && schemavar)
 		{
 			WHEREAND();
-			appendPQExpBuffer(buf, "%s ~ ", schemavar);
+			appendPQExpBuffer(buf, "%s OPERATOR(pg_catalog.~) ", schemavar);
 			appendStringLiteralConn(buf, schemabuf.data, conn);
 			appendPQExpBufferChar(buf, '\n');
 		}

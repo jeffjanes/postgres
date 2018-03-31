@@ -3,7 +3,7 @@
  *	  Encoding and decoding routines for base64 without whitespace
  *	  support.
  *
- * Portions Copyright (c) 2001-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2001-2018, PostgreSQL Global Development Group
  *
  * src/include/common/base64.h
  */
@@ -16,4 +16,4 @@ extern int	pg_b64_decode(const char *src, int len, char *dst);
 extern int	pg_b64_enc_len(int srclen);
 extern int	pg_b64_dec_len(int srclen);
 
-#endif   /* BASE64_H */
+#endif							/* BASE64_H */

@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 #
-# Copyright (c) 2007-2017, PostgreSQL Global Development Group
+# Copyright (c) 2007-2018, PostgreSQL Global Development Group
 #
 # src/backend/utils/mb/Unicode/UCS_to_SHIFT_JIS_2004.pl
 #
@@ -12,7 +12,7 @@ use convutils;
 
 # first generate UTF-8 --> SHIFT_JIS_2004 table
 
-my $this_script = $0;
+my $this_script = 'src/backend/utils/mb/Unicode/UCS_to_SHIFT_JIS_2004.pl';
 
 my $in_file = "sjis-0213-2004-std.txt";
 
@@ -24,6 +24,7 @@ while (my $line = <$in>)
 {
 	if ($line =~ /^0x(.*)[ \t]*U\+(.*)\+(.*)[ \t]*#(.*)$/)
 	{
+
 		# combined characters
 		my ($c, $u1, $u2) = ($1, $2, $3);
 		my $rest = "U+" . $u1 . "+" . $u2 . $4;
@@ -31,18 +32,18 @@ while (my $line = <$in>)
 		my $ucs1 = hex($u1);
 		my $ucs2 = hex($u2);
 
-		push @mapping, {
-			code => $code,
-			ucs => $ucs1,
+		push @mapping,
+		  { code       => $code,
+			ucs        => $ucs1,
 			ucs_second => $ucs2,
-			comment => $rest,
-			direction => BOTH,
-			f => $in_file,
-			l => $.
-		};
+			comment    => $rest,
+			direction  => BOTH,
+			f          => $in_file,
+			l          => $. };
 	}
 	elsif ($line =~ /^0x(.*)[ \t]*U\+(.*)[ \t]*#(.*)$/)
 	{
+
 		# non-combined characters
 		my ($c, $u, $rest) = ($1, $2, "U+" . $2 . $3);
 		my $ucs  = hex($u);
@@ -66,14 +67,13 @@ while (my $line = <$in>)
 			$direction = BOTH;
 		}
 
-		push @mapping, {
-			code => $code,
-			ucs => $ucs,
-			comment => $rest,
+		push @mapping,
+		  { code      => $code,
+			ucs       => $ucs,
+			comment   => $rest,
 			direction => $direction,
-			f => $in_file,
-			l => $.
-		};
+			f         => $in_file,
+			l         => $. };
 	}
 }
 close($in);
