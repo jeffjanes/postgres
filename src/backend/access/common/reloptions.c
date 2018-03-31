@@ -3,7 +3,7 @@
  * reloptions.c
  *	  Core support for relation options (pg_class.reloptions)
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,6 +14,8 @@
  */
 
 #include "postgres.h"
+
+#include <float.h>
 
 #include "access/gist_private.h"
 #include "access/hash.h"
@@ -46,10 +48,46 @@
  * (iii) add it to the appropriate options struct (perhaps StdRdOptions)
  * (iv) add it to the appropriate handling routine (perhaps
  * default_reloptions)
- * (v) don't forget to document the option
+ * (v) make sure the lock level is set correctly for that operation
+ * (vi) don't forget to document the option
  *
  * Note that we don't handle "oids" in relOpts because it is handled by
  * interpretOidsOption().
+ *
+ * The default choice for any new option should be AccessExclusiveLock.
+ * In some cases the lock level can be reduced from there, but the lock
+ * level chosen should always conflict with itself to ensure that multiple
+ * changes aren't lost when we attempt concurrent changes.
+ * The choice of lock level depends completely upon how that parameter
+ * is used within the server, not upon how and when you'd like to change it.
+ * Safety first. Existing choices are documented here, and elsewhere in
+ * backend code where the parameters are used.
+ *
+ * In general, anything that affects the results obtained from a SELECT must be
+ * protected by AccessExclusiveLock.
+ *
+ * Autovacuum related parameters can be set at ShareUpdateExclusiveLock
+ * since they are only used by the AV procs and don't change anything
+ * currently executing.
+ *
+ * Fillfactor can be set because it applies only to subsequent changes made to
+ * data blocks, as documented in heapio.c
+ *
+ * n_distinct options can be set at ShareUpdateExclusiveLock because they
+ * are only used during ANALYZE, which uses a ShareUpdateExclusiveLock,
+ * so the ANALYZE will not be affected by in-flight changes. Changing those
+ * values has no affect until the next ANALYZE, so no need for stronger lock.
+ *
+ * Planner-related parameters can be set with ShareUpdateExclusiveLock because
+ * they only affect planning and not the correctness of the execution. Plans
+ * cannot be changed in mid-flight, so changes here could not easily result in
+ * new improved plans in any case. So we allow existing queries to continue
+ * and existing plans to survive, a small price to pay for allowing better
+ * plans to be introduced concurrently without interfering with users.
+ *
+ * Setting parallel_workers is safe, since it acts the same as
+ * max_parallel_workers_per_gather which is a USERSET parameter that doesn't
+ * affect existing plans or queries.
  */
 
 static relopt_bool boolRelOpts[] =
@@ -101,7 +139,8 @@ static relopt_int intRelOpts[] =
 			"fillfactor",
 			"Packs table pages only to this percentage",
 			RELOPT_KIND_HEAP,
-			ShareUpdateExclusiveLock /* since it applies only to later inserts */
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * inserts */
 		},
 		HEAP_DEFAULT_FILLFACTOR, HEAP_MIN_FILLFACTOR, 100
 	},
@@ -110,7 +149,8 @@ static relopt_int intRelOpts[] =
 			"fillfactor",
 			"Packs btree index pages only to this percentage",
 			RELOPT_KIND_BTREE,
-			ShareUpdateExclusiveLock /* since it applies only to later inserts */
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * inserts */
 		},
 		BTREE_DEFAULT_FILLFACTOR, BTREE_MIN_FILLFACTOR, 100
 	},
@@ -119,7 +159,8 @@ static relopt_int intRelOpts[] =
 			"fillfactor",
 			"Packs hash index pages only to this percentage",
 			RELOPT_KIND_HASH,
-			ShareUpdateExclusiveLock /* since it applies only to later inserts */
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * inserts */
 		},
 		HASH_DEFAULT_FILLFACTOR, HASH_MIN_FILLFACTOR, 100
 	},
@@ -128,7 +169,8 @@ static relopt_int intRelOpts[] =
 			"fillfactor",
 			"Packs gist index pages only to this percentage",
 			RELOPT_KIND_GIST,
-			ShareUpdateExclusiveLock /* since it applies only to later inserts */
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * inserts */
 		},
 		GIST_DEFAULT_FILLFACTOR, GIST_MIN_FILLFACTOR, 100
 	},
@@ -137,7 +179,8 @@ static relopt_int intRelOpts[] =
 			"fillfactor",
 			"Packs spgist index pages only to this percentage",
 			RELOPT_KIND_SPGIST,
-			ShareUpdateExclusiveLock /* since it applies only to later inserts */
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * inserts */
 		},
 		SPGIST_DEFAULT_FILLFACTOR, SPGIST_MIN_FILLFACTOR, 100
 	},
@@ -260,7 +303,7 @@ static relopt_int intRelOpts[] =
 			"effective_io_concurrency",
 			"Number of simultaneous requests that can be handled efficiently by the disk subsystem.",
 			RELOPT_KIND_TABLESPACE,
-			AccessExclusiveLock
+			ShareUpdateExclusiveLock
 		},
 #ifdef USE_PREFETCH
 		-1, 0, MAX_IO_CONCURRENCY
@@ -270,10 +313,10 @@ static relopt_int intRelOpts[] =
 	},
 	{
 		{
-			"parallel_degree",
+			"parallel_workers",
 			"Number of parallel processes that can be used per executor node for this relation.",
 			RELOPT_KIND_HEAP,
-			AccessExclusiveLock
+			ShareUpdateExclusiveLock
 		},
 		-1, 0, 1024
 	},
@@ -307,7 +350,7 @@ static relopt_real realRelOpts[] =
 			"seq_page_cost",
 			"Sets the planner's estimate of the cost of a sequentially fetched disk page.",
 			RELOPT_KIND_TABLESPACE,
-			AccessExclusiveLock
+			ShareUpdateExclusiveLock
 		},
 		-1, 0.0, DBL_MAX
 	},
@@ -316,7 +359,7 @@ static relopt_real realRelOpts[] =
 			"random_page_cost",
 			"Sets the planner's estimate of the cost of a nonsequentially fetched disk page.",
 			RELOPT_KIND_TABLESPACE,
-			AccessExclusiveLock
+			ShareUpdateExclusiveLock
 		},
 		-1, 0.0, DBL_MAX
 	},
@@ -325,7 +368,7 @@ static relopt_real realRelOpts[] =
 			"n_distinct",
 			"Sets the planner's estimate of the number of distinct values appearing in a column (excluding child relations).",
 			RELOPT_KIND_ATTRIBUTE,
-			AccessExclusiveLock
+			ShareUpdateExclusiveLock
 		},
 		0, -1.0, DBL_MAX
 	},
@@ -334,7 +377,7 @@ static relopt_real realRelOpts[] =
 			"n_distinct_inherited",
 			"Sets the planner's estimate of the number of distinct values appearing in a column (including child relations).",
 			RELOPT_KIND_ATTRIBUTE,
-			AccessExclusiveLock
+			ShareUpdateExclusiveLock
 		},
 		0, -1.0, DBL_MAX
 	},
@@ -717,9 +760,8 @@ transformRelOptions(Datum oldOptions, List *defList, char *namspace,
 
 		for (i = 0; i < noldoptions; i++)
 		{
-			text	   *oldoption = DatumGetTextP(oldoptions[i]);
-			char	   *text_str = VARDATA(oldoption);
-			int			text_len = VARSIZE(oldoption) - VARHDRSZ;
+			char	   *text_str = VARDATA(oldoptions[i]);
+			int			text_len = VARSIZE(oldoptions[i]) - VARHDRSZ;
 
 			/* Search for a match in defList */
 			foreach(cell, defList)
@@ -883,7 +925,7 @@ untransformRelOptions(Datum options)
 			*p++ = '\0';
 			val = (Node *) makeString(pstrdup(p));
 		}
-		result = lappend(result, makeDefElem(pstrdup(s), val));
+		result = lappend(result, makeDefElem(pstrdup(s), val, -1));
 	}
 
 	return result;
@@ -925,6 +967,7 @@ extractRelOptions(HeapTuple tuple, TupleDesc tupdesc,
 		case RELKIND_RELATION:
 		case RELKIND_TOASTVALUE:
 		case RELKIND_MATVIEW:
+		case RELKIND_PARTITIONED_TABLE:
 			options = heap_reloptions(classForm->relkind, datum, false);
 			break;
 		case RELKIND_VIEW:
@@ -1011,9 +1054,8 @@ parseRelOptions(Datum options, bool validate, relopt_kind kind,
 
 		for (i = 0; i < noptions; i++)
 		{
-			text	   *optiontext = DatumGetTextP(optiondatums[i]);
-			char	   *text_str = VARDATA(optiontext);
-			int			text_len = VARSIZE(optiontext) - VARHDRSZ;
+			char	   *text_str = VARDATA(optiondatums[i]);
+			int			text_len = VARSIZE(optiondatums[i]) - VARHDRSZ;
 			int			j;
 
 			/* Search for a match in reloptions */
@@ -1301,8 +1343,8 @@ default_reloptions(Datum reloptions, bool validate, relopt_kind kind)
 		offsetof(StdRdOptions, autovacuum) +offsetof(AutoVacOpts, analyze_scale_factor)},
 		{"user_catalog_table", RELOPT_TYPE_BOOL,
 		offsetof(StdRdOptions, user_catalog_table)},
-		{"parallel_degree", RELOPT_TYPE_INT,
-		offsetof(StdRdOptions, parallel_degree)}
+		{"parallel_workers", RELOPT_TYPE_INT,
+		offsetof(StdRdOptions, parallel_workers)}
 	};
 
 	options = parseRelOptions(reloptions, validate, kind, &numoptions);
@@ -1376,6 +1418,7 @@ heap_reloptions(char relkind, Datum reloptions, bool validate)
 			return (bytea *) rdopts;
 		case RELKIND_RELATION:
 		case RELKIND_MATVIEW:
+		case RELKIND_PARTITIONED_TABLE:
 			return default_reloptions(reloptions, validate, RELOPT_KIND_HEAP);
 		default:
 			/* other relkinds are not supported */
@@ -1475,8 +1518,8 @@ tablespace_reloptions(Datum reloptions, bool validate)
 LOCKMODE
 AlterTableGetRelOptionsLockLevel(List *defList)
 {
-	LOCKMODE    lockmode = NoLock;
-	ListCell    *cell;
+	LOCKMODE	lockmode = NoLock;
+	ListCell   *cell;
 
 	if (defList == NIL)
 		return AccessExclusiveLock;
@@ -1486,8 +1529,8 @@ AlterTableGetRelOptionsLockLevel(List *defList)
 
 	foreach(cell, defList)
 	{
-		DefElem *def = (DefElem *) lfirst(cell);
-		int		i;
+		DefElem    *def = (DefElem *) lfirst(cell);
+		int			i;
 
 		for (i = 0; relOpts[i]; i++)
 		{

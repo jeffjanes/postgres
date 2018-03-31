@@ -7,7 +7,7 @@
  * This file contains WAL control and information functions.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlogfuncs.c
@@ -18,7 +18,6 @@
 
 #include "access/htup_details.h"
 #include "access/xlog.h"
-#include "access/xlog_fn.h"
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
 #include "catalog/catalog.h"
@@ -73,7 +72,7 @@ nonexclusive_base_backup_cleanup(int code, Datum arg)
 Datum
 pg_start_backup(PG_FUNCTION_ARGS)
 {
-	text	   *backupid = PG_GETARG_TEXT_P(0);
+	text	   *backupid = PG_GETARG_TEXT_PP(0);
 	bool		fast = PG_GETARG_BOOL(1);
 	bool		exclusive = PG_GETARG_BOOL(2);
 	char	   *backupidstr;
@@ -104,8 +103,8 @@ pg_start_backup(PG_FUNCTION_ARGS)
 		MemoryContext oldcontext;
 
 		/*
-		 * Label file and tablespace map file need to be long-lived, since they
-		 * are read in pg_stop_backup.
+		 * Label file and tablespace map file need to be long-lived, since
+		 * they are read in pg_stop_backup.
 		 */
 		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 		label_file = makeStringInfo();
@@ -113,7 +112,7 @@ pg_start_backup(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(oldcontext);
 
 		startpoint = do_pg_start_backup(backupidstr, fast, NULL, label_file,
-										dir, NULL, tblspc_map_file, false, true);
+									dir, NULL, tblspc_map_file, false, true);
 		nonexclusive_backup_running = true;
 
 		before_shmem_exit(nonexclusive_base_backup_cleanup, (Datum) 0);
@@ -128,7 +127,7 @@ pg_start_backup(PG_FUNCTION_ARGS)
  * pg_stop_backup: finish taking an on-line backup dump
  *
  * We write an end-of-backup WAL record, and remove the backup label file
- * created by pg_start_backup, creating a backup history file in pg_xlog
+ * created by pg_start_backup, creating a backup history file in pg_wal
  * instead (whence it will immediately be archived). The backup history file
  * contains the same info found in the label file, plus the backup-end time
  * and WAL location. Before 9.0, the backup-end time was read from the backup
@@ -138,8 +137,8 @@ pg_start_backup(PG_FUNCTION_ARGS)
  * Note: different from CancelBackup which just cancels online backup mode.
  *
  * Note: this version is only called to stop an exclusive backup. The function
- *       pg_stop_backup_v2 (overloaded as pg_stop_backup in SQL) is called to
- *       stop non-exclusive backups.
+ *		 pg_stop_backup_v2 (overloaded as pg_stop_backup in SQL) is called to
+ *		 stop non-exclusive backups.
  *
  * Permission checking for this function is managed through the normal
  * GRANT system.
@@ -153,13 +152,13 @@ pg_stop_backup(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("non-exclusive backup in progress"),
-				 errhint("did you mean to use pg_stop_backup('f')?")));
+				 errhint("Did you mean to use pg_stop_backup('f')?")));
 
 	/*
-	 * Exclusive backups were typically started in a different connection,
-	 * so don't try to verify that exclusive_backup_running is set in this one.
-	 * Actual verification that an exclusive backup is in fact running is handled
-	 * inside do_pg_stop_backup.
+	 * Exclusive backups were typically started in a different connection, so
+	 * don't try to verify that exclusive_backup_running is set in this one.
+	 * Actual verification that an exclusive backup is in fact running is
+	 * handled inside do_pg_stop_backup.
 	 */
 	stoppoint = do_pg_stop_backup(NULL, true, NULL);
 
@@ -176,22 +175,30 @@ pg_stop_backup(PG_FUNCTION_ARGS)
  * the backup label and tablespace map files as text fields in as part of the
  * resultset.
  *
+ * The first parameter (variable 'exclusive') allows the user to tell us if
+ * this is an exclusive or a non-exclusive backup.
+ *
+ * The second paramter (variable 'waitforarchive'), which is optional,
+ * allows the user to choose if they want to wait for the WAL to be archived
+ * or if we should just return as soon as the WAL record is written.
+ *
  * Permission checking for this function is managed through the normal
  * GRANT system.
  */
 Datum
 pg_stop_backup_v2(PG_FUNCTION_ARGS)
 {
-	ReturnSetInfo  *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc		tupdesc;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
 	Tuplestorestate *tupstore;
-	MemoryContext	per_query_ctx;
-	MemoryContext	oldcontext;
-	Datum			values[3];
-	bool			nulls[3];
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
+	Datum		values[3];
+	bool		nulls[3];
 
-	bool			exclusive = PG_GETARG_BOOL(0);
-	XLogRecPtr		stoppoint;
+	bool		exclusive = PG_GETARG_BOOL(0);
+	bool		waitforarchive = PG_GETARG_BOOL(1);
+	XLogRecPtr	stoppoint;
 
 	/* check to see if caller supports us returning a tuplestore */
 	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
@@ -227,13 +234,13 @@ pg_stop_backup_v2(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("non-exclusive backup in progress"),
-					 errhint("did you mean to use pg_stop_backup('f')?")));
+					 errhint("Did you mean to use pg_stop_backup('f')?")));
 
 		/*
 		 * Stop the exclusive backup, and since we're in an exclusive backup
 		 * return NULL for both backup_label and tablespace_map.
 		 */
-		stoppoint = do_pg_stop_backup(NULL, true, NULL);
+		stoppoint = do_pg_stop_backup(NULL, waitforarchive, NULL);
 		exclusive_backup_running = false;
 
 		nulls[1] = true;
@@ -245,14 +252,13 @@ pg_stop_backup_v2(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("non-exclusive backup is not in progress"),
-					 errhint("did you mean to use pg_stop_backup('t')?")));
+					 errhint("Did you mean to use pg_stop_backup('t')?")));
 
 		/*
-		 * Stop the non-exclusive backup. Return a copy of the backup
-		 * label and tablespace map so they can be written to disk by
-		 * the caller.
+		 * Stop the non-exclusive backup. Return a copy of the backup label
+		 * and tablespace map so they can be written to disk by the caller.
 		 */
-		stoppoint = do_pg_stop_backup(label_file->data, true, NULL);
+		stoppoint = do_pg_stop_backup(label_file->data, waitforarchive, NULL);
 		nonexclusive_backup_running = false;
 		cancel_before_shmem_exit(nonexclusive_base_backup_cleanup, (Datum) 0);
 
@@ -269,7 +275,7 @@ pg_stop_backup_v2(PG_FUNCTION_ARGS)
 	}
 
 	/* Stoppoint is included on both exclusive and nonexclusive backups */
-	values[0]  = LSNGetDatum(stoppoint);
+	values[0] = LSNGetDatum(stoppoint);
 
 	tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 	tuplestore_donestoring(typstore);
@@ -278,13 +284,13 @@ pg_stop_backup_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_switch_xlog: switch to next xlog file
+ * pg_switch_wal: switch to next xlog file
  *
  * Permission checking for this function is managed through the normal
  * GRANT system.
  */
 Datum
-pg_switch_xlog(PG_FUNCTION_ARGS)
+pg_switch_wal(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	switchpoint;
 
@@ -294,7 +300,7 @@ pg_switch_xlog(PG_FUNCTION_ARGS)
 				 errmsg("recovery is in progress"),
 				 errhint("WAL control functions cannot be executed during recovery.")));
 
-	switchpoint = RequestXLogSwitch();
+	switchpoint = RequestXLogSwitch(false);
 
 	/*
 	 * As a convenience, return the WAL location of the switch record
@@ -311,7 +317,7 @@ pg_switch_xlog(PG_FUNCTION_ARGS)
 Datum
 pg_create_restore_point(PG_FUNCTION_ARGS)
 {
-	text	   *restore_name = PG_GETARG_TEXT_P(0);
+	text	   *restore_name = PG_GETARG_TEXT_PP(0);
 	char	   *restore_name_str;
 	XLogRecPtr	restorepoint;
 
@@ -350,7 +356,7 @@ pg_create_restore_point(PG_FUNCTION_ARGS)
  * to the kernel, but is not necessarily synced to disk.
  */
 Datum
-pg_current_xlog_location(PG_FUNCTION_ARGS)
+pg_current_wal_location(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	current_recptr;
 
@@ -371,7 +377,7 @@ pg_current_xlog_location(PG_FUNCTION_ARGS)
  * This function is mostly for debugging purposes.
  */
 Datum
-pg_current_xlog_insert_location(PG_FUNCTION_ARGS)
+pg_current_wal_insert_location(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	current_recptr;
 
@@ -392,7 +398,7 @@ pg_current_xlog_insert_location(PG_FUNCTION_ARGS)
  * This function is mostly for debugging purposes.
  */
 Datum
-pg_current_xlog_flush_location(PG_FUNCTION_ARGS)
+pg_current_wal_flush_location(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	current_recptr;
 
@@ -414,7 +420,7 @@ pg_current_xlog_flush_location(PG_FUNCTION_ARGS)
  * and synced to disk by walreceiver.
  */
 Datum
-pg_last_xlog_receive_location(PG_FUNCTION_ARGS)
+pg_last_wal_receive_location(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	recptr;
 
@@ -433,7 +439,7 @@ pg_last_xlog_receive_location(PG_FUNCTION_ARGS)
  * connections during recovery.
  */
 Datum
-pg_last_xlog_replay_location(PG_FUNCTION_ARGS)
+pg_last_wal_replay_location(PG_FUNCTION_ARGS)
 {
 	XLogRecPtr	recptr;
 
@@ -454,7 +460,7 @@ pg_last_xlog_replay_location(PG_FUNCTION_ARGS)
  * expected usage is to determine which xlog file(s) are ready to archive.
  */
 Datum
-pg_xlogfile_name_offset(PG_FUNCTION_ARGS)
+pg_walfile_name_offset(PG_FUNCTION_ARGS)
 {
 	XLogSegNo	xlogsegno;
 	uint32		xrecoff;
@@ -470,7 +476,7 @@ pg_xlogfile_name_offset(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("recovery is in progress"),
-				 errhint("pg_xlogfile_name_offset() cannot be executed during recovery.")));
+				 errhint("pg_walfile_name_offset() cannot be executed during recovery.")));
 
 	/*
 	 * Construct a tuple descriptor for the result row.  This must match this
@@ -516,7 +522,7 @@ pg_xlogfile_name_offset(PG_FUNCTION_ARGS)
  * such as is returned by pg_stop_backup() or pg_xlog_switch().
  */
 Datum
-pg_xlogfile_name(PG_FUNCTION_ARGS)
+pg_walfile_name(PG_FUNCTION_ARGS)
 {
 	XLogSegNo	xlogsegno;
 	XLogRecPtr	locationpoint = PG_GETARG_LSN(0);
@@ -526,7 +532,7 @@ pg_xlogfile_name(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("recovery is in progress"),
-		 errhint("pg_xlogfile_name() cannot be executed during recovery.")));
+		 errhint("pg_walfile_name() cannot be executed during recovery.")));
 
 	XLByteToPrevSeg(locationpoint, xlogsegno);
 	XLogFileName(xlogfilename, ThisTimeLineID, xlogsegno);
@@ -535,13 +541,13 @@ pg_xlogfile_name(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_xlog_replay_pause - pause recovery now
+ * pg_wal_replay_pause - pause recovery now
  *
  * Permission checking for this function is managed through the normal
  * GRANT system.
  */
 Datum
-pg_xlog_replay_pause(PG_FUNCTION_ARGS)
+pg_wal_replay_pause(PG_FUNCTION_ARGS)
 {
 	if (!RecoveryInProgress())
 		ereport(ERROR,
@@ -555,13 +561,13 @@ pg_xlog_replay_pause(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_xlog_replay_resume - resume recovery now
+ * pg_wal_replay_resume - resume recovery now
  *
  * Permission checking for this function is managed through the normal
  * GRANT system.
  */
 Datum
-pg_xlog_replay_resume(PG_FUNCTION_ARGS)
+pg_wal_replay_resume(PG_FUNCTION_ARGS)
 {
 	if (!RecoveryInProgress())
 		ereport(ERROR,
@@ -575,10 +581,10 @@ pg_xlog_replay_resume(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_is_xlog_replay_paused
+ * pg_is_wal_replay_paused
  */
 Datum
-pg_is_xlog_replay_paused(PG_FUNCTION_ARGS)
+pg_is_wal_replay_paused(PG_FUNCTION_ARGS)
 {
 	if (!RecoveryInProgress())
 		ereport(ERROR,
@@ -620,7 +626,7 @@ pg_is_in_recovery(PG_FUNCTION_ARGS)
  * Compute the difference in bytes between two WAL locations.
  */
 Datum
-pg_xlog_location_diff(PG_FUNCTION_ARGS)
+pg_wal_location_diff(PG_FUNCTION_ARGS)
 {
 	Datum		result;
 

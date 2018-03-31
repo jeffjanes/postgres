@@ -81,12 +81,12 @@ index 2f7e645..3d7e255
   	if (!TransactionIdIsValid(xidVacLimit))
 diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
 new file mode 100644
-index f9644db..c14e2af
+index f13f9c1..bc92ec6
 *** a/src/backend/access/transam/xlog.c
 --- b/src/backend/access/transam/xlog.c
 *************** BootStrapXLOG(void)
-*** 4823,4828 ****
---- 4823,4829 ----
+*** 4821,4826 ****
+--- 4821,4827 ----
   	ShmemVariableCache->nextOid = checkPoint.nextOid;
   	ShmemVariableCache->oidCount = 0;
   	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
@@ -95,8 +95,8 @@ index f9644db..c14e2af
   	SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
   	SetCommitTsLimit(InvalidTransactionId, InvalidTransactionId);
 *************** StartupXLOG(void)
-*** 6341,6346 ****
---- 6342,6348 ----
+*** 6339,6344 ****
+--- 6340,6346 ----
   	ShmemVariableCache->nextOid = checkPoint.nextOid;
   	ShmemVariableCache->oidCount = 0;
   	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
@@ -105,8 +105,8 @@ index f9644db..c14e2af
   	SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
   	SetCommitTsLimit(checkPoint.oldestCommitTsXid,
 *************** xlog_redo(XLogReaderState *record)
-*** 9249,9254 ****
---- 9251,9257 ----
+*** 9247,9252 ****
+--- 9249,9255 ----
   
   		MultiXactAdvanceOldest(checkPoint.oldestMulti,
   							   checkPoint.oldestMultiDB);
@@ -115,8 +115,8 @@ index f9644db..c14e2af
   
   		/*
 *************** xlog_redo(XLogReaderState *record)
-*** 9346,9351 ****
---- 9349,9355 ----
+*** 9344,9349 ****
+--- 9347,9353 ----
   		 */
   		MultiXactAdvanceOldest(checkPoint.oldestMulti,
   							   checkPoint.oldestMultiDB);
@@ -126,7 +126,7 @@ index f9644db..c14e2af
   			SetTransactionIdLimit(checkPoint.oldestXid,
 diff --git a/src/backend/commands/vacuum.c b/src/backend/commands/vacuum.c
 new file mode 100644
-index 93361a0..eabedae
+index 0563e63..348b855
 *** a/src/backend/commands/vacuum.c
 --- b/src/backend/commands/vacuum.c
 *************** int			vacuum_freeze_min_age;
@@ -141,8 +141,8 @@ index 93361a0..eabedae
   
   /* A few variables that don't seem worth passing around as parameters */
 *************** vacuum_set_xid_limits(Relation rel,
-*** 531,536 ****
---- 533,539 ----
+*** 540,545 ****
+--- 542,548 ----
   	}
   
   	*freezeLimit = limit;
@@ -151,8 +151,8 @@ index 93361a0..eabedae
   	/*
   	 * Compute the multixact age for which freezing is urgent.  This is
 *************** vacuum_set_xid_limits(Relation rel,
-*** 585,590 ****
---- 588,595 ----
+*** 594,599 ****
+--- 597,604 ----
   		 * VACUUM schedule, the nightly VACUUM gets a chance to freeze tuples
   		 * before anti-wraparound autovacuum is launched.
   		 */
@@ -162,8 +162,8 @@ index 93361a0..eabedae
   		if (freezetable < 0)
   			freezetable = vacuum_freeze_table_age;
 *************** vac_update_datfrozenxid(void)
-*** 1022,1027 ****
---- 1027,1033 ----
+*** 1031,1036 ****
+--- 1036,1042 ----
   	 * truncate pg_clog and/or pg_multixact.  Also do it if the shared
   	 * XID-wrap-limit info is stale, since this action will update that too.
   	 */
@@ -173,7 +173,7 @@ index 93361a0..eabedae
   						  lastSaneFrozenXid, lastSaneMinMulti);
 diff --git a/src/backend/commands/vacuumlazy.c b/src/backend/commands/vacuumlazy.c
 new file mode 100644
-index 426e756..a20af02
+index 231e92d..c709b37
 *** a/src/backend/commands/vacuumlazy.c
 --- b/src/backend/commands/vacuumlazy.c
 ***************
@@ -187,10 +187,10 @@ index 426e756..a20af02
    * Space/time tradeoff parameters: do these need to be user-tunable?
    *
 *************** lazy_vacuum_rel(Relation onerel, int opt
-*** 233,238 ****
---- 234,241 ----
-  	aggressive |= MultiXactIdPrecedesOrEquals(onerel->rd_rel->relminmxid,
-  											  mxactFullScanLimit);
+*** 236,241 ****
+--- 237,244 ----
+  	if (options & VACOPT_DISABLE_PAGE_SKIPPING)
+  		aggressive = true;
   
 + 	if (JJ_vac) elog(LOG,"JJ aggresive %d, relfrozenid %d", aggressive, onerel->rd_rel->relfrozenxid);
 + 
@@ -199,7 +199,7 @@ index 426e756..a20af02
   	vacrelstats->old_rel_pages = onerel->rd_rel->relpages;
 diff --git a/src/backend/postmaster/autovacuum.c b/src/backend/postmaster/autovacuum.c
 new file mode 100644
-index e2859df..db79486
+index 3768f50..beca0eb
 *** a/src/backend/postmaster/autovacuum.c
 --- b/src/backend/postmaster/autovacuum.c
 *************** int			autovacuum_vac_cost_delay;
@@ -213,7 +213,7 @@ index e2859df..db79486
   /* how long to keep pgstat data in the launcher, in milliseconds */
   #define STATS_READ_DELAY 1000
 *************** AutoVacWorkerMain(int argc, char *argv[]
-*** 1635,1642 ****
+*** 1643,1650 ****
   		InitPostgres(NULL, dbid, NULL, InvalidOid, dbname);
   		SetProcessingMode(NormalProcessing);
   		set_ps_display(dbname, false);
@@ -222,10 +222,10 @@ index e2859df..db79486
   
   		if (PostAuthDelay)
   			pg_usleep(PostAuthDelay * 1000000L);
---- 1636,1641 ----
+--- 1644,1649 ----
 *************** AutoVacWorkerMain(int argc, char *argv[]
-*** 1644,1650 ****
---- 1643,1653 ----
+*** 1652,1658 ****
+--- 1651,1661 ----
   		/* And do an appropriate amount of work */
   		recentXid = ReadNewTransactionId();
   		recentMulti = ReadNextMultiXactId();
@@ -238,7 +238,7 @@ index e2859df..db79486
   
   	/*
 *************** relation_needs_vacanalyze(Oid relid,
-*** 2761,2773 ****
+*** 2773,2785 ****
   		 * reset, because if that happens, the last vacuum and analyze counts
   		 * will be reset too.
   		 */
@@ -252,7 +252,7 @@ index e2859df..db79486
   	}
   	else
   	{
---- 2764,2777 ----
+--- 2776,2789 ----
   		 * reset, because if that happens, the last vacuum and analyze counts
   		 * will be reset too.
   		 */
@@ -269,7 +269,7 @@ index e2859df..db79486
   	{
 diff --git a/src/backend/storage/smgr/md.c b/src/backend/storage/smgr/md.c
 new file mode 100644
-index 578276d..612606c
+index f329d15..8fe51f9
 *** a/src/backend/storage/smgr/md.c
 --- b/src/backend/storage/smgr/md.c
 ***************
@@ -284,8 +284,8 @@ index 578276d..612606c
    *	The magnetic disk storage manager keeps track of open file
    *	descriptors in its own descriptor pool.  This is done to make it
 *************** mdwrite(SMgrRelation reln, ForkNumber fo
-*** 794,799 ****
---- 796,802 ----
+*** 806,811 ****
+--- 808,814 ----
   	off_t		seekpos;
   	int			nbytes;
   	MdfdVec    *v;
@@ -294,7 +294,7 @@ index 578276d..612606c
   	/* This assert is too expensive to have on normally ... */
   #ifdef CHECK_WRITE_VS_EXTEND
 *************** mdwrite(SMgrRelation reln, ForkNumber fo
-*** 818,824 ****
+*** 831,837 ****
   				 errmsg("could not seek to block %u in file \"%s\": %m",
   						blocknum, FilePathName(v->mdfd_vfd))));
   
@@ -302,7 +302,7 @@ index 578276d..612606c
   
   	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
   										reln->smgr_rnode.node.spcNode,
---- 821,838 ----
+--- 834,851 ----
   				 errmsg("could not seek to block %u in file \"%s\": %m",
   						blocknum, FilePathName(v->mdfd_vfd))));
   
@@ -323,7 +323,7 @@ index 578276d..612606c
   										reln->smgr_rnode.node.spcNode,
 diff --git a/src/backend/utils/misc/guc.c b/src/backend/utils/misc/guc.c
 new file mode 100644
-index fb091bc..887245d
+index 9c93df0..c77f67b
 *** a/src/backend/utils/misc/guc.c
 --- b/src/backend/utils/misc/guc.c
 ***************
@@ -339,8 +339,8 @@ index fb091bc..887245d
   extern char *default_tablespace;
   extern char *temp_tablespaces;
 *************** static struct config_int ConfigureNamesI
-*** 2352,2357 ****
---- 2355,2387 ----
+*** 2355,2360 ****
+--- 2358,2390 ----
   	},
   
   	{
@@ -376,11 +376,11 @@ index fb091bc..887245d
   						 "commit_delay."),
 diff --git a/src/include/pg_config_manual.h b/src/include/pg_config_manual.h
 new file mode 100644
-index 8d5a378..cb4610b
+index a2b2b61..fe4c806
 *** a/src/include/pg_config_manual.h
 --- b/src/include/pg_config_manual.h
 ***************
-*** 276,282 ****
+*** 283,289 ****
   /*
    * Enable debugging print statements for lock-related operations.
    */
@@ -388,7 +388,7 @@ index 8d5a378..cb4610b
   
   /*
    * Enable debugging print statements for WAL-related operations; see
---- 276,282 ----
+--- 283,289 ----
   /*
    * Enable debugging print statements for lock-related operations.
    */

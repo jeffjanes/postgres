@@ -3,15 +3,14 @@
  * subtrans.c
  *		PostgreSQL subtransaction-log manager
  *
- * The pg_subtrans manager is a pg_clog-like manager that stores the parent
+ * The pg_subtrans manager is a pg_xact-like manager that stores the parent
  * transaction Id for each transaction.  It is a fundamental part of the
  * nested transactions implementation.  A main transaction has a parent
  * of InvalidTransactionId, and each subtransaction has its immediate parent.
  * The tree can easily be walked from child to parent, but not in the
  * opposite direction.
  *
- * This code is based on clog.c, but the robustness requirements
- * are completely different from pg_clog, because we only need to remember
+ * are completely different from pg_xact, because we only need to remember
  * pg_subtrans information for currently-open transactions.  Thus, there is
  * no need to preserve data over a crash and restart.
  *
@@ -19,7 +18,7 @@
  * data across crashes.  During database startup, we simply force the
  * currently-active page of SUBTRANS to zeroes.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/subtrans.c
@@ -257,7 +256,7 @@ StartupSUBTRANS(TransactionId oldestActiveXID)
 		startPage++;
 		/* must account for wraparound */
 		if (startPage > TransactionIdToPage(MaxTransactionId))
-			startPage=0;
+			startPage = 0;
 	}
 	(void) ZeroSUBTRANSPage(startPage);
 

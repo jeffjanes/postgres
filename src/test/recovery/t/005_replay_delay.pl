@@ -21,7 +21,7 @@ $node_master->backup($backup_name);
 
 # Create streaming standby from backup
 my $node_standby = get_new_node('standby');
-my $delay = 3;
+my $delay        = 3;
 $node_standby->init_from_backup($node_master, $backup_name,
 	has_streaming => 1);
 $node_standby->append_conf(
@@ -42,15 +42,16 @@ $node_master->safe_psql('postgres',
 # Now wait for replay to complete on standby. We're done waiting when the
 # slave has replayed up to the previously saved master LSN.
 my $until_lsn =
-  $node_master->safe_psql('postgres', "SELECT pg_current_xlog_location()");
+  $node_master->safe_psql('postgres', "SELECT pg_current_wal_location()");
 
 my $remaining = 90;
 while ($remaining-- > 0)
 {
+
 	# Done waiting?
-	my $replay_status =
-	  $node_standby->safe_psql('postgres',
-		"SELECT (pg_last_xlog_replay_location() - '$until_lsn'::pg_lsn) >= 0");
+	my $replay_status = $node_standby->safe_psql('postgres',
+		"SELECT (pg_last_wal_replay_location() - '$until_lsn'::pg_lsn) >= 0"
+	);
 	last if $replay_status eq 't';
 
 	# No, sleep some more.
@@ -59,9 +60,10 @@ while ($remaining-- > 0)
 	sleep $sleep;
 }
 
-die "Maximum number of attempts reached ($remaining remain)" if $remaining < 0;
+die "Maximum number of attempts reached ($remaining remain)"
+  if $remaining < 0;
 
 # This test is successful if and only if the LSN has been applied with at least
 # the configured apply delay.
 ok(time() - $master_insert_time >= $delay,
-   "Check that standby applies WAL only after replication delay");
+	"standby applies WAL only after replication delay");

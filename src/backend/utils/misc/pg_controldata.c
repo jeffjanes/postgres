@@ -5,7 +5,7 @@
  * Routines to expose the contents of the control data file via
  * a set of SQL functions.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -29,11 +29,12 @@
 Datum
 pg_control_system(PG_FUNCTION_ARGS)
 {
-	Datum				values[4];
-	bool				nulls[4];
-	TupleDesc			tupdesc;
-	HeapTuple			htup;
-	ControlFileData	   *ControlFile;
+	Datum		values[4];
+	bool		nulls[4];
+	TupleDesc	tupdesc;
+	HeapTuple	htup;
+	ControlFileData *ControlFile;
+	bool		crc_ok;
 
 	/*
 	 * Construct a tuple descriptor for the result row.  This must match this
@@ -51,7 +52,10 @@ pg_control_system(PG_FUNCTION_ARGS)
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	/* read the control file */
-	ControlFile = get_controlfile(DataDir, NULL);
+	ControlFile = get_controlfile(DataDir, NULL, &crc_ok);
+	if (!crc_ok)
+		ereport(ERROR,
+				(errmsg("calculated CRC checksum does not match value stored in file")));
 
 	values[0] = Int32GetDatum(ControlFile->pg_control_version);
 	nulls[0] = false;
@@ -73,13 +77,14 @@ pg_control_system(PG_FUNCTION_ARGS)
 Datum
 pg_control_checkpoint(PG_FUNCTION_ARGS)
 {
-	Datum				values[19];
-	bool				nulls[19];
-	TupleDesc			tupdesc;
-	HeapTuple			htup;
-	ControlFileData	   *ControlFile;
-	XLogSegNo			segno;
-	char				xlogfilename[MAXFNAMELEN];
+	Datum		values[19];
+	bool		nulls[19];
+	TupleDesc	tupdesc;
+	HeapTuple	htup;
+	ControlFileData *ControlFile;
+	XLogSegNo	segno;
+	char		xlogfilename[MAXFNAMELEN];
+	bool		crc_ok;
 
 	/*
 	 * Construct a tuple descriptor for the result row.  This must match this
@@ -127,7 +132,10 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	/* Read the control file. */
-	ControlFile = get_controlfile(DataDir, NULL);
+	ControlFile = get_controlfile(DataDir, NULL, &crc_ok);
+	if (!crc_ok)
+		ereport(ERROR,
+				(errmsg("calculated CRC checksum does not match value stored in file")));
 
 	/*
 	 * Calculate name of the WAL file containing the latest checkpoint's REDO
@@ -159,8 +167,8 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 	nulls[6] = false;
 
 	values[7] = CStringGetTextDatum(psprintf("%u:%u",
-								ControlFile->checkPointCopy.nextXidEpoch,
-								ControlFile->checkPointCopy.nextXid));
+									ControlFile->checkPointCopy.nextXidEpoch,
+									   ControlFile->checkPointCopy.nextXid));
 	nulls[7] = false;
 
 	values[8] = ObjectIdGetDatum(ControlFile->checkPointCopy.nextOid);
@@ -205,11 +213,12 @@ pg_control_checkpoint(PG_FUNCTION_ARGS)
 Datum
 pg_control_recovery(PG_FUNCTION_ARGS)
 {
-	Datum				values[5];
-	bool				nulls[5];
-	TupleDesc			tupdesc;
-	HeapTuple			htup;
-	ControlFileData	   *ControlFile;
+	Datum		values[5];
+	bool		nulls[5];
+	TupleDesc	tupdesc;
+	HeapTuple	htup;
+	ControlFileData *ControlFile;
+	bool		crc_ok;
 
 	/*
 	 * Construct a tuple descriptor for the result row.  This must match this
@@ -229,7 +238,10 @@ pg_control_recovery(PG_FUNCTION_ARGS)
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	/* read the control file */
-	ControlFile = get_controlfile(DataDir, NULL);
+	ControlFile = get_controlfile(DataDir, NULL, &crc_ok);
+	if (!crc_ok)
+		ereport(ERROR,
+				(errmsg("calculated CRC checksum does not match value stored in file")));
 
 	values[0] = LSNGetDatum(ControlFile->minRecoveryPoint);
 	nulls[0] = false;
@@ -254,17 +266,18 @@ pg_control_recovery(PG_FUNCTION_ARGS)
 Datum
 pg_control_init(PG_FUNCTION_ARGS)
 {
-	Datum				values[13];
-	bool				nulls[13];
-	TupleDesc			tupdesc;
-	HeapTuple			htup;
-	ControlFileData	   *ControlFile;
+	Datum		values[12];
+	bool		nulls[12];
+	TupleDesc	tupdesc;
+	HeapTuple	htup;
+	ControlFileData *ControlFile;
+	bool		crc_ok;
 
 	/*
 	 * Construct a tuple descriptor for the result row.  This must match this
 	 * function's pg_proc entry!
 	 */
-	tupdesc = CreateTemplateTupleDesc(13, false);
+	tupdesc = CreateTemplateTupleDesc(12, false);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "max_data_alignment",
 					   INT4OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "database_block_size",
@@ -283,18 +296,19 @@ pg_control_init(PG_FUNCTION_ARGS)
 					   INT4OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "large_object_chunk_size",
 					   INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "bigint_timestamps",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "float4_pass_by_value",
 					   BOOLOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 11, "float4_pass_by_value",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 11, "float8_pass_by_value",
 					   BOOLOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 12, "float8_pass_by_value",
-					   BOOLOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 13, "data_page_checksum_version",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 12, "data_page_checksum_version",
 					   INT4OID, -1, 0);
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	/* read the control file */
-	ControlFile = get_controlfile(DataDir, NULL);
+	ControlFile = get_controlfile(DataDir, NULL, &crc_ok);
+	if (!crc_ok)
+		ereport(ERROR,
+				(errmsg("calculated CRC checksum does not match value stored in file")));
 
 	values[0] = Int32GetDatum(ControlFile->maxAlign);
 	nulls[0] = false;
@@ -323,17 +337,14 @@ pg_control_init(PG_FUNCTION_ARGS)
 	values[8] = Int32GetDatum(ControlFile->loblksize);
 	nulls[8] = false;
 
-	values[9] = BoolGetDatum(ControlFile->enableIntTimes);
+	values[9] = BoolGetDatum(ControlFile->float4ByVal);
 	nulls[9] = false;
 
-	values[10] = BoolGetDatum(ControlFile->float4ByVal);
+	values[10] = BoolGetDatum(ControlFile->float8ByVal);
 	nulls[10] = false;
 
-	values[11] = BoolGetDatum(ControlFile->float8ByVal);
+	values[11] = Int32GetDatum(ControlFile->data_checksum_version);
 	nulls[11] = false;
-
-	values[12] = Int32GetDatum(ControlFile->data_checksum_version);
-	nulls[12] = false;
 
 	htup = heap_form_tuple(tupdesc, values, nulls);
 

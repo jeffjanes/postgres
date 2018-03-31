@@ -2,7 +2,7 @@
  * dbsize.c
  *		Database object size functions, and related inquiries
  *
- * Copyright (c) 2002-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/dbsize.c
@@ -11,7 +11,6 @@
 
 #include "postgres.h"
 
-#include <sys/types.h>
 #include <sys/stat.h>
 
 #include "access/heapam.h"
@@ -309,7 +308,7 @@ Datum
 pg_relation_size(PG_FUNCTION_ARGS)
 {
 	Oid			relOid = PG_GETARG_OID(0);
-	text	   *forkName = PG_GETARG_TEXT_P(1);
+	text	   *forkName = PG_GETARG_TEXT_PP(1);
 	Relation	rel;
 	int64		size;
 
@@ -763,19 +762,13 @@ pg_size_bytes(PG_FUNCTION_ARGS)
 		char	   *cp;
 
 		/*
-		 * Note we might one day support EB units, so if what follows isn't a
-		 * number, just treat it all as a unit to be parsed.
+		 * Note we might one day support EB units, so if what follows 'E'
+		 * isn't a number, just treat it all as a unit to be parsed.
 		 */
 		exponent = strtol(endptr + 1, &cp, 10);
+		(void) exponent;		/* Silence -Wunused-result warnings */
 		if (cp > endptr + 1)
-		{
-			if (exponent > NUMERIC_MAX_PRECISION ||
-				exponent < -NUMERIC_MAX_PRECISION)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("invalid size: \"%s\"", str)));
 			endptr = cp;
-		}
 	}
 
 	/*
@@ -1004,7 +997,7 @@ pg_relation_filepath(PG_FUNCTION_ARGS)
 			break;
 		case RELPERSISTENCE_TEMP:
 			if (isTempOrTempToastNamespace(relform->relnamespace))
-				backend = MyBackendId;
+				backend = BackendIdForTempRelations();
 			else
 			{
 				/* Do it the hard way. */

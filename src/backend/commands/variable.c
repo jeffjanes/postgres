@@ -4,7 +4,7 @@
  *		Routines for handling specialized SET variables.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -30,6 +30,7 @@
 #include "utils/syscache.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "utils/varlena.h"
 #include "mb/pg_wchar.h"
 
 /*
@@ -307,11 +308,7 @@ check_timezone(char **newval, void **extra, GucSource source)
 		}
 
 		/* Here we change from SQL to Unix sign convention */
-#ifdef HAVE_INT64_TIMESTAMP
 		gmtoffset = -(interval->time / USECS_PER_SEC);
-#else
-		gmtoffset = -interval->time;
-#endif
 		new_tz = pg_tzset_offset(gmtoffset);
 
 		pfree(interval);
@@ -755,6 +752,30 @@ assign_client_encoding(const char *newval, void *extra)
 {
 	int			encoding = *((int *) extra);
 
+	/*
+	 * Parallel workers send data to the leader, not the client.  They always
+	 * send data using the database encoding.
+	 */
+	if (IsParallelWorker())
+	{
+		/*
+		 * During parallel worker startup, we want to accept the leader's
+		 * client_encoding setting so that anyone who looks at the value in
+		 * the worker sees the same value that they would see in the leader.
+		 */
+		if (InitializingParallelWorker)
+			return;
+
+		/*
+		 * A change other than during startup, for example due to a SET clause
+		 * attached to a function definition, should be rejected, as there is
+		 * nothing we can do inside the worker to make it take effect.
+		 */
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+			  errmsg("cannot change client_encoding in a parallel worker")));
+	}
+
 	/* We do not expect an error if PrepareClientEncoding succeeded */
 	if (SetClientEncoding(encoding) < 0)
 		elog(LOG, "SetClientEncoding(%d) failed", encoding);
@@ -880,9 +901,9 @@ check_role(char **newval, void **extra, GucSource source)
 		ReleaseSysCache(roleTup);
 
 		/*
-		 * Verify that session user is allowed to become this role, but
-		 * skip this in parallel mode, where we must blindly recreate the
-		 * parallel leader's state.
+		 * Verify that session user is allowed to become this role, but skip
+		 * this in parallel mode, where we must blindly recreate the parallel
+		 * leader's state.
 		 */
 		if (!InitializingParallelWorker &&
 			!is_member_of_role(GetSessionUserId(), roleid))

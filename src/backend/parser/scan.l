@@ -21,7 +21,7 @@
  * Postgres 9.2, this check is made automatically by the Makefile.)
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -55,8 +55,7 @@ fprintf_to_ereport(const char *fmt, const char *msg)
  * GUC variables.  This is a DIRECT violation of the warning given at the
  * head of gram.y, ie flex/bison code must not depend on any GUC variables;
  * as such, changing their values can induce very unintuitive behavior.
- * But we shall have to live with it as a short-term thing until the switch
- * to SQL-standard string syntax is complete.
+ * But we shall have to live with it until we can remove these variables.
  */
 int			backslash_quote = BACKSLASH_QUOTE_SAFE_ENCODING;
 bool		escape_string_warning = true;
@@ -1434,6 +1433,13 @@ litbuf_udeescape(unsigned char escape, core_yyscan_t yyscanner)
 			}
 			*out++ = *in++;
 		}
+	}
+
+	/* unfinished surrogate pair? */
+	if (pair_first)
+	{
+		ADVANCE_YYLLOC(in - litbuf + 3);				/* 3 for U&" */
+		yyerror("invalid Unicode surrogate pair");
 	}
 
 	*out = '\0';

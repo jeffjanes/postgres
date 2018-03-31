@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -192,6 +192,7 @@ PerformAuthentication(Port *port)
 	 * FIXME: [fork/exec] Ugh.  Is there a way around this overhead?
 	 */
 #ifdef EXEC_BACKEND
+
 	/*
 	 * load_hba() and load_ident() want to work within the PostmasterContext,
 	 * so create that if it doesn't exist (which it won't).  We'll delete it
@@ -200,9 +201,7 @@ PerformAuthentication(Port *port)
 	if (PostmasterContext == NULL)
 		PostmasterContext = AllocSetContextCreate(TopMemoryContext,
 												  "Postmaster",
-												  ALLOCSET_DEFAULT_MINSIZE,
-												  ALLOCSET_DEFAULT_INITSIZE,
-												  ALLOCSET_DEFAULT_MAXSIZE);
+												  ALLOCSET_DEFAULT_SIZES);
 
 	if (!load_hba())
 	{
@@ -351,7 +350,7 @@ CheckMyDatabase(const char *name, bool am_superuser)
 		 */
 		if (dbform->datconnlimit >= 0 &&
 			!am_superuser &&
-			CountDBBackends(MyDatabaseId) > dbform->datconnlimit)
+			CountDBConnections(MyDatabaseId) > dbform->datconnlimit)
 			ereport(FATAL,
 					(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
 					 errmsg("too many connections for database \"%s\"",
@@ -870,9 +869,9 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	{
 		/*
 		 * If this is a background worker not bound to any particular
-		 * database, we're done now.  Everything that follows only makes
-		 * sense if we are bound to a specific database.  We do need to
-		 * close the transaction we started before returning.
+		 * database, we're done now.  Everything that follows only makes sense
+		 * if we are bound to a specific database.  We do need to close the
+		 * transaction we started before returning.
 		 */
 		if (!bootstrap)
 			CommitTransactionCommand();
@@ -1109,7 +1108,7 @@ process_settings(Oid databaseid, Oid roleid)
 
 	relsetting = heap_open(DbRoleSettingRelationId, AccessShareLock);
 
-	/* read all the settings under the same snapsot for efficiency */
+	/* read all the settings under the same snapshot for efficiency */
 	snapshot = RegisterSnapshot(GetCatalogSnapshot(DbRoleSettingRelationId));
 
 	/* Later settings are ignored if set earlier. */

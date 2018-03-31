@@ -1,7 +1,14 @@
-/*
- *	PostgreSQL type definitions for MAC addresses.
+/*-------------------------------------------------------------------------
  *
- *	src/backend/utils/adt/mac.c
+ * mac.c
+ *	  PostgreSQL type definitions for 6 byte, EUI-48, MAC addresses.
+ *
+ * Portions Copyright (c) 1998-2017, PostgreSQL Global Development Group
+ *
+ * IDENTIFICATION
+ *		  src/backend/utils/adt/mac.c
+ *
+ *-------------------------------------------------------------------------
  */
 
 #include "postgres.h"
@@ -65,7 +72,8 @@ macaddr_in(PG_FUNCTION_ARGS)
 	if (count != 6)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-			  errmsg("invalid input syntax for type macaddr: \"%s\"", str)));
+				 errmsg("invalid input syntax for type %s: \"%s\"", "macaddr",
+						str)));
 
 	if ((a < 0) || (a > 255) || (b < 0) || (b > 255) ||
 		(c < 0) || (c > 255) || (d < 0) || (d > 255) ||

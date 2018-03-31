@@ -10,6 +10,7 @@ SET client_min_messages TO 'warning';
 DROP USER IF EXISTS regress_rls_alice;
 DROP USER IF EXISTS regress_rls_bob;
 DROP USER IF EXISTS regress_rls_carol;
+DROP USER IF EXISTS regress_rls_dave;
 DROP USER IF EXISTS regress_rls_exempt_user;
 DROP ROLE IF EXISTS regress_rls_group1;
 DROP ROLE IF EXISTS regress_rls_group2;
@@ -22,6 +23,7 @@ RESET client_min_messages;
 CREATE USER regress_rls_alice NOLOGIN;
 CREATE USER regress_rls_bob NOLOGIN;
 CREATE USER regress_rls_carol NOLOGIN;
+CREATE USER regress_rls_dave NOLOGIN;
 CREATE USER regress_rls_exempt_user BYPASSRLS NOLOGIN;
 CREATE ROLE regress_rls_group1 NOLOGIN;
 CREATE ROLE regress_rls_group2 NOLOGIN;
@@ -80,13 +82,34 @@ INSERT INTO document VALUES
     ( 5, 44, 2, 'regress_rls_bob', 'my second manga'),
     ( 6, 22, 1, 'regress_rls_carol', 'great science fiction'),
     ( 7, 33, 2, 'regress_rls_carol', 'great technology book'),
-    ( 8, 44, 1, 'regress_rls_carol', 'great manga');
+    ( 8, 44, 1, 'regress_rls_carol', 'great manga'),
+    ( 9, 22, 1, 'regress_rls_dave', 'awesome science fiction'),
+    (10, 33, 2, 'regress_rls_dave', 'awesome technology book');
 
 ALTER TABLE document ENABLE ROW LEVEL SECURITY;
 
 -- user's security level must be higher than or equal to document's
-CREATE POLICY p1 ON document
+CREATE POLICY p1 ON document AS PERMISSIVE
     USING (dlevel <= (SELECT seclv FROM uaccount WHERE pguser = current_user));
+
+-- try to create a policy of bogus type
+CREATE POLICY p1 ON document AS UGLY
+    USING (dlevel <= (SELECT seclv FROM uaccount WHERE pguser = current_user));
+
+-- but Dave isn't allowed to anything at cid 50 or above
+-- this is to make sure that we sort the policies by name first
+-- when applying WITH CHECK, a later INSERT by Dave should fail due
+-- to p1r first
+CREATE POLICY p2r ON document AS RESTRICTIVE TO regress_rls_dave
+    USING (cid <> 44 AND cid < 50);
+
+-- and Dave isn't allowed to see manga documents
+CREATE POLICY p1r ON document AS RESTRICTIVE TO regress_rls_dave
+    USING (cid <> 44);
+
+\dp
+\d document
+SELECT * FROM pg_policies WHERE schemaname = 'regress_rls_schema' AND tablename = 'document' ORDER BY policyname;
 
 -- viewpoint from regress_rls_bob
 SET SESSION AUTHORIZATION regress_rls_bob;
@@ -109,6 +132,20 @@ SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
 
 EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
 EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
+
+-- viewpoint from regress_rls_dave
+SET SESSION AUTHORIZATION regress_rls_dave;
+SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
+SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle) ORDER BY did;
+
+EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
+EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
+
+-- 44 would technically fail for both p2r and p1r, but we should get an error
+-- back from p1r for this because it sorts first
+INSERT INTO document VALUES (100, 44, 1, 'regress_rls_dave', 'testing sorting of policies'); -- fail
+-- Just to see a p2r error
+INSERT INTO document VALUES (100, 55, 1, 'regress_rls_dave', 'testing sorting of policies'); -- fail
 
 -- only owner can change policies
 ALTER POLICY p1 ON document USING (true);    --fail
@@ -141,13 +178,13 @@ ALTER TABLE category ENABLE ROW LEVEL SECURITY;
 
 -- cannot delete PK referenced by invisible FK
 SET SESSION AUTHORIZATION regress_rls_bob;
-SELECT * FROM document d FULL OUTER JOIN category c on d.cid = c.cid;
+SELECT * FROM document d FULL OUTER JOIN category c on d.cid = c.cid ORDER BY d.did, c.cid;
 DELETE FROM category WHERE cid = 33;    -- fails with FK violation
 
 -- can insert FK referencing invisible PK
 SET SESSION AUTHORIZATION regress_rls_carol;
-SELECT * FROM document d FULL OUTER JOIN category c on d.cid = c.cid;
-INSERT INTO document VALUES (10, 33, 1, current_user, 'hoge');
+SELECT * FROM document d FULL OUTER JOIN category c on d.cid = c.cid ORDER BY d.did, c.cid;
+INSERT INTO document VALUES (11, 33, 1, current_user, 'hoge');
 
 -- UNIQUE or PRIMARY KEY constraint violation DOES reveal presence of row
 SET SESSION AUTHORIZATION regress_rls_bob;
@@ -200,10 +237,10 @@ ALTER TABLE t1 DROP COLUMN junk1;    -- just a disturbing factor
 GRANT ALL ON t1 TO public;
 
 COPY t1 FROM stdin WITH (oids);
-101	1	aaa
+101	1	aba
 102	2	bbb
 103	3	ccc
-104	4	ddd
+104	4	dad
 \.
 
 CREATE TABLE t2 (c float) INHERITS (t1);
@@ -517,6 +554,7 @@ SELECT * FROM b1;
 
 SET SESSION AUTHORIZATION regress_rls_alice;
 DROP POLICY p1 ON document;
+DROP POLICY p1r ON document;
 
 CREATE POLICY p1 ON document FOR SELECT USING (true);
 CREATE POLICY p2 ON document FOR INSERT WITH CHECK (dauthor = current_user);
@@ -635,10 +673,10 @@ GRANT SELECT ON z1,z2 TO regress_rls_group1, regress_rls_group2,
     regress_rls_bob, regress_rls_carol;
 
 INSERT INTO z1 VALUES
-    (1, 'aaa'),
+    (1, 'aba'),
     (2, 'bbb'),
     (3, 'ccc'),
-    (4, 'ddd');
+    (4, 'dad');
 
 CREATE POLICY p1 ON z1 TO regress_rls_group1 USING (a % 2 = 0);
 CREATE POLICY p2 ON z1 TO regress_rls_group2 USING (a % 2 = 1);
@@ -1577,6 +1615,7 @@ RESET client_min_messages;
 DROP USER regress_rls_alice;
 DROP USER regress_rls_bob;
 DROP USER regress_rls_carol;
+DROP USER regress_rls_dave;
 DROP USER regress_rls_exempt_user;
 DROP ROLE regress_rls_group1;
 DROP ROLE regress_rls_group2;

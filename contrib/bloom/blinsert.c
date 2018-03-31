@@ -3,7 +3,7 @@
  * blinsert.c
  *		Bloom index build and insert functions.
  *
- * Copyright (c) 2016, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/bloom/blinsert.c
@@ -18,6 +18,7 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/indexfsm.h"
+#include "storage/smgr.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -32,11 +33,11 @@ PG_MODULE_MAGIC;
 typedef struct
 {
 	BloomState	blstate;		/* bloom index state */
-	MemoryContext tmpCtx;		/* temporary memory context reset after
-								 * each tuple */
+	MemoryContext tmpCtx;		/* temporary memory context reset after each
+								 * tuple */
 	char		data[BLCKSZ];	/* cached page */
 	int64		count;			/* number of tuples in cached page */
-}	BloomBuildState;
+} BloomBuildState;
 
 /*
  * Flush page cached in BloomBuildState.
@@ -129,9 +130,7 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	initBloomState(&buildstate.blstate, index);
 	buildstate.tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
 											  "Bloom build temporary context",
-											  ALLOCSET_DEFAULT_MINSIZE,
-											  ALLOCSET_DEFAULT_INITSIZE,
-											  ALLOCSET_DEFAULT_MAXSIZE);
+											  ALLOCSET_DEFAULT_SIZES);
 	initCachedPage(&buildstate);
 
 	/* Do the heap scan */
@@ -139,8 +138,8 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 								   bloomBuildCallback, (void *) &buildstate);
 
 	/*
-	 * There are could be some items in cached page.  Flush this page
-	 * if needed.
+	 * There are could be some items in cached page.  Flush this page if
+	 * needed.
 	 */
 	if (buildstate.count > 0)
 		flushCachedPage(index, &buildstate);
@@ -159,12 +158,31 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 void
 blbuildempty(Relation index)
 {
-	if (RelationGetNumberOfBlocks(index) != 0)
-		elog(ERROR, "index \"%s\" already contains data",
-			 RelationGetRelationName(index));
+	Page		metapage;
 
-	/* Initialize the meta page */
-	BloomInitMetapage(index);
+	/* Construct metapage. */
+	metapage = (Page) palloc(BLCKSZ);
+	BloomFillMetapage(index, metapage);
+
+	/*
+	 * Write the page and log it.  It might seem that an immediate sync
+	 * would be sufficient to guarantee that the file exists on disk, but
+	 * recovery itself might remove it while replaying, for example, an
+	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we
+	 * need this even when wal_level=minimal.
+	 */
+	PageSetChecksumInplace(metapage, BLOOM_METAPAGE_BLKNO);
+	smgrwrite(index->rd_smgr, INIT_FORKNUM, BLOOM_METAPAGE_BLKNO,
+			  (char *) metapage, true);
+	log_newpage(&index->rd_smgr->smgr_rnode.node, INIT_FORKNUM,
+				BLOOM_METAPAGE_BLKNO, metapage, false);
+
+	/*
+	 * An immediate sync is required even if we xlog'd the page, because the
+	 * write did not go through shared_buffers and therefore a concurrent
+	 * checkpoint may have moved the redo pointer past our xlog record.
+	 */
+	smgrimmedsync(index->rd_smgr, INIT_FORKNUM);
 }
 
 /*
@@ -172,7 +190,9 @@ blbuildempty(Relation index)
  */
 bool
 blinsert(Relation index, Datum *values, bool *isnull,
-		 ItemPointer ht_ctid, Relation heapRel, IndexUniqueCheck checkUnique)
+		 ItemPointer ht_ctid, Relation heapRel,
+		 IndexUniqueCheck checkUnique,
+		 IndexInfo *indexInfo)
 {
 	BloomState	blstate;
 	BloomTuple *itup;
@@ -189,9 +209,7 @@ blinsert(Relation index, Datum *values, bool *isnull,
 
 	insertCtx = AllocSetContextCreate(CurrentMemoryContext,
 									  "Bloom insert temporary context",
-									  ALLOCSET_DEFAULT_MINSIZE,
-									  ALLOCSET_DEFAULT_INITSIZE,
-									  ALLOCSET_DEFAULT_MAXSIZE);
+									  ALLOCSET_DEFAULT_SIZES);
 
 	oldCtx = MemoryContextSwitchTo(insertCtx);
 
@@ -221,6 +239,13 @@ blinsert(Relation index, Datum *values, bool *isnull,
 
 		state = GenericXLogStart(index);
 		page = GenericXLogRegisterBuffer(state, buffer, 0);
+
+		/*
+		 * We might have found a page that was recently deleted by VACUUM.  If
+		 * so, we can reuse it, but we must reinitialize it.
+		 */
+		if (PageIsNew(page) || BloomPageIsDeleted(page))
+			BloomInitPage(page, 0);
 
 		if (BloomPageAddItem(&blstate, page, itup))
 		{
@@ -279,6 +304,10 @@ blinsert(Relation index, Datum *values, bool *isnull,
 		buffer = ReadBuffer(index, blkno);
 		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 		page = GenericXLogRegisterBuffer(state, buffer, 0);
+
+		/* Basically same logic as above */
+		if (PageIsNew(page) || BloomPageIsDeleted(page))
+			BloomInitPage(page, 0);
 
 		if (BloomPageAddItem(&blstate, page, itup))
 		{

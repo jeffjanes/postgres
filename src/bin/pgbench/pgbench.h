@@ -2,7 +2,7 @@
  *
  * pgbench.h
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *-------------------------------------------------------------------------
@@ -43,10 +43,10 @@ typedef struct
 	PgBenchValueType type;
 	union
 	{
-		int64 ival;
-		double dval;
+		int64		ival;
+		double		dval;
 		/* add other types here */
-	} u;
+	}			u;
 } PgBenchValue;
 
 /* Types of expression nodes */
@@ -87,7 +87,7 @@ struct PgBenchExpr
 	PgBenchExprType etype;
 	union
 	{
-		PgBenchValue	constant;
+		PgBenchValue constant;
 		struct
 		{
 			char	   *varname;

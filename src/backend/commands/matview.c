@@ -3,7 +3,7 @@
  * matview.c
  *	  materialized view support
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -30,6 +30,7 @@
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "parser/parse_relation.h"
+#include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/lmgr.h"
 #include "storage/smgr.h"
@@ -56,10 +57,10 @@ typedef struct
 static int	matview_maintenance_depth = 0;
 
 static void transientrel_startup(DestReceiver *self, int operation, TupleDesc typeinfo);
-static void transientrel_receive(TupleTableSlot *slot, DestReceiver *self);
+static bool transientrel_receive(TupleTableSlot *slot, DestReceiver *self);
 static void transientrel_shutdown(DestReceiver *self);
 static void transientrel_destroy(DestReceiver *self);
-static void refresh_matview_datafill(DestReceiver *dest, Query *query,
+static uint64 refresh_matview_datafill(DestReceiver *dest, Query *query,
 						 const char *queryString);
 
 static char *make_temptable_name_n(char *tempname, int n);
@@ -100,9 +101,7 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
 
 	((Form_pg_class) GETSTRUCT(tuple))->relispopulated = newstate;
 
-	simple_heap_update(pgrel, &tuple->t_self, tuple);
-
-	CatalogUpdateIndexes(pgrel, tuple);
+	CatalogTupleUpdate(pgrel, &tuple->t_self, tuple);
 
 	heap_freetuple(tuple);
 	heap_close(pgrel, RowExclusiveLock);
@@ -147,6 +146,7 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 	Oid			relowner;
 	Oid			OIDNewHeap;
 	DestReceiver *dest;
+	uint64		processed = 0;
 	bool		concurrent;
 	LOCKMODE	lockmode;
 	char		relpersistence;
@@ -217,21 +217,20 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 			 RelationGetRelationName(matviewRel));
 
 	/*
-	 * Check that there is a unique index with no WHERE clause on
-	 * one or more columns of the materialized view if CONCURRENTLY
-	 * is specified.
+	 * Check that there is a unique index with no WHERE clause on one or more
+	 * columns of the materialized view if CONCURRENTLY is specified.
 	 */
 	if (concurrent)
 	{
-		List		*indexoidlist = RelationGetIndexList(matviewRel);
-		ListCell 	*indexoidscan;
+		List	   *indexoidlist = RelationGetIndexList(matviewRel);
+		ListCell   *indexoidscan;
 		bool		hasUniqueIndex = false;
 
 		foreach(indexoidscan, indexoidlist)
 		{
 			Oid			indexoid = lfirst_oid(indexoidscan);
 			Relation	indexRel;
-			Form_pg_index	indexStruct;
+			Form_pg_index indexStruct;
 
 			indexRel = index_open(indexoid, AccessShareLock);
 			indexStruct = indexRel->rd_index;
@@ -255,9 +254,9 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 		if (!hasUniqueIndex)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("cannot refresh materialized view \"%s\" concurrently",
-							quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
-													   RelationGetRelationName(matviewRel))),
+			   errmsg("cannot refresh materialized view \"%s\" concurrently",
+					  quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),
+									   RelationGetRelationName(matviewRel))),
 					 errhint("Create a unique index with no WHERE clause on one or more columns of the materialized view.")));
 	}
 
@@ -265,8 +264,7 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 	 * The stored query was rewritten at the time of the MV definition, but
 	 * has not been scribbled on by the planner.
 	 */
-	dataQuery = (Query *) linitial(actions);
-	Assert(IsA(dataQuery, Query));
+	dataQuery = castNode(Query, linitial(actions));
 
 	/*
 	 * Check for active uses of the relation in the current transaction, such
@@ -326,9 +324,7 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 
 	/* Generate the data, if wanted. */
 	if (!stmt->skipData)
-		refresh_matview_datafill(dest, dataQuery, queryString);
-
-	heap_close(matviewRel, NoLock);
+		processed = refresh_matview_datafill(dest, dataQuery, queryString);
 
 	/* Make the matview match the newly generated data. */
 	if (concurrent)
@@ -349,7 +345,21 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 		Assert(matview_maintenance_depth == old_depth);
 	}
 	else
+	{
 		refresh_by_heap_swap(matviewOid, OIDNewHeap, relpersistence);
+
+		/*
+		 * Inform stats collector about our activity: basically, we truncated
+		 * the matview and inserted some new data.  (The concurrent code path
+		 * above doesn't need to worry about this because the inserts and
+		 * deletes it issues get counted by lower-level code.)
+		 */
+		pgstat_count_truncate(matviewRel);
+		if (!stmt->skipData)
+			pgstat_count_heap_insert(matviewRel, processed);
+	}
+
+	heap_close(matviewRel, NoLock);
 
 	/* Roll back any GUC changes */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -364,8 +374,13 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 
 /*
  * refresh_matview_datafill
+ *
+ * Execute the given query, sending result rows to "dest" (which will
+ * insert them into the target matview).
+ *
+ * Returns number of rows inserted.
  */
-static void
+static uint64
 refresh_matview_datafill(DestReceiver *dest, Query *query,
 						 const char *queryString)
 {
@@ -373,6 +388,7 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 	PlannedStmt *plan;
 	QueryDesc  *queryDesc;
 	Query	   *copied_query;
+	uint64		processed;
 
 	/* Lock and rewrite, using a copy to preserve the original query. */
 	copied_query = copyObject(query);
@@ -408,7 +424,9 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 	ExecutorStart(queryDesc, EXEC_FLAG_WITHOUT_OIDS);
 
 	/* run the plan */
-	ExecutorRun(queryDesc, ForwardScanDirection, 0L);
+	ExecutorRun(queryDesc, ForwardScanDirection, 0L, true);
+
+	processed = queryDesc->estate->es_processed;
 
 	/* and clean up */
 	ExecutorFinish(queryDesc);
@@ -417,6 +435,8 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 	FreeQueryDesc(queryDesc);
 
 	PopActiveSnapshot();
+
+	return processed;
 }
 
 DestReceiver *
@@ -467,7 +487,7 @@ transientrel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 /*
  * transientrel_receive --- receive one tuple
  */
-static void
+static bool
 transientrel_receive(TupleTableSlot *slot, DestReceiver *self)
 {
 	DR_transientrel *myState = (DR_transientrel *) self;
@@ -486,6 +506,8 @@ transientrel_receive(TupleTableSlot *slot, DestReceiver *self)
 				myState->bistate);
 
 	/* We know this is a newly created relation, so there are no indexes */
+
+	return true;
 }
 
 /*
@@ -743,8 +765,8 @@ refresh_by_match_merge(Oid matviewOid, Oid tempOid, Oid relowner,
 	/*
 	 * There must be at least one unique index on the matview.
 	 *
-	 * ExecRefreshMatView() checks that after taking the exclusive lock on
-	 * the matview. So at least one unique index is guaranteed to exist here
+	 * ExecRefreshMatView() checks that after taking the exclusive lock on the
+	 * matview. So at least one unique index is guaranteed to exist here
 	 * because the lock is still being held.
 	 */
 	Assert(foundUniqueIndex);

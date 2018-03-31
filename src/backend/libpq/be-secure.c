@@ -6,7 +6,7 @@
  *	  message integrity and endpoint authentication.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,6 +33,7 @@
 
 #include "libpq/libpq.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "storage/ipc.h"
@@ -62,16 +63,31 @@ bool		SSLPreferServerCiphers;
 /* ------------------------------------------------------------ */
 
 /*
- *	Initialize global context
+ *	Initialize global context.
+ *
+ * If isServerStart is true, report any errors as FATAL (so we don't return).
+ * Otherwise, log errors at LOG level and return -1 to indicate trouble,
+ * preserving the old SSL state if any.  Returns 0 if OK.
  */
 int
-secure_initialize(void)
+secure_initialize(bool isServerStart)
 {
 #ifdef USE_SSL
-	be_tls_init();
-#endif
-
+	return be_tls_init(isServerStart);
+#else
 	return 0;
+#endif
+}
+
+/*
+ *	Destroy global context, if any.
+ */
+void
+secure_destroy(void)
+{
+#ifdef USE_SSL
+	be_tls_destroy();
+#endif
 }
 
 /*
@@ -140,26 +156,27 @@ retry:
 	/* In blocking mode, wait until the socket is ready */
 	if (n < 0 && !port->noblock && (errno == EWOULDBLOCK || errno == EAGAIN))
 	{
-		WaitEvent   event;
+		WaitEvent	event;
 
 		Assert(waitfor);
 
 		ModifyWaitEvent(FeBeWaitSet, 0, waitfor, NULL);
 
-		WaitEventSetWait(FeBeWaitSet, -1 /* no timeout */, &event, 1);
+		WaitEventSetWait(FeBeWaitSet, -1 /* no timeout */ , &event, 1,
+						 WAIT_EVENT_CLIENT_READ);
 
 		/*
 		 * If the postmaster has died, it's not safe to continue running,
 		 * because it is the postmaster's job to kill us if some other backend
 		 * exists uncleanly.  Moreover, we won't run very well in this state;
 		 * helper processes like walwriter and the bgwriter will exit, so
-		 * performance may be poor.  Finally, if we don't exit, pg_ctl will
-		 * be unable to restart the postmaster without manual intervention,
-		 * so no new connections can be accepted.  Exiting clears the deck
-		 * for a postmaster restart.
+		 * performance may be poor.  Finally, if we don't exit, pg_ctl will be
+		 * unable to restart the postmaster without manual intervention, so no
+		 * new connections can be accepted.  Exiting clears the deck for a
+		 * postmaster restart.
 		 *
-		 * (Note that we only make this check when we would otherwise sleep
-		 * on our latch.  We might still continue running for a while if the
+		 * (Note that we only make this check when we would otherwise sleep on
+		 * our latch.  We might still continue running for a while if the
 		 * postmaster is killed in mid-query, or even through multiple queries
 		 * if we never have to wait for read.  We don't want to burn too many
 		 * cycles checking for this very rare condition, and this should cause
@@ -168,7 +185,7 @@ retry:
 		if (event.events & WL_POSTMASTER_DEATH)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
-					errmsg("terminating connection due to unexpected postmaster exit")));
+					 errmsg("terminating connection due to unexpected postmaster exit")));
 
 		/* Handle interrupt. */
 		if (event.events & WL_LATCH_SET)
@@ -241,19 +258,20 @@ retry:
 
 	if (n < 0 && !port->noblock && (errno == EWOULDBLOCK || errno == EAGAIN))
 	{
-		WaitEvent   event;
+		WaitEvent	event;
 
 		Assert(waitfor);
 
 		ModifyWaitEvent(FeBeWaitSet, 0, waitfor, NULL);
 
-		WaitEventSetWait(FeBeWaitSet, -1 /* no timeout */, &event, 1);
+		WaitEventSetWait(FeBeWaitSet, -1 /* no timeout */ , &event, 1,
+						 WAIT_EVENT_CLIENT_WRITE);
 
 		/* See comments in secure_read. */
 		if (event.events & WL_POSTMASTER_DEATH)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
-					errmsg("terminating connection due to unexpected postmaster exit")));
+					 errmsg("terminating connection due to unexpected postmaster exit")));
 
 		/* Handle interrupt. */
 		if (event.events & WL_LATCH_SET)

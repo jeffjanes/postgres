@@ -27,6 +27,8 @@
 
 #include "postgres.h"
 
+#include "pageinspect.h"
+
 #include "access/nbtree.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
@@ -34,6 +36,7 @@
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "utils/varlena.h"
 
 
 PG_FUNCTION_INFO_V1(bt_metap);
@@ -156,7 +159,7 @@ GetBTPageStatistics(BlockNumber blkno, Buffer buffer, BTPageStat *stat)
 Datum
 bt_page_stats(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	uint32		blkno = PG_GETARG_UINT32(1);
 	Buffer		buffer;
 	Relation	rel;
@@ -253,7 +256,7 @@ struct user_args
 Datum
 bt_page_items(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	uint32		blkno = PG_GETARG_UINT32(1);
 	Datum		result;
 	char	   *values[6];
@@ -405,7 +408,7 @@ bt_page_items(PG_FUNCTION_ARGS)
 Datum
 bt_metap(PG_FUNCTION_ARGS)
 {
-	text	   *relname = PG_GETARG_TEXT_P(0);
+	text	   *relname = PG_GETARG_TEXT_PP(0);
 	Datum		result;
 	Relation	rel;
 	RangeVar   *relrv;

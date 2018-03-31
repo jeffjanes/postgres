@@ -99,11 +99,12 @@ typedef struct _restoreOptions
 	SimpleStringList indexNames;
 	SimpleStringList functionNames;
 	SimpleStringList schemaNames;
+	SimpleStringList schemaExcludeNames;
 	SimpleStringList triggerNames;
 	SimpleStringList tableNames;
 
 	int			useDB;
-	char	   *dbname;
+	char	   *dbname;			/* subject to expand_dbname */
 	char	   *pgport;
 	char	   *pghost;
 	char	   *username;
@@ -117,11 +118,14 @@ typedef struct _restoreOptions
 
 	bool	   *idWanted;		/* array showing which dump IDs to emit */
 	int			enable_row_security;
+	int			sequence_data;	/* dump sequence data even in schema-only mode */
+	int			include_subscriptions;
+	int			binary_upgrade;
 } RestoreOptions;
 
 typedef struct _dumpOptions
 {
-	const char *dbname;
+	const char *dbname;			/* subject to expand_dbname */
 	const char *pghost;
 	const char *pgport;
 	const char *username;
@@ -150,6 +154,8 @@ typedef struct _dumpOptions
 	int			outputNoTablespaces;
 	int			use_setsessauth;
 	int			enable_row_security;
+	int			include_subscriptions;
+	int			no_subscription_connect;
 
 	/* default, if no "inclusion" switches appear, is to dump everything */
 	bool		include_everything;
@@ -157,8 +163,11 @@ typedef struct _dumpOptions
 	int			outputClean;
 	int			outputCreateDB;
 	bool		outputBlobs;
+	bool		dontOutputBlobs;
 	int			outputNoOwner;
 	char	   *outputSuperuser;
+
+	int			sequence_data;	/* dump sequence data even in schema-only mode */
 } DumpOptions;
 
 /*
@@ -173,6 +182,7 @@ typedef struct Archive
 	int			verbose;
 	char	   *remoteVersionStr;		/* server's version string */
 	int			remoteVersion;	/* same in numeric form */
+	bool		isStandby;		/* is server a standby node */
 
 	int			minRemoteVersion;		/* allowable range */
 	int			maxRemoteVersion;
@@ -266,7 +276,7 @@ extern Archive *OpenArchive(const char *FileSpec, const ArchiveFormat fmt);
 
 /* Create a new archive */
 extern Archive *CreateArchive(const char *FileSpec, const ArchiveFormat fmt,
-			  const int compression, ArchiveMode mode,
+			  const int compression, bool dosync, ArchiveMode mode,
 			  SetupWorkerPtr setupDumpWorker);
 
 /* The --list option */

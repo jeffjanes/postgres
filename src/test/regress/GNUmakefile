@@ -3,7 +3,7 @@
 # GNUmakefile--
 #    Makefile for src/test/regress (the regression tests)
 #
-# Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 # src/test/regress/GNUmakefile
@@ -65,6 +65,8 @@ include $(top_srcdir)/src/Makefile.shlib
 
 all: all-lib
 
+$(OBJS): | submake-generated-headers
+
 # Test input and expected files.  These are created by pg_regress itself, so we
 # don't have a rule to create them.  We do need rules to clean them however.
 input_files = $(patsubst $(srcdir)/input/%.source,sql/%.sql, $(wildcard $(srcdir)/input/*.source))
@@ -105,7 +107,7 @@ $(top_builddir)/contrib/spi/refint$(DLSUFFIX): | submake-contrib-spi ;
 
 $(top_builddir)/contrib/spi/autoinc$(DLSUFFIX): | submake-contrib-spi ;
 
-submake-contrib-spi:
+submake-contrib-spi: | submake-libpgport submake-generated-headers
 	$(MAKE) -C $(top_builddir)/contrib/spi
 
 .PHONY: submake-contrib-spi
@@ -123,6 +125,9 @@ tablespace-setup:
 ##
 
 REGRESS_OPTS = --dlpath=. $(EXTRA_REGRESS_OPTS)
+ifeq ($(with_icu),yes)
+override EXTRA_TESTS := collate.icu $(EXTRA_TESTS)
+endif
 
 check: all tablespace-setup
 	$(pg_regress_check) $(REGRESS_OPTS) --schedule=$(srcdir)/parallel_schedule $(MAXCONNOPT) $(EXTRA_TESTS)

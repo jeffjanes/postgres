@@ -4,7 +4,7 @@
  *	  prototypes for planner.c.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/planner.h
@@ -46,6 +46,8 @@ extern bool is_dummy_plan(Plan *plan);
 extern RowMarkType select_rowmark_type(RangeTblEntry *rte,
 					LockClauseStrength strength);
 
+extern void mark_partial_aggref(Aggref *agg, AggSplit aggsplit);
+
 extern Path *get_cheapest_fractional_path(RelOptInfo *rel,
 							 double tuple_fraction);
 
@@ -54,5 +56,7 @@ extern Expr *expression_planner(Expr *expr);
 extern Expr *preprocess_phv_expression(PlannerInfo *root, Expr *expr);
 
 extern bool plan_cluster_use_sort(Oid tableOid, Oid indexOid);
+
+extern List *get_partitioned_child_rels(PlannerInfo *root, Index rti);
 
 #endif   /* PLANNER_H */

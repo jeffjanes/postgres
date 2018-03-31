@@ -4,7 +4,7 @@
  *	  Definitions for planner's internal data structures.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/relation.h
@@ -50,12 +50,15 @@ typedef struct QualCost
  * Costing aggregate function execution requires these statistics about
  * the aggregates to be executed by a given Agg node.  Note that the costs
  * include the execution costs of the aggregates' argument expressions as
- * well as the aggregate functions themselves.
+ * well as the aggregate functions themselves.  Also, the fields must be
+ * defined so that initializing the struct to zeroes with memset is correct.
  */
 typedef struct AggClauseCosts
 {
 	int			numAggs;		/* total number of aggregate functions */
 	int			numOrderedAggs; /* number w/ DISTINCT/ORDER BY/WITHIN GROUP */
+	bool		hasNonPartial;	/* does any agg not support partial mode? */
+	bool		hasNonSerial;	/* is any partial agg non-serializable? */
 	QualCost	transCost;		/* total per-input-row execution costs */
 	Cost		finalCost;		/* total per-aggregated-row costs */
 	Size		transitionSpace;	/* space for pass-by-ref transition data */
@@ -104,6 +107,8 @@ typedef struct PlannerGlobal
 
 	List	   *resultRelations;	/* "flat" list of integer RT indexes */
 
+	List   *nonleafResultRelations; /* "flat" list of integer RT indexes */
+
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
 
 	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
@@ -118,15 +123,13 @@ typedef struct PlannerGlobal
 
 	bool		transientPlan;	/* redo plan when TransactionXmin changes? */
 
-	bool		hasRowSecurity; /* row security applied? */
+	bool		dependsOnRole;	/* is plan specific to current role? */
 
 	bool		parallelModeOK; /* parallel mode potentially OK? */
 
 	bool		parallelModeNeeded;		/* parallel mode actually required? */
 
-	bool		wholePlanParallelSafe;	/* is the entire plan parallel safe? */
-
-	bool		hasForeignJoin; /* does have a pushed down foreign join */
+	char		maxParallelHazard;		/* worst PROPARALLEL hazard level */
 } PlannerGlobal;
 
 /* macro for fetching the Plan associated with a SubPlan node */
@@ -247,9 +250,13 @@ typedef struct PlannerInfo
 
 	List	   *append_rel_list;	/* list of AppendRelInfos */
 
+	List	   *pcinfo_list;	/* list of PartitionedChildRelInfos */
+
 	List	   *rowMarks;		/* list of PlanRowMarks */
 
 	List	   *placeholder_list;		/* list of PlaceHolderInfos */
+
+	List	   *fkey_list;		/* list of ForeignKeyOptInfos */
 
 	List	   *query_pathkeys; /* desired pathkeys for query_planner() */
 
@@ -282,6 +289,9 @@ typedef struct PlannerInfo
 
 	double		tuple_fraction; /* tuple_fraction passed to query_planner */
 	double		limit_tuples;	/* limit_tuples passed to query_planner */
+
+	Index		qual_security_level;	/* minimum security_level for quals */
+	/* Note: qual_security_level is zero if there are no securityQuals */
 
 	bool		hasInheritedTarget;		/* true if parse->resultRelation is an
 										 * inheritance child rel */
@@ -423,11 +433,12 @@ typedef struct PlannerInfo
  *		in just as for a baserel, except we don't bother with lateral_vars.
  *
  * If the relation is either a foreign table or a join of foreign tables that
- * all belong to the same foreign server and use the same user mapping, these
- * fields will be set:
+ * all belong to the same foreign server and are assigned to the same user to
+ * check access permissions as (cf checkAsUser), these fields will be set:
  *
  *		serverid - OID of foreign server, if foreign table (else InvalidOid)
- *		umid - OID of user mapping, if foreign table (else InvalidOid)
+ *		userid - OID of user to check access as (InvalidOid means current user)
+ *		useridiscurrent - we've assumed that userid equals current user
  *		fdwroutine - function hooks for FDW, if foreign table (else NULL)
  *		fdw_private - private state for FDW, if foreign table (else NULL)
  *
@@ -439,6 +450,8 @@ typedef struct PlannerInfo
  *					participates (only used for base rels)
  *		baserestrictcost - Estimated cost of evaluating the baserestrictinfo
  *					clauses at a single tuple (only used for base rels)
+ *		baserestrict_min_security - Smallest security_level found among
+ *					clauses in baserestrictinfo
  *		joininfo  - List of RestrictInfo nodes, containing info about each
  *					join clause in which this relation participates (but
  *					note this excludes clauses that might be derivable from
@@ -516,18 +529,17 @@ typedef struct RelOptInfo
 	List	   *lateral_vars;	/* LATERAL Vars and PHVs referenced by rel */
 	Relids		lateral_referencers;	/* rels that reference me laterally */
 	List	   *indexlist;		/* list of IndexOptInfo */
-	List	   *fkeylist;			/* list of ForeignKeyOptInfo */
 	BlockNumber pages;			/* size estimates derived from pg_class */
 	double		tuples;
 	double		allvisfrac;
 	PlannerInfo *subroot;		/* if subquery */
 	List	   *subplan_params; /* if subquery */
-	int			rel_parallel_degree;	/* wanted number of parallel workers */
+	int			rel_parallel_workers;	/* wanted number of parallel workers */
 
 	/* Information about foreign tables and foreign joins */
 	Oid			serverid;		/* identifies server for the table or join */
-	Oid			umid;			/* identifies user mapping for the table or
-								 * join */
+	Oid			userid;			/* identifies user to check access as */
+	bool		useridiscurrent;	/* join is only valid for current user */
 	/* use "struct FdwRoutine" to avoid including fdwapi.h here */
 	struct FdwRoutine *fdwroutine;
 	void	   *fdw_private;
@@ -536,6 +548,8 @@ typedef struct RelOptInfo
 	List	   *baserestrictinfo;		/* RestrictInfo structures (if base
 										 * rel) */
 	QualCost	baserestrictcost;		/* cost of evaluating the above */
+	Index		baserestrict_min_security;		/* min security_level found in
+												 * baserestrictinfo */
 	List	   *joininfo;		/* RestrictInfo structures for join clauses
 								 * involving this rel */
 	bool		has_eclass_joins;		/* T means joininfo is incomplete */
@@ -619,6 +633,7 @@ typedef struct IndexOptInfo
 	bool		amsearchnulls;	/* can AM search for NULL/NOT NULL entries? */
 	bool		amhasgettuple;	/* does AM have amgettuple interface? */
 	bool		amhasgetbitmap; /* does AM have amgetbitmap interface? */
+	bool		amcanparallel;	/* does AM support parallel scan? */
 	/* Rather than include amapi.h here, we declare amcostestimate like this */
 	void		(*amcostestimate) ();	/* AM's cost estimator */
 } IndexOptInfo;
@@ -627,23 +642,32 @@ typedef struct IndexOptInfo
  * ForeignKeyOptInfo
  *		Per-foreign-key information for planning/optimization
  *
- * Only includes columns from pg_constraint related to foreign keys.
- *
- * conkeys[], confkeys[] and conpfeqop[] each have nkeys entries.
+ * The per-FK-column arrays can be fixed-size because we allow at most
+ * INDEX_MAX_KEYS columns in a foreign key constraint.  Each array has
+ * nkeys valid entries.
  */
 typedef struct ForeignKeyOptInfo
 {
 	NodeTag		type;
 
-	Oid			conrelid;	/* relation constrained by the foreign key */
-	Oid			confrelid;	/* relation referenced by the foreign key */
+	/* Basic data about the foreign key (fetched from catalogs): */
+	Index		con_relid;		/* RT index of the referencing table */
+	Index		ref_relid;		/* RT index of the referenced table */
+	int			nkeys;			/* number of columns in the foreign key */
+	AttrNumber	conkey[INDEX_MAX_KEYS]; /* cols in referencing table */
+	AttrNumber	confkey[INDEX_MAX_KEYS];		/* cols in referenced table */
+	Oid			conpfeqop[INDEX_MAX_KEYS];		/* PK = FK operator OIDs */
 
-	int			nkeys;		/* number of columns in the foreign key */
-	int		   *conkeys;	/* attnums of columns in the constrained table */
-	int		   *confkeys;	/* attnums of columns in the referenced table */
-	Oid		   *conpfeqop;	/* OIDs of equality operators used by the FK */
-
+	/* Derived info about whether FK's equality conditions match the query: */
+	int			nmatched_ec;	/* # of FK cols matched by ECs */
+	int			nmatched_rcols; /* # of FK cols matched by non-EC rinfos */
+	int			nmatched_ri;	/* total # of non-EC rinfos matched to FK */
+	/* Pointer to eclass matching each column's condition, if there is one */
+	struct EquivalenceClass *eclass[INDEX_MAX_KEYS];
+	/* List of non-EC RestrictInfos matching each column's condition */
+	List	   *rinfos[INDEX_MAX_KEYS];
 } ForeignKeyOptInfo;
+
 
 /*
  * EquivalenceClasses
@@ -701,6 +725,8 @@ typedef struct EquivalenceClass
 	bool		ec_below_outer_join;	/* equivalence applies below an OJ */
 	bool		ec_broken;		/* failed to generate needed clauses? */
 	Index		ec_sortref;		/* originating sortclause label, or 0 */
+	Index		ec_min_security;	/* minimum security_level in ec_sources */
+	Index		ec_max_security;	/* maximum security_level in ec_sources */
 	struct EquivalenceClass *ec_merged; /* set if merged into another EC */
 } EquivalenceClass;
 
@@ -805,6 +831,10 @@ typedef struct PathTarget
 	int			width;			/* estimated avg width of result tuples */
 } PathTarget;
 
+/* Convenience macro to get a sort/group refno from a PathTarget */
+#define get_pathtarget_sortgroupref(target, colno) \
+	((target)->sortgrouprefs ? (target)->sortgrouprefs[colno] : (Index) 0)
+
 
 /*
  * ParamPathInfo
@@ -872,7 +902,8 @@ typedef struct Path
 
 	bool		parallel_aware; /* engage parallel-aware logic? */
 	bool		parallel_safe;	/* OK to use as part of parallel plan? */
-	int			parallel_degree;	/* desired parallel degree; 0 = not parallel */
+	int			parallel_workers;		/* desired # of workers; 0 = not
+										 * parallel */
 
 	/* estimated size/costs for path (see costsize.c for more info) */
 	double		rows;			/* estimated number of result tuples */
@@ -1070,7 +1101,8 @@ struct CustomPathMethods;
 typedef struct CustomPath
 {
 	Path		path;
-	uint32		flags;			/* mask of CUSTOMPATH_* flags, see above */
+	uint32		flags;			/* mask of CUSTOMPATH_* flags, see
+								 * nodes/extensible.h */
 	List	   *custom_paths;	/* list of child Path nodes, if any */
 	List	   *custom_private;
 	const struct CustomPathMethods *methods;
@@ -1088,6 +1120,8 @@ typedef struct CustomPath
 typedef struct AppendPath
 {
 	Path		path;
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *subpaths;		/* list of component Paths */
 } AppendPath;
 
@@ -1106,6 +1140,8 @@ typedef struct AppendPath
 typedef struct MergeAppendPath
 {
 	Path		path;
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *subpaths;		/* list of component Paths */
 	double		limit_tuples;	/* hard limit on output tuples, or -1 */
 } MergeAppendPath;
@@ -1172,8 +1208,21 @@ typedef struct GatherPath
 {
 	Path		path;
 	Path	   *subpath;		/* path for each worker */
-	bool		single_copy;	/* path must not be executed >1x */
+	bool		single_copy;	/* don't execute path more than once */
 } GatherPath;
+
+/*
+ * GatherMergePath runs several copies of a plan in parallel and
+ * collects the results. For gather merge parallel leader always execute the
+ * plan.
+ */
+typedef struct GatherMergePath
+{
+	Path		path;
+	Path	   *subpath;		/* path for each worker */
+	int			num_workers;	/* number of workers sought to help */
+} GatherMergePath;
+
 
 /*
  * All join-type paths share these fields.
@@ -1259,16 +1308,34 @@ typedef struct HashPath
 /*
  * ProjectionPath represents a projection (that is, targetlist computation)
  *
- * This path node represents using a Result plan node to do a projection.
- * It's only needed atop a node that doesn't support projection (such as
- * Sort); otherwise we just jam the new desired PathTarget into the lower
- * path node, and adjust that node's estimated cost accordingly.
+ * Nominally, this path node represents using a Result plan node to do a
+ * projection step.  However, if the input plan node supports projection,
+ * we can just modify its output targetlist to do the required calculations
+ * directly, and not need a Result.  In some places in the planner we can just
+ * jam the desired PathTarget into the input path node (and adjust its cost
+ * accordingly), so we don't need a ProjectionPath.  But in other places
+ * it's necessary to not modify the input path node, so we need a separate
+ * ProjectionPath node, which is marked dummy to indicate that we intend to
+ * assign the work to the input plan node.  The estimated cost for the
+ * ProjectionPath node will account for whether a Result will be used or not.
  */
 typedef struct ProjectionPath
 {
 	Path		path;
 	Path	   *subpath;		/* path representing input source */
+	bool		dummypp;		/* true if no separate Result is needed */
 } ProjectionPath;
+
+/*
+ * ProjectSetPath represents evaluation of a targetlist that includes
+ * set-returning function(s), which will need to be implemented by a
+ * ProjectSet plan node.
+ */
+typedef struct ProjectSetPath
+{
+	Path		path;
+	Path	   *subpath;		/* path representing input source */
+} ProjectSetPath;
 
 /*
  * SortPath represents an explicit sort step
@@ -1325,12 +1392,10 @@ typedef struct AggPath
 	Path		path;
 	Path	   *subpath;		/* path representing input source */
 	AggStrategy aggstrategy;	/* basic strategy, see nodes.h */
+	AggSplit	aggsplit;		/* agg-splitting mode, see nodes.h */
 	double		numGroups;		/* estimated number of groups in input */
 	List	   *groupClause;	/* a list of SortGroupClause's */
 	List	   *qual;			/* quals (HAVING quals), if any */
-	bool		combineStates;	/* input is partially aggregated agg states */
-	bool		finalizeAggs;	/* should the executor call the finalfn? */
-	bool		serialStates;	/* should agg states be (de)serialized? */
 } AggPath;
 
 /*
@@ -1425,6 +1490,8 @@ typedef struct ModifyTablePath
 	CmdType		operation;		/* INSERT, UPDATE, or DELETE */
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
 	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *resultRelations;	/* integer list of RT indexes */
 	List	   *subpaths;		/* Path(s) producing source data */
 	List	   *subroots;		/* per-target-table PlannerInfos */
@@ -1537,6 +1604,15 @@ typedef struct LimitPath
  * outer join(s). A clause that is not outerjoin_delayed can be enforced
  * anywhere it is computable.
  *
+ * To handle security-barrier conditions efficiently, we mark RestrictInfo
+ * nodes with a security_level field, in which higher values identify clauses
+ * coming from less-trusted sources.  The exact semantics are that a clause
+ * cannot be evaluated before another clause with a lower security_level value
+ * unless the first clause is leakproof.  As with outer-join clauses, this
+ * creates a reason for clauses to sometimes need to be evaluated higher in
+ * the join tree than their contents would suggest; and even at a single plan
+ * node, this rule constrains the order of application of clauses.
+ *
  * In general, the referenced clause might be arbitrarily complex.  The
  * kinds of clauses we can handle as indexscan quals, mergejoin clauses,
  * or hashjoin clauses are limited (e.g., no volatile functions).  The code
@@ -1590,6 +1666,10 @@ typedef struct RestrictInfo
 	bool		can_join;		/* see comment above */
 
 	bool		pseudoconstant; /* see comment above */
+
+	bool		leakproof;		/* TRUE if known to contain no leaked Vars */
+
+	Index		security_level; /* see comment above */
 
 	/* The set of relids (varnos) actually referenced in the clause: */
 	Relids		clause_relids;
@@ -1766,10 +1846,10 @@ typedef struct SpecialJoinInfo
  *
  * When we expand an inheritable table or a UNION-ALL subselect into an
  * "append relation" (essentially, a list of child RTEs), we build an
- * AppendRelInfo for each child RTE.  The list of AppendRelInfos indicates
- * which child RTEs must be included when expanding the parent, and each
- * node carries information needed to translate Vars referencing the parent
- * into Vars referencing that child.
+ * AppendRelInfo for each non-partitioned child RTE.  The list of
+ * AppendRelInfos indicates which child RTEs must be included when expanding
+ * the parent, and each node carries information needed to translate Vars
+ * referencing the parent into Vars referencing that child.
  *
  * These structs are kept in the PlannerInfo node's append_rel_list.
  * Note that we just throw all the structs into one list, and scan the
@@ -1842,6 +1922,25 @@ typedef struct AppendRelInfo
 	 */
 	Oid			parent_reloid;	/* OID of parent relation */
 } AppendRelInfo;
+
+/*
+ * For a partitioned table, this maps its RT index to the list of RT indexes
+ * of the partitioned child tables in the partition tree.  We need to
+ * separately store this information, because we do not create AppendRelInfos
+ * for the partitioned child tables of a parent table, since AppendRelInfos
+ * contain information that is unnecessary for the partitioned child tables.
+ * The child_rels list must contain at least one element, because the parent
+ * partitioned table is itself counted as a child.
+ *
+ * These structs are kept in the PlannerInfo node's pcinfo_list.
+ */
+typedef struct PartitionedChildRelInfo
+{
+	NodeTag		type;
+
+	Index		parent_relid;
+	List	   *child_rels;
+} PartitionedChildRelInfo;
 
 /*
  * For each distinct placeholder expression generated during planning, we

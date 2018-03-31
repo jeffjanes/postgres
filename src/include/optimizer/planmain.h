@@ -4,7 +4,7 @@
  *	  prototypes for various files in optimizer/plan
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/planmain.h
@@ -58,8 +58,8 @@ extern bool is_projection_capable_plan(Plan *plan);
 
 /* External use of these functions is deprecated: */
 extern Sort *make_sort_from_sortclauses(List *sortcls, Plan *lefttree);
-extern Agg *make_agg(List *tlist, List *qual, AggStrategy aggstrategy,
-		 bool combineStates, bool finalizeAggs, bool serialStates,
+extern Agg *make_agg(List *tlist, List *qual,
+		 AggStrategy aggstrategy, AggSplit aggsplit,
 		 int numGroupCols, AttrNumber *grpColIdx, Oid *grpOperators,
 		 List *groupingSets, List *chain,
 		 double dNumGroups, Plan *lefttree);
@@ -87,6 +87,7 @@ extern void process_implied_equality(PlannerInfo *root,
 						 Expr *item2,
 						 Relids qualscope,
 						 Relids nullable_relids,
+						 Index security_level,
 						 bool below_outer_join,
 						 bool both_const);
 extern RestrictInfo *build_implied_join_equality(Oid opno,
@@ -94,7 +95,9 @@ extern RestrictInfo *build_implied_join_equality(Oid opno,
 							Expr *item1,
 							Expr *item2,
 							Relids qualscope,
-							Relids nullable_relids);
+							Relids nullable_relids,
+							Index security_level);
+extern void match_foreign_keys_to_quals(PlannerInfo *root);
 
 /*
  * prototypes for plan/analyzejoins.c
@@ -107,9 +110,6 @@ extern bool query_is_distinct_for(Query *query, List *colnos, List *opids);
  * prototypes for plan/setrefs.c
  */
 extern Plan *set_plan_references(PlannerInfo *root, Plan *plan);
-extern void fix_opfuncids(Node *node);
-extern void set_opfuncid(OpExpr *opexpr);
-extern void set_sa_opfuncid(ScalarArrayOpExpr *opexpr);
 extern void record_plan_function_dependency(PlannerInfo *root, Oid funcid);
 extern void extract_query_dependencies(Node *query,
 						   List **relationOids,

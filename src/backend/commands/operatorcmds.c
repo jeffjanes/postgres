@@ -4,7 +4,7 @@
  *
  *	  Routines for operator manipulation commands
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -275,8 +275,8 @@ ValidateRestrictionEstimator(List *restrictionName)
 	if (get_func_rettype(restrictionOid) != FLOAT8OID)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("restriction estimator function %s must return type %s",
-						NameListToString(restrictionName), "float8")));
+			  errmsg("restriction estimator function %s must return type %s",
+					 NameListToString(restrictionName), "float8")));
 
 	/* Require EXECUTE rights for the estimator */
 	aclresult = pg_proc_aclcheck(restrictionOid, GetUserId(), ACL_EXECUTE);
@@ -321,8 +321,8 @@ ValidateJoinEstimator(List *joinName)
 	if (get_func_rettype(joinOid) != FLOAT8OID)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-			 errmsg("join estimator function %s must return type %s",
-					NameListToString(joinName), "float8")));
+				 errmsg("join estimator function %s must return type %s",
+						NameListToString(joinName), "float8")));
 
 	/* Require EXECUTE rights for the estimator */
 	aclresult = pg_proc_aclcheck(joinOid, GetUserId(), ACL_EXECUTE);
@@ -368,7 +368,7 @@ RemoveOperatorById(Oid operOid)
 		}
 	}
 
-	simple_heap_delete(relation, &tup->t_self);
+	CatalogTupleDelete(relation, &tup->t_self);
 
 	ReleaseSysCache(tup);
 
@@ -402,10 +402,7 @@ AlterOperator(AlterOperatorStmt *stmt)
 	Oid			joinOid;
 
 	/* Look up the operator */
-	oprId = LookupOperNameTypeNames(NULL, stmt->opername,
-									(TypeName *) linitial(stmt->operargs),
-									(TypeName *) lsecond(stmt->operargs),
-									false, -1);
+	oprId = LookupOperWithArgs(stmt->opername, false);
 	catalog = heap_open(OperatorRelationId, RowExclusiveLock);
 	tup = SearchSysCacheCopy1(OPEROID, ObjectIdGetDatum(oprId));
 	if (tup == NULL)
@@ -448,7 +445,7 @@ AlterOperator(AlterOperatorStmt *stmt)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("operator attribute \"%s\" can not be changed",
+					 errmsg("operator attribute \"%s\" cannot be changed",
 							defel->defname)));
 		}
 		else
@@ -518,8 +515,7 @@ AlterOperator(AlterOperatorStmt *stmt)
 	tup = heap_modify_tuple(tup, RelationGetDescr(catalog),
 							values, nulls, replaces);
 
-	simple_heap_update(catalog, &tup->t_self, tup);
-	CatalogUpdateIndexes(catalog, tup);
+	CatalogTupleUpdate(catalog, &tup->t_self, tup);
 
 	address = makeOperatorDependencies(tup, true);
 

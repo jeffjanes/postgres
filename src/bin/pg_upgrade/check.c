@@ -3,13 +3,14 @@
  *
  *	server checks and output routines
  *
- *	Copyright (c) 2010-2016, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2017, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/check.c
  */
 
 #include "postgres_fe.h"
 
 #include "catalog/pg_authid.h"
+#include "fe_utils/string_utils.h"
 #include "mb/pg_wchar.h"
 #include "pg_upgrade.h"
 
@@ -25,7 +26,6 @@ static void check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster);
 static void check_for_reg_data_type_usage(ClusterInfo *cluster);
 static void check_for_jsonb_9_4_usage(ClusterInfo *cluster);
 static void check_for_pg_role_prefix(ClusterInfo *cluster);
-static void get_bin_version(ClusterInfo *cluster);
 static char *get_canonical_locale_name(int category, const char *locale);
 
 
@@ -97,6 +97,10 @@ check_and_dump_old_cluster(bool live_check)
 	check_for_prepared_transactions(&old_cluster);
 	check_for_reg_data_type_usage(&old_cluster);
 	check_for_isn_and_int8_passing_mismatch(&old_cluster);
+
+	/* Pre-PG 10 allowed tables with 'unknown' type columns */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 906)
+		old_9_6_check_for_unknown_data_type_usage(&old_cluster);
 
 	/* 9.5 and below should not have roles starting with pg_ */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 905)
@@ -199,10 +203,10 @@ output_completion_banner(char *analyze_script_file_name,
 			   deletion_script_file_name);
 	else
 		pg_log(PG_REPORT,
-		  "Could not create a script to delete the old cluster's data files\n"
-		  "because user-defined tablespaces or the new cluster's data directory\n"
-		  "exist in the old cluster directory.  The old cluster's contents must\n"
-		  "be deleted manually.\n");
+		 "Could not create a script to delete the old cluster's data files\n"
+			   "because user-defined tablespaces or the new cluster's data directory\n"
+			   "exist in the old cluster directory.  The old cluster's contents must\n"
+			   "be deleted manually.\n");
 }
 
 
@@ -235,10 +239,6 @@ check_cluster_versions(void)
 	 */
 	if (old_cluster.major_version > new_cluster.major_version)
 		pg_fatal("This utility cannot be used to downgrade to older major PostgreSQL versions.\n");
-
-	/* get old and new binary versions */
-	get_bin_version(&old_cluster);
-	get_bin_version(&new_cluster);
 
 	/* Ensure binaries match the designated data directories */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) !=
@@ -414,19 +414,24 @@ void
 create_script_for_cluster_analyze(char **analyze_script_file_name)
 {
 	FILE	   *script = NULL;
-	char	   *user_specification = "";
+	PQExpBufferData user_specification;
 
 	prep_status("Creating script to analyze new cluster");
 
+	initPQExpBuffer(&user_specification);
 	if (os_info.user_specified)
-		user_specification = psprintf("-U \"%s\" ", os_info.user);
+	{
+		appendPQExpBufferStr(&user_specification, "-U ");
+		appendShellString(&user_specification, os_info.user);
+		appendPQExpBufferChar(&user_specification, ' ');
+	}
 
 	*analyze_script_file_name = psprintf("%sanalyze_new_cluster.%s",
 										 SCRIPT_PREFIX, SCRIPT_EXT);
 
 	if ((script = fopen_priv(*analyze_script_file_name, "w")) == NULL)
-		pg_fatal("Could not open file \"%s\": %s\n",
-				 *analyze_script_file_name, getErrorText());
+		pg_fatal("could not open file \"%s\": %s\n",
+				 *analyze_script_file_name, strerror(errno));
 
 #ifndef WIN32
 	/* add shebang header */
@@ -459,18 +464,18 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 	fprintf(script, "echo %sthis script and run:%s\n",
 			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %s    \"%s/vacuumdb\" %s--all %s%s\n", ECHO_QUOTE,
-			new_cluster.bindir, user_specification,
+			new_cluster.bindir, user_specification.data,
 	/* Did we copy the free space files? */
 			(GET_MAJOR_VERSION(old_cluster.major_version) >= 804) ?
 			"--analyze-only" : "--analyze", ECHO_QUOTE);
 	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 	fprintf(script, "\"%s/vacuumdb\" %s--all --analyze-in-stages\n",
-			new_cluster.bindir, user_specification);
+			new_cluster.bindir, user_specification.data);
 	/* Did we copy the free space files? */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) < 804)
 		fprintf(script, "\"%s/vacuumdb\" %s--all\n", new_cluster.bindir,
-				user_specification);
+				user_specification.data);
 
 	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 	fprintf(script, "echo %sDone%s\n",
@@ -480,12 +485,11 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 
 #ifndef WIN32
 	if (chmod(*analyze_script_file_name, S_IRWXU) != 0)
-		pg_fatal("Could not add execute permission to file \"%s\": %s\n",
-				 *analyze_script_file_name, getErrorText());
+		pg_fatal("could not add execute permission to file \"%s\": %s\n",
+				 *analyze_script_file_name, strerror(errno));
 #endif
 
-	if (os_info.user_specified)
-		pg_free(user_specification);
+	termPQExpBuffer(&user_specification);
 
 	check_ok();
 }
@@ -501,7 +505,8 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 {
 	FILE	   *script = NULL;
 	int			tblnum;
-	char		old_cluster_pgdata[MAXPGPATH], new_cluster_pgdata[MAXPGPATH];
+	char		old_cluster_pgdata[MAXPGPATH],
+				new_cluster_pgdata[MAXPGPATH];
 
 	*deletion_script_file_name = psprintf("%sdelete_old_cluster.%s",
 										  SCRIPT_PREFIX, SCRIPT_EXT);
@@ -516,7 +521,7 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 	if (path_is_prefix_of_path(old_cluster_pgdata, new_cluster_pgdata))
 	{
 		pg_log(PG_WARNING,
-		   "\nWARNING:  new data directory should not be inside the old data directory, e.g. %s\n", old_cluster_pgdata);
+			   "\nWARNING:  new data directory should not be inside the old data directory, e.g. %s\n", old_cluster_pgdata);
 
 		/* Unlink file in case it is left over from a previous run. */
 		unlink(*deletion_script_file_name);
@@ -553,8 +558,8 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 	prep_status("Creating script to delete old cluster");
 
 	if ((script = fopen_priv(*deletion_script_file_name, "w")) == NULL)
-		pg_fatal("Could not open file \"%s\": %s\n",
-				 *deletion_script_file_name, getErrorText());
+		pg_fatal("could not open file \"%s\": %s\n",
+				 *deletion_script_file_name, strerror(errno));
 
 #ifndef WIN32
 	/* add shebang header */
@@ -609,8 +614,8 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 
 #ifndef WIN32
 	if (chmod(*deletion_script_file_name, S_IRWXU) != 0)
-		pg_fatal("Could not add execute permission to file \"%s\": %s\n",
-				 *deletion_script_file_name, getErrorText());
+		pg_fatal("could not add execute permission to file \"%s\": %s\n",
+				 *deletion_script_file_name, strerror(errno));
 #endif
 
 	check_ok();
@@ -813,8 +818,8 @@ check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster)
 		{
 			found = true;
 			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("Could not open file \"%s\": %s\n",
-						 output_path, getErrorText());
+				pg_fatal("could not open file \"%s\": %s\n",
+						 output_path, strerror(errno));
 			if (!db_used)
 			{
 				fprintf(script, "Database: %s\n", active_db->db_name);
@@ -916,8 +921,8 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 		{
 			found = true;
 			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("Could not open file \"%s\": %s\n",
-						 output_path, getErrorText());
+				pg_fatal("could not open file \"%s\": %s\n",
+						 output_path, strerror(errno));
 			if (!db_used)
 			{
 				fprintf(script, "Database: %s\n", active_db->db_name);
@@ -1007,8 +1012,8 @@ check_for_jsonb_9_4_usage(ClusterInfo *cluster)
 		{
 			found = true;
 			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("Could not open file \"%s\": %s\n",
-						 output_path, getErrorText());
+				pg_fatal("could not open file \"%s\": %s\n",
+						 output_path, strerror(errno));
 			if (!db_used)
 			{
 				fprintf(script, "Database: %s\n", active_db->db_name);
@@ -1068,34 +1073,6 @@ check_for_pg_role_prefix(ClusterInfo *cluster)
 	PQfinish(conn);
 
 	check_ok();
-}
-
-static void
-get_bin_version(ClusterInfo *cluster)
-{
-	char		cmd[MAXPGPATH],
-				cmd_output[MAX_STRING];
-	FILE	   *output;
-	int			pre_dot,
-				post_dot;
-
-	snprintf(cmd, sizeof(cmd), "\"%s/pg_ctl\" --version", cluster->bindir);
-
-	if ((output = popen(cmd, "r")) == NULL ||
-		fgets(cmd_output, sizeof(cmd_output), output) == NULL)
-		pg_fatal("Could not get pg_ctl version data using %s: %s\n",
-				 cmd, getErrorText());
-
-	pclose(output);
-
-	/* Remove trailing newline */
-	if (strchr(cmd_output, '\n') != NULL)
-		*strchr(cmd_output, '\n') = '\0';
-
-	if (sscanf(cmd_output, "%*s %*s %d.%d", &pre_dot, &post_dot) != 2)
-		pg_fatal("could not get version from %s\n", cmd);
-
-	cluster->bin_version = (pre_dot * 100 + post_dot) * 100;
 }
 
 

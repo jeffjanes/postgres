@@ -4,7 +4,7 @@
  *	  prototypes for various files in optimizer/path
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/paths.h
@@ -22,6 +22,8 @@
  */
 extern bool enable_geqo;
 extern int	geqo_threshold;
+extern int	min_parallel_table_scan_size;
+extern int	min_parallel_index_scan_size;
 
 /* Hook for plugins to get control in set_rel_pathlist() */
 typedef void (*set_rel_pathlist_hook_type) (PlannerInfo *root,
@@ -52,6 +54,10 @@ extern RelOptInfo *standard_join_search(PlannerInfo *root, int levels_needed,
 					 List *initial_rels);
 
 extern void generate_gather_paths(PlannerInfo *root, RelOptInfo *rel);
+extern int compute_parallel_worker(RelOptInfo *rel, double heap_pages,
+						double index_pages);
+extern void create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
+										Path *bitmapqual);
 
 #ifdef OPTIMIZER_DEBUG
 extern void debug_print_rel(PlannerInfo *root, RelOptInfo *rel);
@@ -65,6 +71,8 @@ extern void create_index_paths(PlannerInfo *root, RelOptInfo *rel);
 extern bool relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 							  List *restrictlist,
 							  List *exprlist, List *oprlist);
+extern bool indexcol_is_bool_constant_for_query(IndexOptInfo *index,
+									int indexcol);
 extern bool match_index_to_operand(Node *operand, int indexcol,
 					   IndexOptInfo *index);
 extern void expand_indexqual_conditions(IndexOptInfo *index,
@@ -76,8 +84,6 @@ extern Expr *adjust_rowcompare_for_index(RowCompareExpr *clause,
 							int indexcol,
 							List **indexcolnos,
 							bool *var_on_left_p);
-extern bool has_matching_fkey(RelOptInfo *rel, RelOptInfo *frel, List *clauses,
-							  bool reverse);
 
 /*
  * tidpath.h
@@ -141,6 +147,9 @@ extern List *generate_join_implied_equalities_for_ecs(PlannerInfo *root,
 										 Relids outer_relids,
 										 RelOptInfo *inner_rel);
 extern bool exprs_known_equal(PlannerInfo *root, Node *item1, Node *item2);
+extern EquivalenceClass *match_eclasses_to_foreign_key_col(PlannerInfo *root,
+								  ForeignKeyOptInfo *fkinfo,
+								  int colno);
 extern void add_child_rel_equivalences(PlannerInfo *root,
 						   AppendRelInfo *appinfo,
 						   RelOptInfo *parent_rel,
@@ -175,11 +184,13 @@ extern PathKeysComparison compare_pathkeys(List *keys1, List *keys2);
 extern bool pathkeys_contained_in(List *keys1, List *keys2);
 extern Path *get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
 							   Relids required_outer,
-							   CostSelector cost_criterion);
+							   CostSelector cost_criterion,
+							   bool require_parallel_safe);
 extern Path *get_cheapest_fractional_path_for_pathkeys(List *paths,
 										  List *pathkeys,
 										  Relids required_outer,
 										  double fraction);
+extern Path *get_cheapest_parallel_safe_total_inner(List *paths);
 extern List *build_index_pathkeys(PlannerInfo *root, IndexOptInfo *index,
 					 ScanDirection scandir);
 extern List *build_expression_pathkey(PlannerInfo *root, Expr *expr,

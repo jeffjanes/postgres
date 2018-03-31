@@ -4,7 +4,7 @@
  *	  prototypes for pathnode.c, relnode.c.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/pathnode.h
@@ -34,7 +34,7 @@ extern bool add_partial_path_precheck(RelOptInfo *parent_rel,
 						  Cost total_cost, List *pathkeys);
 
 extern Path *create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
-					Relids required_outer, int parallel_degree);
+					Relids required_outer, int parallel_workers);
 extern Path *create_samplescan_path(PlannerInfo *root, RelOptInfo *rel,
 					   Relids required_outer);
 extern IndexPath *create_index_path(PlannerInfo *root,
@@ -47,12 +47,14 @@ extern IndexPath *create_index_path(PlannerInfo *root,
 				  ScanDirection indexscandir,
 				  bool indexonly,
 				  Relids required_outer,
-				  double loop_count);
+				  double loop_count,
+				  bool partial_path);
 extern BitmapHeapPath *create_bitmap_heap_path(PlannerInfo *root,
 						RelOptInfo *rel,
 						Path *bitmapqual,
 						Relids required_outer,
-						double loop_count);
+						double loop_count,
+						int parallel_degree);
 extern BitmapAndPath *create_bitmap_and_path(PlannerInfo *root,
 					   RelOptInfo *rel,
 					   List *bitmapquals);
@@ -62,12 +64,14 @@ extern BitmapOrPath *create_bitmap_or_path(PlannerInfo *root,
 extern TidPath *create_tidscan_path(PlannerInfo *root, RelOptInfo *rel,
 					List *tidquals, Relids required_outer);
 extern AppendPath *create_append_path(RelOptInfo *rel, List *subpaths,
-				   Relids required_outer, int parallel_degree);
+				   Relids required_outer, int parallel_workers,
+				   List *partitioned_rels);
 extern MergeAppendPath *create_merge_append_path(PlannerInfo *root,
 						 RelOptInfo *rel,
 						 List *subpaths,
 						 List *pathkeys,
-						 Relids required_outer);
+						 Relids required_outer,
+						 List *partitioned_rels);
 extern ResultPath *create_result_path(PlannerInfo *root, RelOptInfo *rel,
 				   PathTarget *target, List *resconstantqual);
 extern MaterialPath *create_material_path(RelOptInfo *rel, Path *subpath);
@@ -76,13 +80,24 @@ extern UniquePath *create_unique_path(PlannerInfo *root, RelOptInfo *rel,
 extern GatherPath *create_gather_path(PlannerInfo *root,
 				   RelOptInfo *rel, Path *subpath, PathTarget *target,
 				   Relids required_outer, double *rows);
+extern GatherMergePath *create_gather_merge_path(PlannerInfo *root,
+												 RelOptInfo *rel,
+												 Path *subpath,
+												 PathTarget *target,
+												 List *pathkeys,
+												 Relids required_outer,
+												 double *rows);
 extern SubqueryScanPath *create_subqueryscan_path(PlannerInfo *root,
 						 RelOptInfo *rel, Path *subpath,
 						 List *pathkeys, Relids required_outer);
 extern Path *create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 						 List *pathkeys, Relids required_outer);
+extern Path *create_tablexprscan_path(PlannerInfo *root, RelOptInfo *rel,
+						 List *pathkeys, Relids required_outer);
 extern Path *create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel,
 					   Relids required_outer);
+extern Path *create_tablefuncscan_path(PlannerInfo *root, RelOptInfo *rel,
+						  Relids required_outer);
 extern Path *create_ctescan_path(PlannerInfo *root, RelOptInfo *rel,
 					Relids required_outer);
 extern Path *create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel,
@@ -144,6 +159,10 @@ extern Path *apply_projection_to_path(PlannerInfo *root,
 						 RelOptInfo *rel,
 						 Path *path,
 						 PathTarget *target);
+extern ProjectSetPath *create_set_projection_path(PlannerInfo *root,
+						   RelOptInfo *rel,
+						   Path *subpath,
+						   PathTarget *target);
 extern SortPath *create_sort_path(PlannerInfo *root,
 				 RelOptInfo *rel,
 				 Path *subpath,
@@ -166,13 +185,11 @@ extern AggPath *create_agg_path(PlannerInfo *root,
 				Path *subpath,
 				PathTarget *target,
 				AggStrategy aggstrategy,
+				AggSplit aggsplit,
 				List *groupClause,
 				List *qual,
 				const AggClauseCosts *aggcosts,
-				double numGroups,
-				bool combineStates,
-				bool finalizeAggs,
-				bool serialStates);
+				double numGroups);
 extern GroupingSetsPath *create_groupingsets_path(PlannerInfo *root,
 						 RelOptInfo *rel,
 						 Path *subpath,
@@ -217,7 +234,7 @@ extern LockRowsPath *create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 extern ModifyTablePath *create_modifytable_path(PlannerInfo *root,
 						RelOptInfo *rel,
 						CmdType operation, bool canSetTag,
-						Index nominalRelation,
+						Index nominalRelation, List *partitioned_rels,
 						List *resultRelations, List *subpaths,
 						List *subroots,
 						List *withCheckOptionLists, List *returningLists,

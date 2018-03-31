@@ -3,7 +3,7 @@
  * fe-protocol3.c
  *	  functions that are specific to frontend/backend protocol version 3
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -163,7 +163,7 @@ pqParseInput3(PGconn *conn)
 
 			/*
 			 * Unexpected message in IDLE state; need to recover somehow.
-			 * ERROR messages are displayed using the notice processor;
+			 * ERROR messages are handled using the notice processor;
 			 * ParameterStatus is handled normally; anything else is just
 			 * dropped on the floor after displaying a suitable warning
 			 * notice.  (An ERROR is very possibly the backend telling us why

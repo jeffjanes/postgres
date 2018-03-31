@@ -3,7 +3,7 @@
  * execUtils.c
  *	  miscellaneous executor utility routines
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -43,6 +43,7 @@
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
+#include "storage/lmgr.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -80,9 +81,7 @@ CreateExecutorState(void)
 	 */
 	qcontext = AllocSetContextCreate(CurrentMemoryContext,
 									 "ExecutorState",
-									 ALLOCSET_DEFAULT_MINSIZE,
-									 ALLOCSET_DEFAULT_INITSIZE,
-									 ALLOCSET_DEFAULT_MAXSIZE);
+									 ALLOCSET_DEFAULT_SIZES);
 
 	/*
 	 * Make the EState node within the per-query context.  This way, we don't
@@ -141,6 +140,7 @@ CreateExecutorState(void)
 	estate->es_epqTuple = NULL;
 	estate->es_epqTupleSet = NULL;
 	estate->es_epqScanDone = NULL;
+	estate->es_sourceText = NULL;
 
 	/*
 	 * Return the executor state structure
@@ -229,9 +229,7 @@ CreateExprContext(EState *estate)
 	econtext->ecxt_per_tuple_memory =
 		AllocSetContextCreate(estate->es_query_cxt,
 							  "ExprContext",
-							  ALLOCSET_DEFAULT_MINSIZE,
-							  ALLOCSET_DEFAULT_INITSIZE,
-							  ALLOCSET_DEFAULT_MAXSIZE);
+							  ALLOCSET_DEFAULT_SIZES);
 
 	econtext->ecxt_param_exec_vals = estate->es_param_exec_vals;
 	econtext->ecxt_param_list_info = estate->es_param_list_info;
@@ -300,9 +298,7 @@ CreateStandaloneExprContext(void)
 	econtext->ecxt_per_tuple_memory =
 		AllocSetContextCreate(CurrentMemoryContext,
 							  "ExprContext",
-							  ALLOCSET_DEFAULT_MINSIZE,
-							  ALLOCSET_DEFAULT_INITSIZE,
-							  ALLOCSET_DEFAULT_MAXSIZE);
+							  ALLOCSET_DEFAULT_SIZES);
 
 	econtext->ecxt_param_exec_vals = NULL;
 	econtext->ecxt_param_list_info = NULL;
@@ -591,12 +587,6 @@ ExecBuildProjectionInfo(List *targetList,
 	projInfo->pi_targetlist = exprlist;
 	projInfo->pi_numSimpleVars = numSimpleVars;
 	projInfo->pi_directMap = directMap;
-
-	if (exprlist == NIL)
-		projInfo->pi_itemIsDone = NULL; /* not needed */
-	else
-		projInfo->pi_itemIsDone = (ExprDoneCond *)
-			palloc(len * sizeof(ExprDoneCond));
 
 	return projInfo;
 }
@@ -963,4 +953,59 @@ ShutdownExprContext(ExprContext *econtext, bool isCommit)
 	}
 
 	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * ExecLockNonLeafAppendTables
+ *
+ * Locks, if necessary, the tables indicated by the RT indexes contained in
+ * the partitioned_rels list.  These are the non-leaf tables in the partition
+ * tree controlled by a given Append or MergeAppend node.
+ */
+void
+ExecLockNonLeafAppendTables(List *partitioned_rels, EState *estate)
+{
+	PlannedStmt *stmt = estate->es_plannedstmt;
+	ListCell	*lc;
+
+	foreach(lc, partitioned_rels)
+	{
+		ListCell   *l;
+		Index	rti = lfirst_int(lc);
+		bool	is_result_rel = false;
+		Oid		relid = getrelid(rti, estate->es_range_table);
+
+		/* If this is a result relation, already locked in InitPlan */
+		foreach(l, stmt->nonleafResultRelations)
+		{
+			if (rti == lfirst_int(l))
+			{
+				is_result_rel = true;
+				break;
+			}
+		}
+
+		/*
+		 * Not a result relation; check if there is a RowMark that requires
+		 * taking a RowShareLock on this rel.
+		 */
+		if (!is_result_rel)
+		{
+			PlanRowMark *rc = NULL;
+
+			foreach(l, stmt->rowMarks)
+			{
+				if (((PlanRowMark *) lfirst(l))->rti == rti)
+				{
+					rc = lfirst(l);
+					break;
+				}
+			}
+
+			if (rc && RowMarkRequiresRowShareLock(rc->markType))
+				LockRelationOid(relid, RowShareLock);
+			else
+				LockRelationOid(relid, AccessShareLock);
+		}
+	}
 }

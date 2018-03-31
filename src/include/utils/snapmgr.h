@@ -3,7 +3,7 @@
  * snapmgr.h
  *	  POSTGRES snapshot manager
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/snapmgr.h
@@ -31,6 +31,19 @@
 #define OLD_SNAPSHOT_PADDING_ENTRIES 10
 #define OLD_SNAPSHOT_TIME_MAP_ENTRIES (old_snapshot_threshold + OLD_SNAPSHOT_PADDING_ENTRIES)
 
+/*
+ * Common definition of relation properties that allow early pruning/vacuuming
+ * when old_snapshot_threshold >= 0.
+ */
+#define RelationAllowsEarlyPruning(rel) \
+( \
+	 RelationNeedsWAL(rel) \
+  && !IsCatalogRelation(rel) \
+  && !RelationIsAccessibleInLogicalDecoding(rel) \
+  && !RelationHasUnloggedIndex(rel) \
+)
+
+#define EarlyPruningEnabled(rel) (old_snapshot_threshold >= 0 && RelationAllowsEarlyPruning(rel))
 
 /* GUC variables */
 extern PGDLLIMPORT int old_snapshot_threshold;
@@ -38,23 +51,25 @@ extern PGDLLIMPORT int old_snapshot_threshold;
 
 extern Size SnapMgrShmemSize(void);
 extern void SnapMgrInit(void);
-extern int64 GetSnapshotCurrentTimestamp(void);
-extern int64 GetOldSnapshotThresholdTimestamp(void);
+extern TimestampTz GetSnapshotCurrentTimestamp(void);
+extern TimestampTz GetOldSnapshotThresholdTimestamp(void);
 
 extern bool FirstSnapshotSet;
 
 extern TransactionId TransactionXmin;
 extern TransactionId RecentXmin;
-extern TransactionId RecentGlobalXmin;
+extern PGDLLIMPORT TransactionId RecentGlobalXmin;
 extern TransactionId RecentGlobalDataXmin;
 
 extern Snapshot GetTransactionSnapshot(void);
 extern Snapshot GetLatestSnapshot(void);
 extern void SnapshotSetCommandId(CommandId curcid);
+extern Snapshot GetOldestSnapshot(void);
 
 extern Snapshot GetCatalogSnapshot(Oid relid);
 extern Snapshot GetNonHistoricCatalogSnapshot(Oid relid);
 extern void InvalidateCatalogSnapshot(void);
+extern void InvalidateCatalogSnapshotConditionally(void);
 
 extern void PushActiveSnapshot(Snapshot snapshot);
 extern void PushCopiedSnapshot(Snapshot snapshot);
@@ -72,14 +87,14 @@ extern void AtSubCommit_Snapshot(int level);
 extern void AtSubAbort_Snapshot(int level);
 extern void AtEOXact_Snapshot(bool isCommit);
 
-extern Datum pg_export_snapshot(PG_FUNCTION_ARGS);
 extern void ImportSnapshot(const char *idstr);
 extern bool XactHasExportedSnapshots(void);
 extern void DeleteAllExportedSnapshotFiles(void);
 extern bool ThereAreNoPriorRegisteredSnapshots(void);
 extern TransactionId TransactionIdLimitedForOldSnapshots(TransactionId recentXmin,
-														 Relation relation);
-extern void MaintainOldSnapshotTimeMapping(int64 whenTaken, TransactionId xmin);
+									Relation relation);
+extern void MaintainOldSnapshotTimeMapping(TimestampTz whenTaken,
+							   TransactionId xmin);
 
 extern char *ExportSnapshot(Snapshot snapshot);
 

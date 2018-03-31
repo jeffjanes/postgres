@@ -25,7 +25,7 @@
  * The Windows implementation uses Windows events that are inherited by
  * all postmaster child processes.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -40,7 +40,6 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <sys/types.h>
 #ifdef HAVE_SYS_EPOLL_H
 #include <sys/epoll.h>
 #endif
@@ -55,9 +54,10 @@
 #endif
 
 #include "miscadmin.h"
+#include "pgstat.h"
+#include "port/atomics.h"
 #include "portability/instr_time.h"
 #include "postmaster/postmaster.h"
-#include "storage/barrier.h"
 #include "storage/latch.h"
 #include "storage/pmsignal.h"
 #include "storage/shmem.h"
@@ -297,9 +297,11 @@ DisownLatch(volatile Latch *latch)
  * we return all of them in one call, but we will return at least one.
  */
 int
-WaitLatch(volatile Latch *latch, int wakeEvents, long timeout)
+WaitLatch(volatile Latch *latch, int wakeEvents, long timeout,
+		  uint32 wait_event_info)
 {
-	return WaitLatchOrSocket(latch, wakeEvents, PGINVALID_SOCKET, timeout);
+	return WaitLatchOrSocket(latch, wakeEvents, PGINVALID_SOCKET, timeout,
+							 wait_event_info);
 }
 
 /*
@@ -316,7 +318,7 @@ WaitLatch(volatile Latch *latch, int wakeEvents, long timeout)
  */
 int
 WaitLatchOrSocket(volatile Latch *latch, int wakeEvents, pgsocket sock,
-				  long timeout)
+				  long timeout, uint32 wait_event_info)
 {
 	int			ret = 0;
 	int			rc;
@@ -344,7 +346,7 @@ WaitLatchOrSocket(volatile Latch *latch, int wakeEvents, pgsocket sock,
 		AddWaitEventToSet(set, ev, sock, NULL, NULL);
 	}
 
-	rc = WaitEventSetWait(set, timeout, &event, 1);
+	rc = WaitEventSetWait(set, timeout, &event, 1, wait_event_info);
 
 	if (rc == 0)
 		ret |= WL_TIMEOUT;
@@ -475,7 +477,7 @@ ResetLatch(volatile Latch *latch)
 /*
  * Create a WaitEventSet with space for nevents different events to wait for.
  *
- * These events can then efficiently waited upon together, using
+ * These events can then be efficiently waited upon together, using
  * WaitEventSetWait().
  */
 WaitEventSet *
@@ -485,35 +487,41 @@ CreateWaitEventSet(MemoryContext context, int nevents)
 	char	   *data;
 	Size		sz = 0;
 
-	sz += sizeof(WaitEventSet);
-	sz += sizeof(WaitEvent) * nevents;
+	/*
+	 * Use MAXALIGN size/alignment to guarantee that later uses of memory are
+	 * aligned correctly. E.g. epoll_event might need 8 byte alignment on some
+	 * platforms, but earlier allocations like WaitEventSet and WaitEvent
+	 * might not sized to guarantee that when purely using sizeof().
+	 */
+	sz += MAXALIGN(sizeof(WaitEventSet));
+	sz += MAXALIGN(sizeof(WaitEvent) * nevents);
 
 #if defined(WAIT_USE_EPOLL)
-	sz += sizeof(struct epoll_event) * nevents;
+	sz += MAXALIGN(sizeof(struct epoll_event) * nevents);
 #elif defined(WAIT_USE_POLL)
-	sz += sizeof(struct pollfd) * nevents;
+	sz += MAXALIGN(sizeof(struct pollfd) * nevents);
 #elif defined(WAIT_USE_WIN32)
 	/* need space for the pgwin32_signal_event */
-	sz += sizeof(HANDLE) * (nevents + 1);
+	sz += MAXALIGN(sizeof(HANDLE) * (nevents + 1));
 #endif
 
 	data = (char *) MemoryContextAllocZero(context, sz);
 
 	set = (WaitEventSet *) data;
-	data += sizeof(WaitEventSet);
+	data += MAXALIGN(sizeof(WaitEventSet));
 
 	set->events = (WaitEvent *) data;
-	data += sizeof(WaitEvent) * nevents;
+	data += MAXALIGN(sizeof(WaitEvent) * nevents);
 
 #if defined(WAIT_USE_EPOLL)
 	set->epoll_ret_events = (struct epoll_event *) data;
-	data += sizeof(struct epoll_event) * nevents;
+	data += MAXALIGN(sizeof(struct epoll_event) * nevents);
 #elif defined(WAIT_USE_POLL)
 	set->pollfds = (struct pollfd *) data;
-	data += sizeof(struct pollfd) * nevents;
+	data += MAXALIGN(sizeof(struct pollfd) * nevents);
 #elif defined(WAIT_USE_WIN32)
 	set->handles = (HANDLE) data;
-	data += sizeof(HANDLE) * nevents;
+	data += MAXALIGN(sizeof(HANDLE) * nevents);
 #endif
 
 	set->latch = NULL;
@@ -616,7 +624,7 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 		if (set->latch)
 			elog(ERROR, "cannot wait on more than one latch");
 		if ((events & WL_LATCH_SET) != WL_LATCH_SET)
-			elog(ERROR, "latch events only spuport being set");
+			elog(ERROR, "latch events only support being set");
 	}
 	else
 	{
@@ -634,6 +642,9 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 	event->fd = fd;
 	event->events = events;
 	event->user_data = user_data;
+#ifdef WIN32
+	event->reset = false;
+#endif
 
 	if (events == WL_LATCH_SET)
 	{
@@ -848,7 +859,7 @@ WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event)
  * reached.  At most nevents occurred events are returned.
  *
  * If timeout = -1, block until an event occurs; if 0, check sockets for
- * readiness, but don't block; if > 0, block for at most timeout miliseconds.
+ * readiness, but don't block; if > 0, block for at most timeout milliseconds.
  *
  * Returns the number of events occurred, or 0 if the timeout was reached.
  *
@@ -857,7 +868,8 @@ WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event)
  */
 int
 WaitEventSetWait(WaitEventSet *set, long timeout,
-				 WaitEvent *occurred_events, int nevents)
+				 WaitEvent *occurred_events, int nevents,
+				 uint32 wait_event_info)
 {
 	int			returned_events = 0;
 	instr_time	start_time;
@@ -876,6 +888,8 @@ WaitEventSetWait(WaitEventSet *set, long timeout,
 		Assert(timeout >= 0 && timeout <= INT_MAX);
 		cur_timeout = timeout;
 	}
+
+	pgstat_report_wait_start(wait_event_info);
 
 #ifndef WIN32
 	waiting = true;
@@ -953,6 +967,8 @@ WaitEventSetWait(WaitEventSet *set, long timeout,
 #ifndef WIN32
 	waiting = false;
 #endif
+
+	pgstat_report_wait_end();
 
 	return returned_events;
 }
@@ -1375,6 +1391,50 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 	DWORD		rc;
 	WaitEvent  *cur_event;
 
+	/* Reset any wait events that need it */
+	for (cur_event = set->events;
+		 cur_event < (set->events + set->nevents);
+		 cur_event++)
+	{
+		if (cur_event->reset)
+		{
+			WaitEventAdjustWin32(set, cur_event);
+			cur_event->reset = false;
+		}
+
+		/*
+		 * Windows does not guarantee to log an FD_WRITE network event
+		 * indicating that more data can be sent unless the previous send()
+		 * failed with WSAEWOULDBLOCK.  While our caller might well have made
+		 * such a call, we cannot assume that here.  Therefore, if waiting for
+		 * write-ready, force the issue by doing a dummy send().  If the dummy
+		 * send() succeeds, assume that the socket is in fact write-ready, and
+		 * return immediately.  Also, if it fails with something other than
+		 * WSAEWOULDBLOCK, return a write-ready indication to let our caller
+		 * deal with the error condition.
+		 */
+		if (cur_event->events & WL_SOCKET_WRITEABLE)
+		{
+			char		c;
+			WSABUF		buf;
+			DWORD		sent;
+			int			r;
+
+			buf.buf = &c;
+			buf.len = 0;
+
+			r = WSASend(cur_event->fd, &buf, 1, &sent, 0, NULL, NULL);
+			if (r == 0 || WSAGetLastError() != WSAEWOULDBLOCK)
+			{
+				occurred_events->pos = cur_event->pos;
+				occurred_events->user_data = cur_event->user_data;
+				occurred_events->events = WL_SOCKET_WRITEABLE;
+				occurred_events->fd = cur_event->fd;
+				return 1;
+			}
+		}
+	}
+
 	/*
 	 * Sleep.
 	 *
@@ -1458,6 +1518,18 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 		{
 			/* data available in socket */
 			occurred_events->events |= WL_SOCKET_READABLE;
+
+			/*------
+			 * WaitForMultipleObjects doesn't guarantee that a read event will
+			 * be returned if the latch is set at the same time.  Even if it
+			 * did, the caller might drop that event expecting it to reoccur
+			 * on next call.  So, we must force the event to be reset if this
+			 * WaitEventSet is used again in order to avoid an indefinite
+			 * hang.  Refer https://msdn.microsoft.com/en-us/library/windows/desktop/ms741576(v=vs.85).aspx
+			 * for the behavior of socket events.
+			 *------
+			 */
+			cur_event->reset = true;
 		}
 		if ((cur_event->events & WL_SOCKET_WRITEABLE) &&
 			(resEvents.lNetworkEvents & FD_WRITE))

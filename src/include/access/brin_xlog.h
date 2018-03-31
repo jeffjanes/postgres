@@ -4,7 +4,7 @@
  *	  POSTGRES BRIN access XLOG definitions.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/brin_xlog.h
@@ -128,5 +128,6 @@ typedef struct xl_brin_revmap_extend
 extern void brin_redo(XLogReaderState *record);
 extern void brin_desc(StringInfo buf, XLogReaderState *record);
 extern const char *brin_identify(uint8 info);
+extern void brin_mask(char *pagedata, BlockNumber blkno);
 
 #endif   /* BRIN_XLOG_H */

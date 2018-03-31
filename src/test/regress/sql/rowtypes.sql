@@ -286,3 +286,50 @@ create temp table tt1 as select * from int8_tbl limit 2;
 create temp table tt2 () inherits(tt1);
 insert into tt2 values(0,0);
 select row_to_json(r) from (select q2,q1 from tt1 offset 0) r;
+
+--
+-- IS [NOT] NULL should not recurse into nested composites (bug #14235)
+--
+
+explain (verbose, costs off)
+select r, r is null as isnull, r is not null as isnotnull
+from (values (1,row(1,2)), (1,row(null,null)), (1,null),
+             (null,row(1,2)), (null,row(null,null)), (null,null) ) r(a,b);
+
+select r, r is null as isnull, r is not null as isnotnull
+from (values (1,row(1,2)), (1,row(null,null)), (1,null),
+             (null,row(1,2)), (null,row(null,null)), (null,null) ) r(a,b);
+
+explain (verbose, costs off)
+with r(a,b) as
+  (values (1,row(1,2)), (1,row(null,null)), (1,null),
+          (null,row(1,2)), (null,row(null,null)), (null,null) )
+select r, r is null as isnull, r is not null as isnotnull from r;
+
+with r(a,b) as
+  (values (1,row(1,2)), (1,row(null,null)), (1,null),
+          (null,row(1,2)), (null,row(null,null)), (null,null) )
+select r, r is null as isnull, r is not null as isnotnull from r;
+
+
+--
+-- Tests for component access / FieldSelect
+--
+CREATE TABLE compositetable(a text, b text) WITH OIDS;
+INSERT INTO compositetable(a, b) VALUES('fa', 'fb');
+
+-- composite type columns can't directly be accessed (error)
+SELECT d.a FROM (SELECT compositetable AS d FROM compositetable) s;
+-- but can be accessed with proper parens
+SELECT (d).a, (d).b FROM (SELECT compositetable AS d FROM compositetable) s;
+-- oids can't be accessed in composite types (error)
+SELECT (d).oid FROM (SELECT compositetable AS d FROM compositetable) s;
+
+-- accessing non-existing column in NULL datum errors out
+SELECT (NULL::compositetable).nonexistant;
+-- existing column in a NULL composite yield NULL
+SELECT (NULL::compositetable).a;
+-- oids can't be accessed in composite types (error)
+SELECT (NULL::compositetable).oid;
+
+DROP TABLE compositetable;

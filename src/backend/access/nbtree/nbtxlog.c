@@ -4,7 +4,7 @@
  *	  WAL replay logic for btrees.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -14,8 +14,10 @@
  */
 #include "postgres.h"
 
+#include "access/bufmask.h"
 #include "access/heapam_xlog.h"
 #include "access/nbtree.h"
+#include "access/nbtxlog.h"
 #include "access/transam.h"
 #include "access/xlog.h"
 #include "access/xlogutils.h"
@@ -392,15 +394,15 @@ btree_xlog_vacuum(XLogReaderState *record)
 	xl_btree_vacuum *xlrec = (xl_btree_vacuum *) XLogRecGetData(record);
 
 	/*
-	 * This section of code is thought to be no longer needed, after
-	 * analysis of the calling paths. It is retained to allow the code
-	 * to be reinstated if a flaw is revealed in that thinking.
+	 * This section of code is thought to be no longer needed, after analysis
+	 * of the calling paths. It is retained to allow the code to be reinstated
+	 * if a flaw is revealed in that thinking.
 	 *
 	 * If we are running non-MVCC scans using this index we need to do some
 	 * additional work to ensure correctness, which is known as a "pin scan"
 	 * described in more detail in next paragraphs. We used to do the extra
-	 * work in all cases, whereas we now avoid that work in most cases.
-	 * If lastBlockVacuumed is set to InvalidBlockNumber then we skip the
+	 * work in all cases, whereas we now avoid that work in most cases. If
+	 * lastBlockVacuumed is set to InvalidBlockNumber then we skip the
 	 * additional work required for the pin scan.
 	 *
 	 * Avoiding this extra work is important since it requires us to touch
@@ -1027,4 +1029,53 @@ btree_redo(XLogReaderState *record)
 		default:
 			elog(PANIC, "btree_redo: unknown op code %u", info);
 	}
+}
+
+/*
+ * Mask a btree page before performing consistency checks on it.
+ */
+void
+btree_mask(char *pagedata, BlockNumber blkno)
+{
+	Page		page = (Page) pagedata;
+	BTPageOpaque maskopaq;
+
+	mask_page_lsn(page);
+
+	mask_page_hint_bits(page);
+	mask_unused_space(page);
+
+	maskopaq = (BTPageOpaque) PageGetSpecialPointer(page);
+
+	if (P_ISDELETED(maskopaq))
+	{
+		/*
+		 * Mask page content on a DELETED page since it will be re-initialized
+		 * during replay. See btree_xlog_unlink_page() for details.
+		 */
+		mask_page_content(page);
+	}
+	else if (P_ISLEAF(maskopaq))
+	{
+		/*
+		 * In btree leaf pages, it is possible to modify the LP_FLAGS without
+		 * emitting any WAL record. Hence, mask the line pointer flags. See
+		 * _bt_killitems(), _bt_check_unique() for details.
+		 */
+		mask_lp_flags(page);
+	}
+
+	/*
+	 * BTP_HAS_GARBAGE is just an un-logged hint bit. So, mask it. See
+	 * _bt_killitems(), _bt_check_unique() for details.
+	 */
+	maskopaq->btpo_flags &= ~BTP_HAS_GARBAGE;
+
+	/*
+	 * During replay of a btree page split, we don't set the BTP_SPLIT_END
+	 * flag of the right sibling and initialize the cycle_id to 0 for the same
+	 * page. See btree_xlog_split() for details.
+	 */
+	maskopaq->btpo_flags &= ~BTP_SPLIT_END;
+	maskopaq->btpo_cycleid = 0;
 }

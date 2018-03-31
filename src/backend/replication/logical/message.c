@@ -3,7 +3,7 @@
  * message.c
  *	  Generic logical messages.
  *
- * Copyright (c) 2013-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/message.c
@@ -51,7 +51,7 @@ XLogRecPtr
 LogLogicalMessage(const char *prefix, const char *message, size_t size,
 				  bool transactional)
 {
-	xl_logical_message	xlrec;
+	xl_logical_message xlrec;
 
 	/*
 	 * Force xid to be allocated if we're emitting a transactional message.
@@ -73,7 +73,7 @@ LogLogicalMessage(const char *prefix, const char *message, size_t size,
 	XLogRegisterData((char *) message, size);
 
 	/* allow origin filtering */
-	XLogIncludeOrigin();
+	XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 	return XLogInsert(RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE);
 }
@@ -87,7 +87,7 @@ logicalmsg_redo(XLogReaderState *record)
 	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
 
 	if (info != XLOG_LOGICAL_MESSAGE)
-			elog(PANIC, "logicalmsg_redo: unknown op code %u", info);
+		elog(PANIC, "logicalmsg_redo: unknown op code %u", info);
 
 	/* This is only interesting for logical decoding, see decode.c. */
 }

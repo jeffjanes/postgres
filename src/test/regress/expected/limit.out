@@ -208,13 +208,15 @@ select currval('testseq');
 explain (verbose, costs off)
 select unique1, unique2, generate_series(1,10)
   from tenk1 order by unique2 limit 7;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    Output: unique1, unique2, (generate_series(1, 10))
-   ->  Index Scan using tenk1_unique2 on public.tenk1
+   ->  ProjectSet
          Output: unique1, unique2, generate_series(1, 10)
-(4 rows)
+         ->  Index Scan using tenk1_unique2 on public.tenk1
+               Output: unique1, unique2, two, four, ten, twenty, hundred, thousand, twothousand, fivethous, tenthous, odd, even, stringu1, stringu2, string4
+(6 rows)
 
 select unique1, unique2, generate_series(1,10)
   from tenk1 order by unique2 limit 7;
@@ -236,7 +238,7 @@ select unique1, unique2, generate_series(1,10)
 --------------------------------------------------------------------
  Limit
    Output: unique1, unique2, (generate_series(1, 10)), tenthous
-   ->  Result
+   ->  ProjectSet
          Output: unique1, unique2, generate_series(1, 10), tenthous
          ->  Sort
                Output: unique1, unique2, tenthous
@@ -263,9 +265,10 @@ explain (verbose, costs off)
 select generate_series(0,2) as s1, generate_series((random()*.1)::int,2) as s2;
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Result
+ ProjectSet
    Output: generate_series(0, 2), generate_series(((random() * '0.1'::double precision))::integer, 2)
-(2 rows)
+   ->  Result
+(3 rows)
 
 select generate_series(0,2) as s1, generate_series((random()*.1)::int,2) as s2;
  s1 | s2 
@@ -283,9 +286,10 @@ order by s2 desc;
  Sort
    Output: (generate_series(0, 2)), (generate_series(((random() * '0.1'::double precision))::integer, 2))
    Sort Key: (generate_series(((random() * '0.1'::double precision))::integer, 2)) DESC
-   ->  Result
+   ->  ProjectSet
          Output: generate_series(0, 2), generate_series(((random() * '0.1'::double precision))::integer, 2)
-(5 rows)
+         ->  Result
+(6 rows)
 
 select generate_series(0,2) as s1, generate_series((random()*.1)::int,2) as s2
 order by s2 desc;
@@ -294,5 +298,29 @@ order by s2 desc;
   2 |  2
   1 |  1
   0 |  0
+(3 rows)
+
+-- test for failure to set all aggregates' aggtranstype
+explain (verbose, costs off)
+select sum(tenthous) as s1, sum(tenthous) + random()*0 as s2
+  from tenk1 group by thousand order by thousand limit 3;
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: (sum(tenthous)), (((sum(tenthous))::double precision + (random() * '0'::double precision))), thousand
+   ->  GroupAggregate
+         Output: sum(tenthous), ((sum(tenthous))::double precision + (random() * '0'::double precision)), thousand
+         Group Key: tenk1.thousand
+         ->  Index Only Scan using tenk1_thous_tenthous on public.tenk1
+               Output: thousand, tenthous
+(7 rows)
+
+select sum(tenthous) as s1, sum(tenthous) + random()*0 as s2
+  from tenk1 group by thousand order by thousand limit 3;
+  s1   |  s2   
+-------+-------
+ 45000 | 45000
+ 45010 | 45010
+ 45020 | 45020
 (3 rows)
 

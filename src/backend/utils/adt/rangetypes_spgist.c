@@ -25,7 +25,7 @@
  * This implementation only uses the comparison function of the range element
  * datatype, therefore it works for any range type.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -42,13 +42,6 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/rangetypes.h"
-
-/* SP-GiST API functions */
-Datum		spg_range_quad_config(PG_FUNCTION_ARGS);
-Datum		spg_range_quad_choose(PG_FUNCTION_ARGS);
-Datum		spg_range_quad_picksplit(PG_FUNCTION_ARGS);
-Datum		spg_range_quad_inner_consistent(PG_FUNCTION_ARGS);
-Datum		spg_range_quad_leaf_consistent(PG_FUNCTION_ARGS);
 
 static int16 getQuadrant(TypeCacheEntry *typcache, RangeType *centroid,
 			RangeType *tst);
@@ -760,13 +753,14 @@ spg_range_quad_inner_consistent(PG_FUNCTION_ARGS)
 			/* Save previous prefix if needed */
 			if (needPrevious)
 			{
-				Datum previousCentroid;
+				Datum		previousCentroid;
 
-				/* We know, that in->prefixDatum in this place is varlena,
+				/*
+				 * We know, that in->prefixDatum in this place is varlena,
 				 * because it's range
 				 */
 				previousCentroid = datumCopy(in->prefixDatum, false, -1);
-				out->traversalValues[out->nNodes] = (void *)previousCentroid;
+				out->traversalValues[out->nNodes] = (void *) previousCentroid;
 			}
 			out->nodeNumbers[out->nNodes] = i - 1;
 			out->nNodes++;

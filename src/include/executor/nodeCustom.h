@@ -4,7 +4,7 @@
  *
  * prototypes for CustomScan nodes
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * ------------------------------------------------------------------------
@@ -32,10 +32,11 @@ extern void ExecCustomRestrPos(CustomScanState *node);
  * Parallel execution support
  */
 extern void ExecCustomScanEstimate(CustomScanState *node,
-								   ParallelContext *pcxt);
+					   ParallelContext *pcxt);
 extern void ExecCustomScanInitializeDSM(CustomScanState *node,
-										ParallelContext *pcxt);
+							ParallelContext *pcxt);
 extern void ExecCustomScanInitializeWorker(CustomScanState *node,
-										   shm_toc *toc);
+							   shm_toc *toc);
+extern void ExecShutdownCustomScan(CustomScanState *node);
 
 #endif   /* NODECUSTOM_H */

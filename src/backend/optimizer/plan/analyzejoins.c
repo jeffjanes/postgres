@@ -11,7 +11,7 @@
  * is that we have to work harder to clean up after ourselves when we modify
  * the query, since the derived data structures have to be updated too.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -433,6 +433,11 @@ remove_rel_from_query(PlannerInfo *root, int relid, Relids joinrelids)
 			distribute_restrictinfo_to_rels(root, rinfo);
 		}
 	}
+
+	/*
+	 * There may be references to the rel in root->fkey_list, but if so,
+	 * match_foreign_keys_to_quals() will get rid of them.
+	 */
 }
 
 /*
@@ -591,7 +596,7 @@ rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list)
 		 */
 		foreach(l, clause_list)
 		{
-			RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+			RestrictInfo *rinfo = castNode(RestrictInfo, lfirst(l));
 			Oid			op;
 			Var		   *var;
 
@@ -603,8 +608,7 @@ rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list)
 			 * caller's mergejoinability test should have selected only
 			 * OpExprs.
 			 */
-			Assert(IsA(rinfo->clause, OpExpr));
-			op = ((OpExpr *) rinfo->clause)->opno;
+			op = castNode(OpExpr, rinfo->clause)->opno;
 
 			/* caller identified the inner side for us */
 			if (rinfo->outer_is_left)
@@ -645,6 +649,11 @@ rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list)
 bool
 query_supports_distinctness(Query *query)
 {
+	/* we don't cope with SRFs, see comment below */
+	if (query->hasTargetSRFs)
+		return false;
+
+	/* check for features we can prove distinctness with */
 	if (query->distinctClause != NIL ||
 		query->groupClause != NIL ||
 		query->groupingSets != NIL ||
@@ -690,7 +699,7 @@ query_is_distinct_for(Query *query, List *colnos, List *opids)
 	 * specified columns, since those must be evaluated before de-duplication;
 	 * but it doesn't presently seem worth the complication to check that.)
 	 */
-	if (expression_returns_set((Node *) query->targetList))
+	if (query->hasTargetSRFs)
 		return false;
 
 	/*
@@ -772,9 +781,8 @@ query_is_distinct_for(Query *query, List *colnos, List *opids)
 	 */
 	if (query->setOperations)
 	{
-		SetOperationStmt *topop = (SetOperationStmt *) query->setOperations;
+		SetOperationStmt *topop = castNode(SetOperationStmt, query->setOperations);
 
-		Assert(IsA(topop, SetOperationStmt));
 		Assert(topop->op != SETOP_NONE);
 
 		if (!topop->all)

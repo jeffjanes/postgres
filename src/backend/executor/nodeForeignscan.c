@@ -3,7 +3,7 @@
  * nodeForeignscan.c
  *	  Routines to support scans of foreign tables
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -152,8 +152,6 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	 */
 	ExecAssignExprContext(estate, &scanstate->ss.ps);
 
-	scanstate->ss.ps.ps_TupFromTlist = false;
-
 	/*
 	 * initialize child expressions
 	 */
@@ -285,8 +283,8 @@ ExecReScanForeignScan(ForeignScanState *node)
 
 	/*
 	 * If chgParam of subnode is not null then plan will be re-scanned by
-	 * first ExecProcNode.  outerPlan may also be NULL, in which case there
-	 * is nothing to rescan at all.
+	 * first ExecProcNode.  outerPlan may also be NULL, in which case there is
+	 * nothing to rescan at all.
 	 */
 	if (outerPlan != NULL && outerPlan->chgParam == NULL)
 		ExecReScan(outerPlan);
@@ -354,4 +352,20 @@ ExecForeignScanInitializeWorker(ForeignScanState *node, shm_toc *toc)
 		coordinate = shm_toc_lookup(toc, plan_node_id);
 		fdwroutine->InitializeWorkerForeignScan(node, toc, coordinate);
 	}
+}
+
+/* ----------------------------------------------------------------
+ *		ExecShutdownForeignScan
+ *
+ *		Gives FDW chance to stop asynchronous resource consumption
+ *		and release any resources still held.
+ * ----------------------------------------------------------------
+ */
+void
+ExecShutdownForeignScan(ForeignScanState *node)
+{
+	FdwRoutine *fdwroutine = node->fdwroutine;
+
+	if (fdwroutine->ShutdownForeignScan)
+		fdwroutine->ShutdownForeignScan(node);
 }

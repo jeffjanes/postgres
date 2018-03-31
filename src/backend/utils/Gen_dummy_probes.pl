@@ -4,7 +4,7 @@
 # Gen_dummy_probes.pl
 #    Perl script that generates probes.h file when dtrace is not available
 #
-# Portions Copyright (c) 2008-2016, PostgreSQL Global Development Group
+# Portions Copyright (c) 2008-2017, PostgreSQL Global Development Group
 #
 #
 # IDENTIFICATION
@@ -224,6 +224,7 @@ sub printQ()
 	{
 		if (ref($q))
 		{
+
 			# flush open w files so that reading this file gets it all
 			if (exists($wFiles{$$q}) && $wFiles{$$q} ne '')
 			{

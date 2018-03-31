@@ -10,7 +10,7 @@
  *	  Index cost functions are located via the index AM's API struct,
  *	  which is obtained from the handler function registered in pg_am.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -98,6 +98,7 @@
 #include "postgres.h"
 
 #include <ctype.h>
+#include <float.h>
 #include <math.h>
 
 #include "access/gin.h"
@@ -141,6 +142,7 @@
 #include "utils/timestamp.h"
 #include "utils/tqual.h"
 #include "utils/typcache.h"
+#include "utils/varlena.h"
 
 
 /* Hooks for plugins to get control when we ask for stats */
@@ -2511,10 +2513,24 @@ eqjoinsel_semi(Oid operator,
 	 * We can apply this clamping both with respect to the base relation from
 	 * which the join variable comes (if there is just one), and to the
 	 * immediate inner input relation of the current join.
+	 *
+	 * If we clamp, we can treat nd2 as being a non-default estimate; it's not
+	 * great, maybe, but it didn't come out of nowhere either.  This is most
+	 * helpful when the inner relation is empty and consequently has no stats.
 	 */
 	if (vardata2->rel)
-		nd2 = Min(nd2, vardata2->rel->rows);
-	nd2 = Min(nd2, inner_rel->rows);
+	{
+		if (nd2 >= vardata2->rel->rows)
+		{
+			nd2 = vardata2->rel->rows;
+			isdefault2 = false;
+		}
+	}
+	if (nd2 >= inner_rel->rows)
+	{
+		nd2 = inner_rel->rows;
+		isdefault2 = false;
+	}
 
 	if (HeapTupleIsValid(vardata1->statsTuple))
 	{
@@ -3784,6 +3800,7 @@ convert_to_scalar(Datum value, Oid valuetypid, double *scaledvalue,
 		case INETOID:
 		case CIDROID:
 		case MACADDROID:
+		case MACADDR8OID:
 			*scaledvalue = convert_network_to_scalar(value, valuetypid);
 			*scaledlobound = convert_network_to_scalar(lobound, boundstypid);
 			*scaledhibound = convert_network_to_scalar(hibound, boundstypid);
@@ -4197,31 +4214,17 @@ convert_timevalue_to_scalar(Datum value, Oid typid)
 				 * average month length of 365.25/12.0 days.  Not too
 				 * accurate, but plenty good enough for our purposes.
 				 */
-#ifdef HAVE_INT64_TIMESTAMP
 				return interval->time + interval->day * (double) USECS_PER_DAY +
 					interval->month * ((DAYS_PER_YEAR / (double) MONTHS_PER_YEAR) * USECS_PER_DAY);
-#else
-				return interval->time + interval->day * SECS_PER_DAY +
-					interval->month * ((DAYS_PER_YEAR / (double) MONTHS_PER_YEAR) * (double) SECS_PER_DAY);
-#endif
 			}
 		case RELTIMEOID:
-#ifdef HAVE_INT64_TIMESTAMP
 			return (DatumGetRelativeTime(value) * 1000000.0);
-#else
-			return DatumGetRelativeTime(value);
-#endif
 		case TINTERVALOID:
 			{
 				TimeInterval tinterval = DatumGetTimeInterval(value);
 
-#ifdef HAVE_INT64_TIMESTAMP
 				if (tinterval->status != 0)
 					return ((tinterval->data[1] - tinterval->data[0]) * 1000000.0);
-#else
-				if (tinterval->status != 0)
-					return tinterval->data[1] - tinterval->data[0];
-#endif
 				return 0;		/* for lack of a better idea */
 			}
 		case TIMEOID:
@@ -4231,11 +4234,7 @@ convert_timevalue_to_scalar(Datum value, Oid typid)
 				TimeTzADT  *timetz = DatumGetTimeTzADTP(value);
 
 				/* use GMT-equivalent time */
-#ifdef HAVE_INT64_TIMESTAMP
 				return (double) (timetz->time + (timetz->zone * 1000000.0));
-#else
-				return (double) (timetz->time + timetz->zone);
-#endif
 			}
 	}
 
@@ -4314,7 +4313,7 @@ get_restriction_variable(PlannerInfo *root, List *args, int varRelid,
 		return true;
 	}
 
-	/* Ooops, clause has wrong structure (probably var op var) */
+	/* Oops, clause has wrong structure (probably var op var) */
 	ReleaseVariableStats(*vardata);
 	ReleaseVariableStats(rdata);
 
@@ -4738,6 +4737,7 @@ double
 get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 {
 	double		stadistinct;
+	double		stanullfrac = 0.0;
 	double		ntuples;
 
 	*isdefault = false;
@@ -4745,7 +4745,8 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 	/*
 	 * Determine the stadistinct value to use.  There are cases where we can
 	 * get an estimate even without a pg_statistic entry, or can get a better
-	 * value than is in pg_statistic.
+	 * value than is in pg_statistic.  Grab stanullfrac too if we can find it
+	 * (otherwise, assume no nulls, for lack of any better idea).
 	 */
 	if (HeapTupleIsValid(vardata->statsTuple))
 	{
@@ -4754,6 +4755,7 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 
 		stats = (Form_pg_statistic) GETSTRUCT(vardata->statsTuple);
 		stadistinct = stats->stadistinct;
+		stanullfrac = stats->stanullfrac;
 	}
 	else if (vardata->vartype == BOOLOID)
 	{
@@ -4777,7 +4779,7 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 			{
 				case ObjectIdAttributeNumber:
 				case SelfItemPointerAttributeNumber:
-					stadistinct = -1.0; /* unique */
+					stadistinct = -1.0; /* unique (and all non null) */
 					break;
 				case TableOidAttributeNumber:
 					stadistinct = 1.0;	/* only 1 value */
@@ -4799,10 +4801,11 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 	 * If there is a unique index or DISTINCT clause for the variable, assume
 	 * it is unique no matter what pg_statistic says; the statistics could be
 	 * out of date, or we might have found a partial unique index that proves
-	 * the var is unique for this query.
+	 * the var is unique for this query.  However, we'd better still believe
+	 * the null-fraction statistic.
 	 */
 	if (vardata->isunique)
-		stadistinct = -1.0;
+		stadistinct = -1.0 * (1.0 - stanullfrac);
 
 	/*
 	 * If we had an absolute estimate, use that.
@@ -5256,7 +5259,7 @@ find_join_input_rel(PlannerInfo *root, Relids relids)
 /*
  * Check whether char is a letter (and, hence, subject to case-folding)
  *
- * In multibyte character sets, we can't use isalpha, and it does not seem
+ * In multibyte character sets or with ICU, we can't use isalpha, and it does not seem
  * worth trying to convert to wchar_t to use iswalpha.  Instead, just assume
  * any multibyte char is potentially case-varying.
  */
@@ -5268,9 +5271,11 @@ pattern_char_isalpha(char c, bool is_multibyte,
 		return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 	else if (is_multibyte && IS_HIGHBIT_SET(c))
 		return true;
+	else if (locale && locale->provider == COLLPROVIDER_ICU)
+		return IS_HIGHBIT_SET(c) ? true : false;
 #ifdef HAVE_LOCALE_T
-	else if (locale)
-		return isalpha_l((unsigned char) c, locale);
+	else if (locale && locale->provider == COLLPROVIDER_LIBC)
+		return isalpha_l((unsigned char) c, locale->info.lt);
 #endif
 	else
 		return isalpha((unsigned char) c);
@@ -5340,13 +5345,12 @@ like_fixed_prefix(Const *patt_const, bool case_insensitive, Oid collation,
 	}
 	else
 	{
-		bytea	   *bstr = DatumGetByteaP(patt_const->constvalue);
+		bytea	   *bstr = DatumGetByteaPP(patt_const->constvalue);
 
-		pattlen = VARSIZE(bstr) - VARHDRSZ;
+		pattlen = VARSIZE_ANY_EXHDR(bstr);
 		patt = (char *) palloc(pattlen);
-		memcpy(patt, VARDATA(bstr), pattlen);
-		if ((Pointer) bstr != DatumGetPointer(patt_const->constvalue))
-			pfree(bstr);
+		memcpy(patt, VARDATA_ANY(bstr), pattlen);
+		Assert((Pointer) bstr == DatumGetPointer(patt_const->constvalue));
 	}
 
 	match = palloc(pattlen + 1);
@@ -5856,13 +5860,12 @@ make_greater_string(const Const *str_const, FmgrInfo *ltproc, Oid collation)
 	}
 	else if (datatype == BYTEAOID)
 	{
-		bytea	   *bstr = DatumGetByteaP(str_const->constvalue);
+		bytea	   *bstr = DatumGetByteaPP(str_const->constvalue);
 
-		len = VARSIZE(bstr) - VARHDRSZ;
+		len = VARSIZE_ANY_EXHDR(bstr);
 		workstr = (char *) palloc(len);
-		memcpy(workstr, VARDATA(bstr), len);
-		if ((Pointer) bstr != DatumGetPointer(str_const->constvalue))
-			pfree(bstr);
+		memcpy(workstr, VARDATA_ANY(bstr), len);
+		Assert((Pointer) bstr == DatumGetPointer(str_const->constvalue));
 		cmpstr = str_const->constvalue;
 	}
 	else
@@ -6068,14 +6071,13 @@ deconstruct_indexquals(IndexPath *path)
 
 	forboth(lcc, path->indexquals, lci, path->indexqualcols)
 	{
-		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lcc);
+		RestrictInfo *rinfo = castNode(RestrictInfo, lfirst(lcc));
 		int			indexcol = lfirst_int(lci);
 		Expr	   *clause;
 		Node	   *leftop,
 				   *rightop;
 		IndexQualInfo *qinfo;
 
-		Assert(IsA(rinfo, RestrictInfo));
 		clause = rinfo->clause;
 
 		qinfo = (IndexQualInfo *) palloc(sizeof(IndexQualInfo));
@@ -6452,7 +6454,8 @@ add_predicate_to_quals(IndexOptInfo *index, List *indexQuals)
 void
 btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 			   Cost *indexStartupCost, Cost *indexTotalCost,
-			   Selectivity *indexSelectivity, double *indexCorrelation)
+			   Selectivity *indexSelectivity, double *indexCorrelation,
+			   double *indexPages)
 {
 	IndexOptInfo *index = path->indexinfo;
 	List	   *qinfos;
@@ -6742,12 +6745,14 @@ btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexTotalCost = costs.indexTotalCost;
 	*indexSelectivity = costs.indexSelectivity;
 	*indexCorrelation = costs.indexCorrelation;
+	*indexPages = costs.numIndexPages;
 }
 
 void
 hashcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				 Cost *indexStartupCost, Cost *indexTotalCost,
-				 Selectivity *indexSelectivity, double *indexCorrelation)
+				 Selectivity *indexSelectivity, double *indexCorrelation,
+				 double *indexPages)
 {
 	List	   *qinfos;
 	GenericCosts costs;
@@ -6788,12 +6793,14 @@ hashcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexTotalCost = costs.indexTotalCost;
 	*indexSelectivity = costs.indexSelectivity;
 	*indexCorrelation = costs.indexCorrelation;
+	*indexPages = costs.numIndexPages;
 }
 
 void
 gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				 Cost *indexStartupCost, Cost *indexTotalCost,
-				 Selectivity *indexSelectivity, double *indexCorrelation)
+				 Selectivity *indexSelectivity, double *indexCorrelation,
+				 double *indexPages)
 {
 	IndexOptInfo *index = path->indexinfo;
 	List	   *qinfos;
@@ -6847,12 +6854,14 @@ gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexTotalCost = costs.indexTotalCost;
 	*indexSelectivity = costs.indexSelectivity;
 	*indexCorrelation = costs.indexCorrelation;
+	*indexPages = costs.numIndexPages;
 }
 
 void
 spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				Cost *indexStartupCost, Cost *indexTotalCost,
-				Selectivity *indexSelectivity, double *indexCorrelation)
+				Selectivity *indexSelectivity, double *indexCorrelation,
+				double *indexPages)
 {
 	IndexOptInfo *index = path->indexinfo;
 	List	   *qinfos;
@@ -6906,6 +6915,7 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexTotalCost = costs.indexTotalCost;
 	*indexSelectivity = costs.indexSelectivity;
 	*indexCorrelation = costs.indexCorrelation;
+	*indexPages = costs.numIndexPages;
 }
 
 
@@ -7203,7 +7213,8 @@ gincost_scalararrayopexpr(PlannerInfo *root,
 void
 gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				Cost *indexStartupCost, Cost *indexTotalCost,
-				Selectivity *indexSelectivity, double *indexCorrelation)
+				Selectivity *indexSelectivity, double *indexCorrelation,
+				double *indexPages)
 {
 	IndexOptInfo *index = path->indexinfo;
 	List	   *indexQuals = path->indexquals;
@@ -7518,6 +7529,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexStartupCost += qual_arg_cost;
 	*indexTotalCost += qual_arg_cost;
 	*indexTotalCost += (numTuples * *indexSelectivity) * (cpu_index_tuple_cost + qual_op_cost);
+	*indexPages = dataPagesFetched;
 }
 
 /*
@@ -7526,7 +7538,8 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 void
 brincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				 Cost *indexStartupCost, Cost *indexTotalCost,
-				 Selectivity *indexSelectivity, double *indexCorrelation)
+				 Selectivity *indexSelectivity, double *indexCorrelation,
+				 double *indexPages)
 {
 	IndexOptInfo *index = path->indexinfo;
 	List	   *indexQuals = path->indexquals;
@@ -7578,6 +7591,7 @@ brincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexStartupCost += qual_arg_cost;
 	*indexTotalCost += qual_arg_cost;
 	*indexTotalCost += (numTuples * *indexSelectivity) * (cpu_index_tuple_cost + qual_op_cost);
+	*indexPages = index->pages;
 
 	/* XXX what about pages_per_range? */
 }

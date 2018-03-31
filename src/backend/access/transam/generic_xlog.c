@@ -4,7 +4,7 @@
  *	 Implementation of generic xlog records.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/generic_xlog.c
@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include "access/bufmask.h"
 #include "access/generic_xlog.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
@@ -52,9 +53,8 @@ typedef struct
 	Buffer		buffer;			/* registered buffer */
 	int			flags;			/* flags for this buffer */
 	int			deltaLen;		/* space consumed in delta field */
-	char		*image;			/* copy of page image for modification,
-								 * do not do it in-place to have aligned
-								 * memory chunk */
+	char	   *image;			/* copy of page image for modification, do not
+								 * do it in-place to have aligned memory chunk */
 	char		delta[MAX_DELTA_SIZE];	/* delta between page images */
 } PageData;
 
@@ -64,7 +64,7 @@ struct GenericXLogState
 	/*
 	 * page's images. Should be first in this struct to have MAXALIGN'ed
 	 * images addresses, because some code working with pages directly aligns
-	 * addresses, not an offsets from begining of page
+	 * addresses, not offsets from beginning of page
 	 */
 	char		images[MAX_GENERIC_XLOG_PAGES * BLCKSZ];
 	PageData	pages[MAX_GENERIC_XLOG_PAGES];
@@ -533,4 +533,15 @@ generic_redo(XLogReaderState *record)
 		if (BufferIsValid(buffers[block_id]))
 			UnlockReleaseBuffer(buffers[block_id]);
 	}
+}
+
+/*
+ * Mask a generic page before performing consistency checks on it.
+ */
+void
+generic_mask(char *page, BlockNumber blkno)
+{
+	mask_page_lsn(page);
+
+	mask_unused_space(page);
 }

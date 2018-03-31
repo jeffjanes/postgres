@@ -4,7 +4,7 @@
  *	  rmgr descriptor routines for access/transam/generic_xlog.c
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/rmgrdesc/genericdesc.c
@@ -29,8 +29,8 @@ generic_desc(StringInfo buf, XLogReaderState *record)
 
 	while (ptr < end)
 	{
-		OffsetNumber	offset,
-						length;
+		OffsetNumber offset,
+					length;
 
 		memcpy(&offset, ptr, sizeof(offset));
 		ptr += sizeof(offset);

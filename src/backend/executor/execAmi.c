@@ -3,7 +3,7 @@
  * execAmi.c
  *	  miscellaneous executor access method routines
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/executor/execAmi.c
@@ -39,6 +39,7 @@
 #include "executor/nodeMergejoin.h"
 #include "executor/nodeModifyTable.h"
 #include "executor/nodeNestloop.h"
+#include "executor/nodeProjectSet.h"
 #include "executor/nodeRecursiveunion.h"
 #include "executor/nodeResult.h"
 #include "executor/nodeSamplescan.h"
@@ -47,6 +48,7 @@
 #include "executor/nodeSort.h"
 #include "executor/nodeSubplan.h"
 #include "executor/nodeSubqueryscan.h"
+#include "executor/nodeTableFuncscan.h"
 #include "executor/nodeTidscan.h"
 #include "executor/nodeUnique.h"
 #include "executor/nodeValuesscan.h"
@@ -58,7 +60,6 @@
 #include "utils/syscache.h"
 
 
-static bool TargetListSupportsBackwardScan(List *targetlist);
 static bool IndexSupportsBackwardScan(Oid indexid);
 
 
@@ -119,7 +120,7 @@ ExecReScan(PlanState *node)
 			UpdateChangedParamSet(node->righttree, node->chgParam);
 	}
 
-	/* Shut down any SRFs in the plan node's targetlist */
+	/* Call expression callbacks */
 	if (node->ps_ExprContext)
 		ReScanExprContext(node->ps_ExprContext);
 
@@ -128,6 +129,10 @@ ExecReScan(PlanState *node)
 	{
 		case T_ResultState:
 			ExecReScanResult((ResultState *) node);
+			break;
+
+		case T_ProjectSetState:
+			ExecReScanProjectSet((ProjectSetState *) node);
 			break;
 
 		case T_ModifyTableState:
@@ -192,6 +197,10 @@ ExecReScan(PlanState *node)
 
 		case T_FunctionScanState:
 			ExecReScanFunctionScan((FunctionScanState *) node);
+			break;
+
+		case T_TableFuncScanState:
+			ExecReScanTableFuncScan((TableFuncScanState *) node);
 			break;
 
 		case T_ValuesScanState:
@@ -399,11 +408,12 @@ ExecSupportsMarkRestore(Path *pathnode)
 			return true;
 
 		case T_CustomScan:
-			Assert(IsA(pathnode, CustomPath));
-			if (((CustomPath *) pathnode)->flags & CUSTOMPATH_SUPPORT_MARK_RESTORE)
+		{
+			CustomPath *customPath = castNode(CustomPath, pathnode);
+			if (customPath->flags & CUSTOMPATH_SUPPORT_MARK_RESTORE)
 				return true;
 			return false;
-
+		}
 		case T_Result:
 
 			/*
@@ -444,10 +454,9 @@ ExecSupportsBackwardScan(Plan *node)
 		return false;
 
 	/*
-	 * Parallel-aware nodes return a subset of the tuples in each worker,
-	 * and in general we can't expect to have enough bookkeeping state to
-	 * know which ones we returned in this worker as opposed to some other
-	 * worker.
+	 * Parallel-aware nodes return a subset of the tuples in each worker, and
+	 * in general we can't expect to have enough bookkeeping state to know
+	 * which ones we returned in this worker as opposed to some other worker.
 	 */
 	if (node->parallel_aware)
 		return false;
@@ -456,8 +465,7 @@ ExecSupportsBackwardScan(Plan *node)
 	{
 		case T_Result:
 			if (outerPlan(node) != NULL)
-				return ExecSupportsBackwardScan(outerPlan(node)) &&
-					TargetListSupportsBackwardScan(node->targetlist);
+				return ExecSupportsBackwardScan(outerPlan(node));
 			else
 				return false;
 
@@ -474,13 +482,6 @@ ExecSupportsBackwardScan(Plan *node)
 				return true;
 			}
 
-		case T_SeqScan:
-		case T_TidScan:
-		case T_FunctionScan:
-		case T_ValuesScan:
-		case T_CteScan:
-			return TargetListSupportsBackwardScan(node->targetlist);
-
 		case T_SampleScan:
 			/* Simplify life for tablesample methods by disallowing this */
 			return false;
@@ -489,52 +490,39 @@ ExecSupportsBackwardScan(Plan *node)
 			return false;
 
 		case T_IndexScan:
-			return IndexSupportsBackwardScan(((IndexScan *) node)->indexid) &&
-				TargetListSupportsBackwardScan(node->targetlist);
+			return IndexSupportsBackwardScan(((IndexScan *) node)->indexid);
 
 		case T_IndexOnlyScan:
-			return IndexSupportsBackwardScan(((IndexOnlyScan *) node)->indexid) &&
-				TargetListSupportsBackwardScan(node->targetlist);
+			return IndexSupportsBackwardScan(((IndexOnlyScan *) node)->indexid);
 
 		case T_SubqueryScan:
-			return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan) &&
-				TargetListSupportsBackwardScan(node->targetlist);
+			return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan);
 
 		case T_CustomScan:
 			{
 				uint32		flags = ((CustomScan *) node)->flags;
 
-				if ((flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN) &&
-					TargetListSupportsBackwardScan(node->targetlist))
+				if (flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
 					return true;
 			}
 			return false;
 
+		case T_SeqScan:
+		case T_TidScan:
+		case T_FunctionScan:
+		case T_ValuesScan:
+		case T_CteScan:
 		case T_Material:
 		case T_Sort:
-			/* these don't evaluate tlist */
 			return true;
 
 		case T_LockRows:
 		case T_Limit:
-			/* these don't evaluate tlist */
 			return ExecSupportsBackwardScan(outerPlan(node));
 
 		default:
 			return false;
 	}
-}
-
-/*
- * If the tlist contains set-returning functions, we can't support backward
- * scan, because the TupFromTlist code is direction-ignorant.
- */
-static bool
-TargetListSupportsBackwardScan(List *targetlist)
-{
-	if (expression_returns_set((Node *) targetlist))
-		return false;
-	return true;
 }
 
 /*
@@ -556,7 +544,7 @@ IndexSupportsBackwardScan(Oid indexid)
 	idxrelrec = (Form_pg_class) GETSTRUCT(ht_idxrel);
 
 	/* Fetch the index AM's API struct */
-	amroutine = GetIndexAmRoutineByAmId(idxrelrec->relam);
+	amroutine = GetIndexAmRoutineByAmId(idxrelrec->relam, false);
 
 	result = amroutine->amcanbackward;
 
@@ -581,6 +569,7 @@ ExecMaterializesOutput(NodeTag plantype)
 	{
 		case T_Material:
 		case T_FunctionScan:
+		case T_TableFuncScan:
 		case T_CteScan:
 		case T_WorkTableScan:
 		case T_Sort:

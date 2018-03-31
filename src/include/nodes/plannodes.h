@@ -4,7 +4,7 @@
  *	  definitions for query plan nodes
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/plannodes.h
@@ -31,13 +31,18 @@
  *
  * The output of the planner is a Plan tree headed by a PlannedStmt node.
  * PlannedStmt holds the "one time" information needed by the executor.
+ *
+ * For simplicity in APIs, we also wrap utility statements in PlannedStmt
+ * nodes; in such cases, commandType == CMD_UTILITY, the statement itself
+ * is in the utilityStmt field, and the rest of the struct is mostly dummy.
+ * (We do use canSetTag, stmt_location, stmt_len, and possibly queryId.)
  * ----------------
  */
 typedef struct PlannedStmt
 {
 	NodeTag		type;
 
-	CmdType		commandType;	/* select|insert|update|delete */
+	CmdType		commandType;	/* select|insert|update|delete|utility */
 
 	uint32		queryId;		/* query identifier (copied from Query) */
 
@@ -49,6 +54,10 @@ typedef struct PlannedStmt
 
 	bool		transientPlan;	/* redo plan when TransactionXmin changes? */
 
+	bool		dependsOnRole;	/* is plan specific to current role? */
+
+	bool		parallelModeNeeded;		/* parallel mode required to execute? */
+
 	struct Plan *planTree;		/* tree of Plan nodes */
 
 	List	   *rtable;			/* list of RangeTblEntry nodes */
@@ -56,7 +65,8 @@ typedef struct PlannedStmt
 	/* rtable indexes of target relations for INSERT/UPDATE/DELETE */
 	List	   *resultRelations;	/* integer list of RT indexes, or NIL */
 
-	Node	   *utilityStmt;	/* non-null if this is DECLARE CURSOR */
+	/* rtable indexes of non-leaf target relations for INSERT/UPDATE/DELETE */
+	List	   *nonleafResultRelations;
 
 	List	   *subplans;		/* Plan trees for SubPlan expressions */
 
@@ -70,10 +80,11 @@ typedef struct PlannedStmt
 
 	int			nParamExec;		/* number of PARAM_EXEC Params used */
 
-	bool		hasRowSecurity; /* row security applied? */
+	Node	   *utilityStmt;	/* non-null if this is utility stmt */
 
-	bool		parallelModeNeeded; /* parallel mode required to execute? */
-	bool		hasForeignJoin;	/* Plan has a pushed down foreign join */
+	/* statement location in source string (copied from Query) */
+	int			stmt_location;	/* start location, or -1 if unknown */
+	int			stmt_len;		/* length in bytes; 0 means "rest of string" */
 } PlannedStmt;
 
 /* macro for fetching the Plan associated with a SubPlan node */
@@ -169,6 +180,17 @@ typedef struct Result
 } Result;
 
 /* ----------------
+ *	 ProjectSet node -
+ *		Apply a projection that includes set-returning functions to the
+ *		output tuples of the outer plan.
+ * ----------------
+ */
+typedef struct ProjectSet
+{
+	Plan		plan;
+} ProjectSet;
+
+/* ----------------
  *	 ModifyTable node -
  *		Apply rows produced by subplan(s) to result table(s),
  *		by inserting, updating, or deleting.
@@ -183,6 +205,8 @@ typedef struct ModifyTable
 	CmdType		operation;		/* INSERT, UPDATE, or DELETE */
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
 	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *resultRelations;	/* integer list of RT indexes */
 	int			resultRelIndex; /* index of first resultRel in plan's list */
 	List	   *plans;			/* plan(s) producing source data */
@@ -208,6 +232,8 @@ typedef struct ModifyTable
 typedef struct Append
 {
 	Plan		plan;
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *appendplans;
 } Append;
 
@@ -219,6 +245,8 @@ typedef struct Append
 typedef struct MergeAppend
 {
 	Plan		plan;
+	/* RT indexes of non-leaf tables in a partition tree */
+	List	   *partitioned_rels;
 	List	   *mergeplans;
 	/* remaining fields are just like the sort-key info in struct Sort */
 	int			numCols;		/* number of sort-key columns */
@@ -273,6 +301,7 @@ typedef struct BitmapAnd
 typedef struct BitmapOr
 {
 	Plan		plan;
+	bool		isshared;
 	List	   *bitmapplans;
 } BitmapOr;
 
@@ -401,6 +430,7 @@ typedef struct BitmapIndexScan
 {
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
+	bool		isshared;		/* Create shared bitmap if set */
 	List	   *indexqual;		/* list of index quals (OpExprs) */
 	List	   *indexqualorig;	/* the same in original form */
 } BitmapIndexScan;
@@ -477,6 +507,16 @@ typedef struct ValuesScan
 } ValuesScan;
 
 /* ----------------
+ *		TableFunc scan node
+ * ----------------
+ */
+typedef struct TableFuncScan
+{
+	Scan		scan;
+	TableFunc  *tablefunc;		/* table function node */
+} TableFuncScan;
+
+/* ----------------
  *		CteScan node
  * ----------------
  */
@@ -537,7 +577,8 @@ typedef struct ForeignScan
 	List	   *fdw_exprs;		/* expressions that FDW may evaluate */
 	List	   *fdw_private;	/* private data for FDW */
 	List	   *fdw_scan_tlist; /* optional tlist describing scan tuple */
-	List	   *fdw_recheck_quals;	/* original quals not in scan.plan.qual */
+	List	   *fdw_recheck_quals;		/* original quals not in
+										 * scan.plan.qual */
 	Bitmapset  *fs_relids;		/* RTIs generated by this scan */
 	bool		fsSystemCol;	/* true if any "system column" is needed */
 } ForeignScan;
@@ -560,7 +601,8 @@ struct CustomScanMethods;
 typedef struct CustomScan
 {
 	Scan		scan;
-	uint32		flags;			/* mask of CUSTOMPATH_* flags, see relation.h */
+	uint32		flags;			/* mask of CUSTOMPATH_* flags, see
+								 * nodes/extensible.h */
 	List	   *custom_plans;	/* list of Plan nodes, if any */
 	List	   *custom_exprs;	/* expressions that custom code may evaluate */
 	List	   *custom_private; /* private data for custom code */
@@ -710,14 +752,13 @@ typedef struct Agg
 {
 	Plan		plan;
 	AggStrategy aggstrategy;	/* basic strategy, see nodes.h */
-	bool		combineStates;	/* input tuples contain transition states */
-	bool		finalizeAggs;	/* should we call the finalfn on agg states? */
-	bool		serialStates;	/* should agg states be (de)serialized? */
+	AggSplit	aggsplit;		/* agg-splitting mode, see nodes.h */
 	int			numCols;		/* number of grouping columns */
 	AttrNumber *grpColIdx;		/* their indexes in the target list */
 	Oid		   *grpOperators;	/* equality operators to compare with */
 	long		numGroups;		/* estimated number of groups in input */
-	/* Note: the planner only provides numGroups in AGG_HASHED case */
+	Bitmapset  *aggParams;		/* IDs of Params used in Aggref inputs */
+	/* Note: planner provides numGroups & aggParams only in AGG_HASHED case */
 	List	   *groupingSets;	/* grouping sets to use */
 	List	   *chain;			/* chained Agg/Sort nodes */
 } Agg;
@@ -764,6 +805,22 @@ typedef struct Gather
 	bool		single_copy;
 	bool		invisible;		/* suppress EXPLAIN display (for testing)? */
 } Gather;
+
+/* ------------
+ *		gather merge node
+ * ------------
+ */
+typedef struct GatherMerge
+{
+	Plan		plan;
+	int			num_workers;
+	/* remaining fields are just like the sort-key info in struct Sort */
+	int			numCols;		/* number of sort-key columns */
+	AttrNumber *sortColIdx;		/* their indexes in the target list */
+	Oid		   *sortOperators;	/* OIDs of operators to sort them by */
+	Oid		   *collations;		/* OIDs of collations */
+	bool	   *nullsFirst;		/* NULLS FIRST/LAST directions */
+} GatherMerge;
 
 /* ----------------
  *		hash build node
@@ -889,11 +946,12 @@ typedef enum RowMarkType
  * When the planner discovers that a relation is the root of an inheritance
  * tree, it sets isParent true, and adds an additional PlanRowMark to the
  * list for each child relation (including the target rel itself in its role
- * as a child).  The child entries have rti == child rel's RT index and
- * prti == parent's RT index, and can therefore be recognized as children by
- * the fact that prti != rti.  The parent's allMarkTypes field gets the OR
- * of (1<<markType) across all its children (this definition allows children
- * to use different markTypes).
+ * as a child).  isParent is also set to true for the partitioned child
+ * relations, which are not scanned just like the root parent.  The child
+ * entries have rti == child rel's RT index and prti == parent's RT index,
+ * and can therefore be recognized as children by the fact that prti != rti.
+ * The parent's allMarkTypes field gets the OR of (1<<markType) across all
+ * its children (this definition allows children to use different markTypes).
  *
  * The planner also adds resjunk output columns to the plan that carry
  * information sufficient to identify the locked or fetched rows.  When

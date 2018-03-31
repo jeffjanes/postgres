@@ -3,7 +3,7 @@
  * auto_explain.c
  *
  *
- * Copyright (c) 2008-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2008-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/auto_explain/auto_explain.c
@@ -61,7 +61,7 @@ void		_PG_fini(void);
 static void explain_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void explain_ExecutorRun(QueryDesc *queryDesc,
 					ScanDirection direction,
-					uint64 count);
+					uint64 count, bool execute_once);
 static void explain_ExecutorFinish(QueryDesc *queryDesc);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
 
@@ -165,16 +165,16 @@ _PG_init(void)
 
 	DefineCustomRealVariable("auto_explain.sample_rate",
 							 "Fraction of queries to process.",
-							NULL,
-							&auto_explain_sample_rate,
-							1.0,
-							0.0,
-							1.0,
-							PGC_SUSET,
-							0,
-							NULL,
-							NULL,
-							NULL);
+							 NULL,
+							 &auto_explain_sample_rate,
+							 1.0,
+							 0.0,
+							 1.0,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 
 	EmitWarningsOnPlaceholders("auto_explain");
 
@@ -209,12 +209,12 @@ static void
 explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	/*
-	 * For rate sampling, randomly choose top-level statement. Either
-	 * all nested statements will be explained or none will.
+	 * For rate sampling, randomly choose top-level statement. Either all
+	 * nested statements will be explained or none will.
 	 */
 	if (auto_explain_log_min_duration >= 0 && nesting_level == 0)
 		current_query_sampled = (random() < auto_explain_sample_rate *
-				MAX_RANDOM_VALUE);
+								 MAX_RANDOM_VALUE);
 
 	if (auto_explain_enabled() && current_query_sampled)
 	{
@@ -257,15 +257,16 @@ explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
  * ExecutorRun hook: all we need do is track nesting depth
  */
 static void
-explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
+					uint64 count, bool execute_once)
 {
 	nesting_level++;
 	PG_TRY();
 	{
 		if (prev_ExecutorRun)
-			prev_ExecutorRun(queryDesc, direction, count);
+			prev_ExecutorRun(queryDesc, direction, count, execute_once);
 		else
-			standard_ExecutorRun(queryDesc, direction, count);
+			standard_ExecutorRun(queryDesc, direction, count, execute_once);
 		nesting_level--;
 	}
 	PG_CATCH();

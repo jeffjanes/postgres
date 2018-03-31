@@ -1,14 +1,13 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2017, PostgreSQL Global Development Group
  *
  * src/bin/psql/help.c
  */
 #include "postgres_fe.h"
 
 #ifndef WIN32
-#include <sys/types.h>			/* (ditto) */
 #include <unistd.h>				/* for geteuid() */
 #else
 #include <win32.h>
@@ -69,7 +68,7 @@ usage(unsigned short int pager)
 	 * Keep this line count in sync with the number of lines printed below!
 	 * Use "psql --help=options | wc" to count correctly.
 	 */
-	output = PageOutput(60, pager ? &(pset.popt.topt) : NULL);
+	output = PageOutput(61, pager ? &(pset.popt.topt) : NULL);
 
 	fprintf(output, _("psql is the PostgreSQL interactive terminal.\n\n"));
 	fprintf(output, _("Usage:\n"));
@@ -85,8 +84,8 @@ usage(unsigned short int pager)
 	fprintf(output, _("  -f, --file=FILENAME      execute commands from file, then exit\n"));
 	fprintf(output, _("  -l, --list               list available databases, then exit\n"));
 	fprintf(output, _("  -v, --set=, --variable=NAME=VALUE\n"
-					  "                           set psql variable NAME to VALUE\n"
-					  "                           (e.g., -v ON_ERROR_STOP=1)\n"));
+			   "                           set psql variable NAME to VALUE\n"
+				 "                           (e.g., -v ON_ERROR_STOP=1)\n"));
 	fprintf(output, _("  -V, --version            output version information, then exit\n"));
 	fprintf(output, _("  -X, --no-psqlrc          do not read startup file (~/.psqlrc)\n"));
 	fprintf(output, _("  -1 (\"one\"), --single-transaction\n"
@@ -168,12 +167,13 @@ slashUsage(unsigned short int pager)
 	 * Use "psql --help=commands | wc" to count correctly.  It's okay to count
 	 * the USE_READLINE line even in builds without that.
 	 */
-	output = PageOutput(111, pager ? &(pset.popt.topt) : NULL);
+	output = PageOutput(113, pager ? &(pset.popt.topt) : NULL);
 
 	fprintf(output, _("General\n"));
 	fprintf(output, _("  \\copyright             show PostgreSQL usage and distribution terms\n"));
 	fprintf(output, _("  \\errverbose            show most recent error message at maximum verbosity\n"));
 	fprintf(output, _("  \\g [FILE] or ;         execute query (and send results to file or |pipe)\n"));
+	fprintf(output, _("  \\gx [FILE]             as \\g, but forces expanded output mode\n"));
 	fprintf(output, _("  \\gexec                 execute query, then execute each value in its result\n"));
 	fprintf(output, _("  \\gset [PREFIX]         execute query and store results in psql variables\n"));
 	fprintf(output, _("  \\q                     quit psql\n"));
@@ -215,6 +215,7 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\d[S+]                 list tables, views, and sequences\n"));
 	fprintf(output, _("  \\d[S+]  NAME           describe table, view, sequence, or index\n"));
 	fprintf(output, _("  \\da[S]  [PATTERN]      list aggregates\n"));
+	fprintf(output, _("  \\dA[+]  [PATTERN]      list access methods\n"));
 	fprintf(output, _("  \\db[+]  [PATTERN]      list tablespaces\n"));
 	fprintf(output, _("  \\dc[S+] [PATTERN]      list conversions\n"));
 	fprintf(output, _("  \\dC[+]  [PATTERN]      list casts\n"));
@@ -240,6 +241,8 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\dO[S+] [PATTERN]      list collations\n"));
 	fprintf(output, _("  \\dp     [PATTERN]      list table, view, and sequence access privileges\n"));
 	fprintf(output, _("  \\drds [PATRN1 [PATRN2]] list per-database role settings\n"));
+	fprintf(output, _("  \\dRp[+] [PATTERN]      list replication publications\n"));
+	fprintf(output, _("  \\dRs[+] [PATTERN]      list replication subscriptions\n"));
 	fprintf(output, _("  \\ds[S+] [PATTERN]      list sequences\n"));
 	fprintf(output, _("  \\dt[S+] [PATTERN]      list tables\n"));
 	fprintf(output, _("  \\dT[S+] [PATTERN]      list data types\n"));
@@ -324,7 +327,7 @@ helpVariables(unsigned short int pager)
 	 * Windows builds currently print one more line than non-Windows builds.
 	 * Using the larger number is fine.
 	 */
-	output = PageOutput(87, pager ? &(pset.popt.topt) : NULL);
+	output = PageOutput(88, pager ? &(pset.popt.topt) : NULL);
 
 	fprintf(output, _("List of specially treated variables\n\n"));
 
@@ -345,9 +348,9 @@ helpVariables(unsigned short int pager)
 					  "                     (default: 0=unlimited)\n"));
 	fprintf(output, _("  HISTCONTROL        controls command history [ignorespace, ignoredups, ignoreboth]\n"));
 	fprintf(output, _("  HISTFILE           file name used to store the command history\n"));
-	fprintf(output, _("  HISTSIZE           the number of commands to store in the command history\n"));
+	fprintf(output, _("  HISTSIZE           max number of commands to store in the command history\n"));
 	fprintf(output, _("  HOST               the currently connected database server host\n"));
-	fprintf(output, _("  IGNOREEOF          if unset, sending an EOF to interactive session terminates application\n"));
+	fprintf(output, _("  IGNOREEOF          number of EOFs needed to terminate an interactive session\n"));
 	fprintf(output, _("  LASTOID            value of the last affected OID\n"));
 	fprintf(output, _("  ON_ERROR_ROLLBACK  if set, an error doesn't stop a transaction (uses implicit savepoints)\n"));
 	fprintf(output, _("  ON_ERROR_STOP      stop batch execution after error\n"));
@@ -371,8 +374,8 @@ helpVariables(unsigned short int pager)
 	fprintf(output, _("  expanded (or x)    expanded output [on, off, auto]\n"));
 	fprintf(output, _("  fieldsep           field separator for unaligned output (default \"%s\")\n"), DEFAULT_FIELD_SEP);
 	fprintf(output, _("  fieldsep_zero      set field separator for unaligned output to zero byte\n"));
-	fprintf(output, _("  format             set output format [unaligned, aligned, wrapped, html, asciidoc, ...]\n"));
 	fprintf(output, _("  footer             enable or disable display of the table footer [on, off]\n"));
+	fprintf(output, _("  format             set output format [unaligned, aligned, wrapped, html, asciidoc, ...]\n"));
 	fprintf(output, _("  linestyle          set the border line drawing style [ascii, old-ascii, unicode]\n"));
 	fprintf(output, _("  null               set the string to be printed in place of a null value\n"));
 	fprintf(output, _("  numericlocale      enable or disable display of a locale-specific character to separate\n"
@@ -571,7 +574,7 @@ print_copyright(void)
 	puts(
 		 "PostgreSQL Database Management System\n"
 		 "(formerly known as Postgres, then as Postgres95)\n\n"
-		 "Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group\n\n"
+		 "Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group\n\n"
 		 "Portions Copyright (c) 1994, The Regents of the University of California\n\n"
 	"Permission to use, copy, modify, and distribute this software and its\n"
 		 "documentation for any purpose, without fee, and without a written agreement\n"

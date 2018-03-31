@@ -3,7 +3,7 @@
  * fdwapi.h
  *	  API for foreign-data wrappers
  *
- * Copyright (c) 2010-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2017, PostgreSQL Global Development Group
  *
  * src/include/foreign/fdwapi.h
  *
@@ -60,7 +60,9 @@ typedef void (*GetForeignJoinPaths_function) (PlannerInfo *root,
 												   JoinPathExtraData *extra);
 
 typedef void (*GetForeignUpperPaths_function) (PlannerInfo *root,
-											   RelOptInfo *scan_join_rel);
+													 UpperRelationKind stage,
+													   RelOptInfo *input_rel,
+													 RelOptInfo *output_rel);
 
 typedef void (*AddForeignUpdateTargets_function) (Query *parsetree,
 												   RangeTblEntry *target_rte,
@@ -98,12 +100,12 @@ typedef void (*EndForeignModify_function) (EState *estate,
 typedef int (*IsForeignRelUpdatable_function) (Relation rel);
 
 typedef bool (*PlanDirectModify_function) (PlannerInfo *root,
-										   ModifyTable *plan,
-										   Index resultRelation,
-										   int subplan_index);
+													   ModifyTable *plan,
+													   Index resultRelation,
+													   int subplan_index);
 
 typedef void (*BeginDirectModify_function) (ForeignScanState *node,
-											int eflags);
+														int eflags);
 
 typedef TupleTableSlot *(*IterateDirectModify_function) (ForeignScanState *node);
 
@@ -142,13 +144,14 @@ typedef List *(*ImportForeignSchema_function) (ImportForeignSchemaStmt *stmt,
 														   Oid serverOid);
 
 typedef Size (*EstimateDSMForeignScan_function) (ForeignScanState *node,
-												ParallelContext *pcxt);
+													  ParallelContext *pcxt);
 typedef void (*InitializeDSMForeignScan_function) (ForeignScanState *node,
-												   ParallelContext *pcxt,
-												   void *coordinate);
+													   ParallelContext *pcxt,
+														   void *coordinate);
 typedef void (*InitializeWorkerForeignScan_function) (ForeignScanState *node,
-													  shm_toc *toc,
-													  void *coordinate);
+																shm_toc *toc,
+														   void *coordinate);
+typedef void (*ShutdownForeignScan_function) (ForeignScanState *node);
 typedef bool (*IsForeignScanParallelSafe_function) (PlannerInfo *root,
 															 RelOptInfo *rel,
 														 RangeTblEntry *rte);
@@ -222,6 +225,7 @@ typedef struct FdwRoutine
 	EstimateDSMForeignScan_function EstimateDSMForeignScan;
 	InitializeDSMForeignScan_function InitializeDSMForeignScan;
 	InitializeWorkerForeignScan_function InitializeWorkerForeignScan;
+	ShutdownForeignScan_function ShutdownForeignScan;
 } FdwRoutine;
 
 

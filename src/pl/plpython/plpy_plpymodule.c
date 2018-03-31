@@ -25,6 +25,9 @@ HTAB	   *PLy_spi_exceptions = NULL;
 
 
 static void PLy_add_exceptions(PyObject *plpy);
+static PyObject *PLy_create_exception(char *name,
+					 PyObject *base, PyObject *dict,
+					 const char *modname, PyObject *mod);
 static void PLy_generate_spi_exceptions(PyObject *mod, PyObject *base);
 
 /* module functions */
@@ -57,13 +60,13 @@ static PyMethodDef PLy_methods[] = {
 	/*
 	 * logging methods
 	 */
-	{"debug", (PyCFunction) PLy_debug, METH_VARARGS|METH_KEYWORDS, NULL},
-	{"log", (PyCFunction) PLy_log, METH_VARARGS|METH_KEYWORDS, NULL},
-	{"info", (PyCFunction) PLy_info, METH_VARARGS|METH_KEYWORDS, NULL},
-	{"notice", (PyCFunction) PLy_notice, METH_VARARGS|METH_KEYWORDS, NULL},
-	{"warning", (PyCFunction) PLy_warning, METH_VARARGS|METH_KEYWORDS, NULL},
-	{"error", (PyCFunction) PLy_error, METH_VARARGS|METH_KEYWORDS, NULL},
-	{"fatal", (PyCFunction) PLy_fatal, METH_VARARGS|METH_KEYWORDS, NULL},
+	{"debug", (PyCFunction) PLy_debug, METH_VARARGS | METH_KEYWORDS, NULL},
+	{"log", (PyCFunction) PLy_log, METH_VARARGS | METH_KEYWORDS, NULL},
+	{"info", (PyCFunction) PLy_info, METH_VARARGS | METH_KEYWORDS, NULL},
+	{"notice", (PyCFunction) PLy_notice, METH_VARARGS | METH_KEYWORDS, NULL},
+	{"warning", (PyCFunction) PLy_warning, METH_VARARGS | METH_KEYWORDS, NULL},
+	{"error", (PyCFunction) PLy_error, METH_VARARGS | METH_KEYWORDS, NULL},
+	{"fatal", (PyCFunction) PLy_fatal, METH_VARARGS | METH_KEYWORDS, NULL},
 
 	/*
 	 * create a stored plan
@@ -192,44 +195,60 @@ PLy_add_exceptions(PyObject *plpy)
 #else
 	excmod = PyModule_Create(&PLy_exc_module);
 #endif
+	if (excmod == NULL)
+		PLy_elog(ERROR, "could not create the spiexceptions module");
+
+	/*
+	 * PyModule_AddObject does not add a refcount to the object, for some odd
+	 * reason; we must do that.
+	 */
+	Py_INCREF(excmod);
 	if (PyModule_AddObject(plpy, "spiexceptions", excmod) < 0)
 		PLy_elog(ERROR, "could not add the spiexceptions module");
 
-	/*
-	 * XXX it appears that in some circumstances the reference count of the
-	 * spiexceptions module drops to zero causing a Python assert failure when
-	 * the garbage collector visits the module. This has been observed on the
-	 * buildfarm. To fix this, add an additional ref for the module here.
-	 *
-	 * This shouldn't cause a memory leak - we don't want this garbage
-	 * collected, and this function shouldn't be called more than once per
-	 * backend.
-	 */
-	Py_INCREF(excmod);
-
-	PLy_exc_error = PyErr_NewException("plpy.Error", NULL, NULL);
-	PLy_exc_fatal = PyErr_NewException("plpy.Fatal", NULL, NULL);
-	PLy_exc_spi_error = PyErr_NewException("plpy.SPIError", NULL, NULL);
-
-	if (PLy_exc_error == NULL ||
-		PLy_exc_fatal == NULL ||
-		PLy_exc_spi_error == NULL)
-		PLy_elog(ERROR, "could not create the base SPI exceptions");
-
-	Py_INCREF(PLy_exc_error);
-	PyModule_AddObject(plpy, "Error", PLy_exc_error);
-	Py_INCREF(PLy_exc_fatal);
-	PyModule_AddObject(plpy, "Fatal", PLy_exc_fatal);
-	Py_INCREF(PLy_exc_spi_error);
-	PyModule_AddObject(plpy, "SPIError", PLy_exc_spi_error);
+	PLy_exc_error = PLy_create_exception("plpy.Error", NULL, NULL,
+										 "Error", plpy);
+	PLy_exc_fatal = PLy_create_exception("plpy.Fatal", NULL, NULL,
+										 "Fatal", plpy);
+	PLy_exc_spi_error = PLy_create_exception("plpy.SPIError", NULL, NULL,
+											 "SPIError", plpy);
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(int);
 	hash_ctl.entrysize = sizeof(PLyExceptionEntry);
-	PLy_spi_exceptions = hash_create("SPI exceptions", 256,
+	PLy_spi_exceptions = hash_create("PL/Python SPI exceptions", 256,
 									 &hash_ctl, HASH_ELEM | HASH_BLOBS);
 
 	PLy_generate_spi_exceptions(excmod, PLy_exc_spi_error);
+}
+
+/*
+ * Create an exception object and add it to the module
+ */
+static PyObject *
+PLy_create_exception(char *name, PyObject *base, PyObject *dict,
+					 const char *modname, PyObject *mod)
+{
+	PyObject   *exc;
+
+	exc = PyErr_NewException(name, base, dict);
+	if (exc == NULL)
+		PLy_elog(ERROR, "could not create exception \"%s\"", name);
+
+	/*
+	 * PyModule_AddObject does not add a refcount to the object, for some odd
+	 * reason; we must do that.
+	 */
+	Py_INCREF(exc);
+	PyModule_AddObject(mod, modname, exc);
+
+	/*
+	 * The caller will also store a pointer to the exception object in some
+	 * permanent variable, so add another ref to account for that.  This is
+	 * probably excessively paranoid, but let's be sure.
+	 */
+	Py_INCREF(exc);
+	return exc;
 }
 
 /*
@@ -257,12 +276,14 @@ PLy_generate_spi_exceptions(PyObject *mod, PyObject *base)
 
 		PyDict_SetItemString(dict, "sqlstate", sqlstate);
 		Py_DECREF(sqlstate);
-		exc = PyErr_NewException(exception_map[i].name, base, dict);
-		PyModule_AddObject(mod, exception_map[i].classname, exc);
+
+		exc = PLy_create_exception(exception_map[i].name, base, dict,
+								   exception_map[i].classname, mod);
+
 		entry = hash_search(PLy_spi_exceptions, &exception_map[i].sqlstate,
 							HASH_ENTER, &found);
-		entry->exc = exc;
 		Assert(!found);
+		entry->exc = exc;
 	}
 }
 
@@ -272,7 +293,7 @@ PLy_generate_spi_exceptions(PyObject *mod, PyObject *base)
  * don't confuse these with PLy_elog
  */
 static PyObject *PLy_output(volatile int level, PyObject *self,
-										  PyObject *args, PyObject *kw);
+		   PyObject *args, PyObject *kw);
 
 static PyObject *
 PLy_debug(PyObject *self, PyObject *args, PyObject *kw)
@@ -323,7 +344,7 @@ PLy_quote_literal(PyObject *self, PyObject *args)
 	char	   *quoted;
 	PyObject   *ret;
 
-	if (!PyArg_ParseTuple(args, "s", &str))
+	if (!PyArg_ParseTuple(args, "s:quote_literal", &str))
 		return NULL;
 
 	quoted = quote_literal_cstr(str);
@@ -340,7 +361,7 @@ PLy_quote_nullable(PyObject *self, PyObject *args)
 	char	   *quoted;
 	PyObject   *ret;
 
-	if (!PyArg_ParseTuple(args, "z", &str))
+	if (!PyArg_ParseTuple(args, "z:quote_nullable", &str))
 		return NULL;
 
 	if (str == NULL)
@@ -360,7 +381,7 @@ PLy_quote_ident(PyObject *self, PyObject *args)
 	const char *quoted;
 	PyObject   *ret;
 
-	if (!PyArg_ParseTuple(args, "s", &str))
+	if (!PyArg_ParseTuple(args, "s:quote_ident", &str))
 		return NULL;
 
 	quoted = quote_identifier(str);
@@ -375,11 +396,11 @@ object_to_string(PyObject *obj)
 {
 	if (obj)
 	{
-		PyObject *so = PyObject_Str(obj);
+		PyObject   *so = PyObject_Str(obj);
 
 		if (so != NULL)
 		{
-			char *str;
+			char	   *str;
 
 			str = pstrdup(PyString_AsString(so));
 			Py_DECREF(so);
@@ -394,20 +415,21 @@ object_to_string(PyObject *obj)
 static PyObject *
 PLy_output(volatile int level, PyObject *self, PyObject *args, PyObject *kw)
 {
-	int sqlstate = 0;
-	char *volatile sqlstatestr = NULL;
-	char *volatile message = NULL;
-	char *volatile detail = NULL;
-	char *volatile hint = NULL;
-	char *volatile column = NULL;
-	char *volatile constraint = NULL;
-	char *volatile datatype = NULL;
-	char *volatile table = NULL;
-	char *volatile schema = NULL;
+	int			sqlstate = 0;
+	char	   *volatile sqlstatestr = NULL;
+	char	   *volatile message = NULL;
+	char	   *volatile detail = NULL;
+	char	   *volatile hint = NULL;
+	char	   *volatile column_name = NULL;
+	char	   *volatile constraint_name = NULL;
+	char	   *volatile datatype_name = NULL;
+	char	   *volatile table_name = NULL;
+	char	   *volatile schema_name = NULL;
 	volatile MemoryContext oldcontext;
-	PyObject *key, *value;
-	PyObject *volatile so;
-	Py_ssize_t pos = 0;
+	PyObject   *key,
+			   *value;
+	PyObject   *volatile so;
+	Py_ssize_t	pos = 0;
 
 	if (PyTuple_Size(args) == 1)
 	{
@@ -437,13 +459,16 @@ PLy_output(volatile int level, PyObject *self, PyObject *args, PyObject *kw)
 	{
 		while (PyDict_Next(kw, &pos, &key, &value))
 		{
-			char *keyword = PyString_AsString(key);
+			char	   *keyword = PyString_AsString(key);
 
 			if (strcmp(keyword, "message") == 0)
 			{
-				/* the message should not be overwriten */
+				/* the message should not be overwritten */
 				if (PyTuple_Size(args) != 0)
-					PLy_elog(ERROR, "the message is already specified");
+				{
+					PLy_exception_set(PyExc_TypeError, "Argument 'message' given by name and position");
+					return NULL;
+				}
 
 				if (message)
 					pfree(message);
@@ -455,35 +480,45 @@ PLy_output(volatile int level, PyObject *self, PyObject *args, PyObject *kw)
 				hint = object_to_string(value);
 			else if (strcmp(keyword, "sqlstate") == 0)
 				sqlstatestr = object_to_string(value);
-			else if (strcmp(keyword, "schema") == 0)
-				schema = object_to_string(value);
-			else if (strcmp(keyword, "table") == 0)
-				table = object_to_string(value);
-			else if (strcmp(keyword, "column") == 0)
-				column = object_to_string(value);
-			else if (strcmp(keyword, "datatype") == 0)
-				datatype = object_to_string(value);
-			else if (strcmp(keyword, "constraint") == 0)
-				constraint = object_to_string(value);
-		else
-			PLy_elog(ERROR, "'%s' is an invalid keyword argument for this function",
-								keyword);
+			else if (strcmp(keyword, "schema_name") == 0)
+				schema_name = object_to_string(value);
+			else if (strcmp(keyword, "table_name") == 0)
+				table_name = object_to_string(value);
+			else if (strcmp(keyword, "column_name") == 0)
+				column_name = object_to_string(value);
+			else if (strcmp(keyword, "datatype_name") == 0)
+				datatype_name = object_to_string(value);
+			else if (strcmp(keyword, "constraint_name") == 0)
+				constraint_name = object_to_string(value);
+			else
+			{
+				PLy_exception_set(PyExc_TypeError,
+					 "'%s' is an invalid keyword argument for this function",
+								  keyword);
+				return NULL;
+			}
 		}
 	}
 
 	if (sqlstatestr != NULL)
 	{
 		if (strlen(sqlstatestr) != 5)
-			PLy_elog(ERROR, "invalid SQLSTATE code");
+		{
+			PLy_exception_set(PyExc_ValueError, "invalid SQLSTATE code");
+			return NULL;
+		}
 
 		if (strspn(sqlstatestr, "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") != 5)
-			PLy_elog(ERROR, "invalid SQLSTATE code");
+		{
+			PLy_exception_set(PyExc_ValueError, "invalid SQLSTATE code");
+			return NULL;
+		}
 
 		sqlstate = MAKE_SQLSTATE(sqlstatestr[0],
-							  sqlstatestr[1],
-							  sqlstatestr[2],
-							  sqlstatestr[3],
-							  sqlstatestr[4]);
+								 sqlstatestr[1],
+								 sqlstatestr[2],
+								 sqlstatestr[3],
+								 sqlstatestr[4]);
 	}
 
 	oldcontext = CurrentMemoryContext;
@@ -495,36 +530,36 @@ PLy_output(volatile int level, PyObject *self, PyObject *args, PyObject *kw)
 			pg_verifymbstr(detail, strlen(detail), false);
 		if (hint != NULL)
 			pg_verifymbstr(hint, strlen(hint), false);
-		if (schema != NULL)
-			pg_verifymbstr(schema, strlen(schema), false);
-		if (table != NULL)
-			pg_verifymbstr(table, strlen(table), false);
-		if (column != NULL)
-			pg_verifymbstr(column, strlen(column), false);
-		if (datatype != NULL)
-			pg_verifymbstr(datatype, strlen(datatype), false);
-		if (constraint != NULL)
-			pg_verifymbstr(constraint, strlen(constraint), false);
+		if (schema_name != NULL)
+			pg_verifymbstr(schema_name, strlen(schema_name), false);
+		if (table_name != NULL)
+			pg_verifymbstr(table_name, strlen(table_name), false);
+		if (column_name != NULL)
+			pg_verifymbstr(column_name, strlen(column_name), false);
+		if (datatype_name != NULL)
+			pg_verifymbstr(datatype_name, strlen(datatype_name), false);
+		if (constraint_name != NULL)
+			pg_verifymbstr(constraint_name, strlen(constraint_name), false);
 
 		ereport(level,
 				((sqlstate != 0) ? errcode(sqlstate) : 0,
 				 (message != NULL) ? errmsg_internal("%s", message) : 0,
 				 (detail != NULL) ? errdetail_internal("%s", detail) : 0,
 				 (hint != NULL) ? errhint("%s", hint) : 0,
-				 (column != NULL) ?
-				 err_generic_string(PG_DIAG_COLUMN_NAME, column) : 0,
-				 (constraint != NULL) ?
-				 err_generic_string(PG_DIAG_CONSTRAINT_NAME, constraint) : 0,
-				 (datatype != NULL) ?
-				 err_generic_string(PG_DIAG_DATATYPE_NAME, datatype) : 0,
-				 (table != NULL) ?
-				 err_generic_string(PG_DIAG_TABLE_NAME, table) : 0,
-				 (schema != NULL) ?
-				 err_generic_string(PG_DIAG_SCHEMA_NAME, schema) : 0));
+				 (column_name != NULL) ?
+				 err_generic_string(PG_DIAG_COLUMN_NAME, column_name) : 0,
+				 (constraint_name != NULL) ?
+			err_generic_string(PG_DIAG_CONSTRAINT_NAME, constraint_name) : 0,
+				 (datatype_name != NULL) ?
+				 err_generic_string(PG_DIAG_DATATYPE_NAME, datatype_name) : 0,
+				 (table_name != NULL) ?
+				 err_generic_string(PG_DIAG_TABLE_NAME, table_name) : 0,
+				 (schema_name != NULL) ?
+				 err_generic_string(PG_DIAG_SCHEMA_NAME, schema_name) : 0));
 	}
 	PG_CATCH();
 	{
-		ErrorData	*edata;
+		ErrorData  *edata;
 
 		MemoryContextSwitchTo(oldcontext);
 		edata = CopyErrorData();

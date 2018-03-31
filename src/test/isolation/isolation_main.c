@@ -2,13 +2,15 @@
  *
  * isolation_main --- pg_regress test launcher for isolation tests
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/test/isolation/isolation_main.c
  *
  *-------------------------------------------------------------------------
  */
+
+#include "postgres_fe.h"
 
 #include "pg_regress.h"
 
@@ -118,7 +120,7 @@ isolation_init(int argc, char **argv)
 	}
 
 	/* set default regression database name */
-	add_stringlist_item(&dblist, "isolationtest");
+	add_stringlist_item(&dblist, "isolation_regression");
 }
 
 int

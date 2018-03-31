@@ -4,7 +4,7 @@
  *	   Frontend exposed definitions for hot standby mode.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/standbydefs.h
@@ -24,9 +24,9 @@ extern void standby_redo(XLogReaderState *record);
 extern void standby_desc(StringInfo buf, XLogReaderState *record);
 extern const char *standby_identify(uint8 info);
 extern void standby_desc_invalidations(StringInfo buf,
-									   int nmsgs, SharedInvalidationMessage *msgs,
-									   Oid dbId, Oid tsId,
-									   bool relcacheInitFileInval);
+						   int nmsgs, SharedInvalidationMessage *msgs,
+						   Oid dbId, Oid tsId,
+						   bool relcacheInitFileInval);
 
 /*
  * XLOG message types
