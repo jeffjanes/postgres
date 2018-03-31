@@ -51,7 +51,7 @@ my $SIZE=10_000;
 
 ## centralize connections to one place, in case we want to point to a remote server or use a password
 sub dbconnect {
-  my $dbh = DBI->connect("dbi:Pg:", "", "", {AutoCommit => 1, RaiseError=>1, PrintError=>0});
+  my $dbh = DBI->connect("dbi:Pg:host=localhost", "", "", {AutoCommit => 1, RaiseError=>1, PrintError=>0});
   return $dbh;
 };
 
@@ -141,7 +141,7 @@ if (@child_pipe) {
          $dat = $dbh->selectall_arrayref("select index, count from foo");
          warn "sum is ", $dbh->selectrow_array("select sum(count) from foo"), "\n";
          warn "count is ", $dbh->selectrow_array("select count(*) from foo"), "\n";
-         # try to force it to walk the index to get to each row, so corrupt indexes are detected
+         # Try to force it to walk the index to get to each row, so corrupt indexes are detected
          # (Without the "where index is not null", it won't use an index scan no matter what)
          $dat2 = $dbh->selectall_arrayref("set enable_seqscan=off; select index, count from foo where index is not null");
        };

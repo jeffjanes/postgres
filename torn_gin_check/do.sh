@@ -1,10 +1,13 @@
 echo $HOSTNAME
 
 TMPDATA=/tmp/data2
-INST=/home/jjanes/pgsql/torn_bisect/
+INST=/home/jjanes/pgsql/origin/
 JJXID='--JJ_xid=4'
 JJTORN='--JJ_torn_page=1000'
 JJTORNOFF='--JJ_torn_page=0'
+JJSCALE='80'
+
+export PGPORT=9876
 
 on_exit() {
   echo "Cleaning up"
@@ -94,12 +97,13 @@ $INST/bin/psql -c 'create extension pgstattuple'
 $INST/bin/psql -c 'create extension pg_stat_statements'
 $INST/bin/psql -c 'create extension pg_buffercache'
 $INST/bin/psql -c "create extension pg_freespacemap"
+$INST/bin/psql -c "create extension pg_visibility"
 $INST/bin/psql -c "create extension btree_gist"
 $INST/bin/psql -c "create extension btree_gin"
 
 ##  run the initial load now, before JJ_torn_page is turned on,
 ##  or else we crash before even getting the table initialized due to WAL of the GIN or GIST index build.
-perl count.pl 8 0|| on_error; 
+perl count.pl $JJSCALE 0|| on_error; 
 
 ### Occasionally useful monitoring queries
 
@@ -113,7 +117,7 @@ for g in `seq 1 5000` ; do
   for f in `seq 1 100`; do 
     #$INST/bin/psql -c 'SELECT datname, datfrozenxid, age(datfrozenxid) FROM pg_database;'; 
     ## on_error is needed to preserve database for inspection.  Otherwise autovac will destroy evidence.
-    perl count.pl 8 || on_error; 
+    perl count.pl $JJSCALE || on_error; 
   done;
   echo JJ ending loop $g;
   ## give autovac a chance to run to completion
